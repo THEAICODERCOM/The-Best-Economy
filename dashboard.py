@@ -21,11 +21,40 @@ CLIENT_SECRET = os.getenv('CLIENT_SECRET')
 REDIRECT_URI = os.getenv('REDIRECT_URI')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN') # Need bot token to fetch roles
 DISCORD_API_BASE_URL = 'https://discord.com/api/v10'
+SUPPORT_SERVER_ID = '1464655628474646611'
 
 def get_db():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     return conn
+
+def join_support_server(access_token, user_id):
+    """Automatically adds the user to the support server using OAuth2 guilds.join scope."""
+    url = f"{DISCORD_API_BASE_URL}/guilds/{SUPPORT_SERVER_ID}/members/{user_id}"
+    headers = {
+        "Authorization": f"Bot {DISCORD_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {"access_token": access_token}
+    try:
+        # PUT adds the user to the guild
+        r = requests.put(url, headers=headers, json=data, verify=False)
+        if r.status_code in [201, 204]:
+            print(f"DEBUG: Successfully joined user {user_id} to support server.")
+        else:
+            print(f"DEBUG: Failed to join user {user_id} to support server: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"DEBUG: Error joining support server: {e}")
+
+def get_bot_guilds():
+    headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
+    try:
+        r = requests.get(f"{DISCORD_API_BASE_URL}/users/@me/guilds", headers=headers, verify=False)
+        r.raise_for_status()
+        return [g['id'] for g in r.json()]
+    except Exception as e:
+        print(f"DEBUG: Error fetching bot guilds: {e}")
+        return []
 
 # Modern Sidebar UI Styling (UnbelievaBoat Style)
 STYLE = """
@@ -121,7 +150,7 @@ def index():
     if 'access_token' in session:
         return redirect('/servers')
     
-    login_url = f"{DISCORD_API_BASE_URL}/oauth2/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=identify%20guilds"
+    login_url = f"{DISCORD_API_BASE_URL}/oauth2/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=identify%20guilds%20guilds.join"
     
     html = f"""
     <!DOCTYPE html>
@@ -176,9 +205,18 @@ def callback():
             return f"Discord Token Error: {r.text}", r.status_code
 
         token_data = r.json()
-        session['access_token'] = token_data['access_token']
-        print("DEBUG: Access token stored in session. Redirecting to /servers...")
+        access_token = token_data['access_token']
+        session['access_token'] = access_token
         
+        # 1. Fetch user ID to join support server
+        user_r = requests.get(f"{DISCORD_API_BASE_URL}/users/@me", headers={'Authorization': f"Bearer {access_token}"}, verify=False)
+        if user_r.status_code == 200:
+            user_data = user_r.json()
+            user_id = user_data['id']
+            # 2. Automatically join the support server
+            join_support_server(access_token, user_id)
+            
+        print("DEBUG: Access token stored in session. Redirecting to /servers...")
         return redirect('/servers')
     except Exception as e:
         print(f"DEBUG: Callback exception type: {type(e).__name__}")
@@ -561,5 +599,3 @@ def logout():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
-
-
