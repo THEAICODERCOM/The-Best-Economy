@@ -352,7 +352,7 @@ async def help_command(ctx: commands.Context):
         title="🏰 Empire Nexus | Grand Library", 
         description=(
             f"Welcome to the Nexus. Use `{prefix}command` or `/command` to interact.\n"
-            "Configure your kingdom at [**Nexus Dashboard**](http://localhost:5001)"
+            "Configure your kingdom at [**Nexus Dashboard**](https://thegoatchessbot.alwaysdata.net/)"
         ), 
         color=0x00d2ff
     )
@@ -1030,7 +1030,7 @@ async def setup_cmd(ctx: commands.Context):
         title="⚙️ Empire Nexus Setup",
         description=(
             "Configure your kingdom, set up the role shop, and create custom assets via the web dashboard.\n\n"
-            "🔗 [**Nexus Dashboard**](http://localhost:5001)\n\n"
+            "🔗 [**Nexus Dashboard**](https://thegoatchessbot.alwaysdata.net/)\n\n"
             "*Note: Only server administrators can deploy changes.*"
         ),
         color=0x00d2ff
