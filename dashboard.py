@@ -119,7 +119,7 @@ def vite_client():
 def index():
     print(f"DEBUG: Client ID: {CLIENT_ID}")
     if 'access_token' in session:
-        return redirect(url_for('servers'))
+        return redirect('/servers')
     
     login_url = f"{DISCORD_API_BASE_URL}/oauth2/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=identify%20guilds"
     
@@ -179,7 +179,7 @@ def callback():
         session['access_token'] = token_data['access_token']
         print("DEBUG: Access token stored in session. Redirecting to /servers...")
         
-        return redirect(url_for('servers'))
+        return redirect('/servers')
     except Exception as e:
         print(f"DEBUG: Callback exception type: {type(e).__name__}")
         print(f"DEBUG: Callback exception details: {str(e)}")
@@ -188,7 +188,7 @@ def callback():
 @app.route('/servers')
 def servers():
     if 'access_token' not in session: 
-        return redirect(url_for('index'))
+        return redirect('/')
     
     try:
         headers = {'Authorization': f"Bearer {session['access_token']}"}
@@ -285,7 +285,7 @@ def servers():
 
 @app.route('/dashboard/<int:guild_id>')
 def dashboard(guild_id):
-    if 'access_token' not in session: return redirect(url_for('index'))
+    if 'access_token' not in session: return redirect('/')
     
     conn = get_db()
     config = conn.execute('SELECT * FROM guild_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
@@ -546,15 +546,16 @@ def save(guild_id):
                  (int(guild_id), prefix, role_shop, custom_assets))
     conn.commit()
     conn.close()
-    return redirect(url_for('dashboard', guild_id=guild_id, success=1))
+    return redirect(f'/dashboard/{guild_id}?success=1')
 
 @app.route('/logout')
 def logout():
     session.clear()
-    return redirect(url_for('index'))
+    return redirect('/')
 
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
