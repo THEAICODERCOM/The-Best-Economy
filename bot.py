@@ -192,12 +192,16 @@ async def get_user_data(user_id, guild_id):
 
 async def get_guild_assets(guild_id):
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT custom_assets_json FROM guild_config WHERE guild_id = ?', (guild_id,)) as cursor:
+        async with db.execute('SELECT custom_assets_json FROM guild_config WHERE guild_id = ?', (int(guild_id),)) as cursor:
             row = await cursor.fetchone()
             if row and row[0]:
-                custom = json.loads(row[0])
-                # Merge default and custom
-                return {**DEFAULT_ASSETS, **custom}
+                try:
+                    custom = json.loads(row[0])
+                    # Merge default and custom
+                    # Custom assets (which include defaults if edited in dashboard) will overwrite
+                    return {**DEFAULT_ASSETS, **custom}
+                except json.JSONDecodeError:
+                    return DEFAULT_ASSETS
     return DEFAULT_ASSETS
 
 # --- Logic Functions (Shared by Prefix & Slash) ---
@@ -1038,7 +1042,10 @@ async def setup_cmd(ctx: commands.Context):
 @commands.has_permissions(administrator=True)
 async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR REPLACE INTO guild_config (guild_id, prefix) VALUES (?, ?)', (ctx.guild.id, new_prefix))
+        await db.execute('''
+            INSERT INTO guild_config (guild_id, prefix) VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET prefix = excluded.prefix
+        ''', (ctx.guild.id, new_prefix))
         await db.commit()
     await ctx.send(f"✅ Prefix successfully updated to `{new_prefix}`")
 
