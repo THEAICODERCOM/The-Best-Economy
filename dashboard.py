@@ -261,9 +261,9 @@ def servers():
             <div class="modal-content">
                 <h2 class="card-title" style="color: #ff4757;">🚪 Confirm Logout</h2>
                 <p style="color: var(--text-muted); margin-bottom: 25px;">Are you sure you want to log out? You will need to re-authenticate with Discord to access your kingdoms again.</p>
-                <div class="modal-actions">
-                    <a href="/logout" class="btn" style="flex: 1; background: #ff4757; color: white; text-align: center;">Yes, Logout</a>
-                    <button onclick="closeModal('logoutModal')" class="btn" style="flex: 1; background: #25252b; color: #fff;">Cancel</button>
+                <div class="modal-actions" style="display: flex; gap: 15px;">
+                    <a href="/logout" id="confirmLogout" class="btn" style="flex: 1; background: #ff4757; color: white; text-align: center; text-decoration: none; display: flex; align-items: center; justify-content: center;">Yes, Logout</a>
+                    <button type="button" onclick="closeModal('logoutModal')" class="btn" style="flex: 1; background: #25252b; color: #fff; cursor: pointer;">Cancel</button>
                 </div>
             </div>
         </div>
@@ -274,6 +274,7 @@ def servers():
             // Override default logout links to show modal
             document.querySelectorAll('a[href="/logout"]').forEach(el => {{
                 el.addEventListener('click', function(e) {{
+                    if (this.id === 'confirmLogout') return; // Don't intercept the actual logout button
                     e.preventDefault();
                     openModal('logoutModal');
                 }});
@@ -282,12 +283,12 @@ def servers():
     </html>
     """
 
-@app.route('/dashboard/<guild_id>')
+@app.route('/dashboard/<int:guild_id>')
 def dashboard(guild_id):
     if 'access_token' not in session: return redirect(url_for('index'))
     
     conn = get_db()
-    config = conn.execute('SELECT * FROM guild_config WHERE guild_id = ?', (guild_id,)).fetchone()
+    config = conn.execute('SELECT * FROM guild_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
     conn.close()
     
     prefix = config['prefix'] if config else '!'
@@ -324,7 +325,11 @@ def dashboard(guild_id):
         
     # Pre-render Assets list
     asset_items_html = ""
-    for a_id, data in custom_assets.items():
+    
+    from bot import DEFAULT_ASSETS
+    display_assets = {**DEFAULT_ASSETS, **custom_assets}
+
+    for a_id, data in display_assets.items():
         asset_items_html += f"""
         <div class="list-item">
             <div class="list-item-info">
@@ -367,7 +372,7 @@ def dashboard(guild_id):
                     <h1 class="page-title">Kingdom Configuration</h1>
                     <p class="page-desc">Manage your server's prefix, shop items, and custom assets.</p>
 
-                    <form id="mainForm" action="/save/{guild_id}" method="post">
+                    <form id="mainForm" action="/save/{guild_id}" method="post" onsubmit="updateUI(false)">
                         <!-- Prefix Card -->
                         <div class="card">
                             <h2 class="card-title">General Settings</h2>
@@ -394,7 +399,7 @@ def dashboard(guild_id):
                                 <button type="button" onclick="openModal('assetModal')" class="btn" style="padding: 8px 16px; font-size: 12px;">+ Add Asset</button>
                             </div>
                             <div id="assetList">{asset_items_html}</div>
-                            <input type="hidden" name="custom_assets" id="assetsInput" value='{json.dumps(custom_assets)}'>
+                            <input type="hidden" name="custom_assets" id="assetsInput" value='{json.dumps(display_assets)}'>
                         </div>
 
                         <button type="submit" class="btn" style="width: 100%; padding: 20px; font-size: 16px;">DEPLOY TO KINGDOM</button>
@@ -452,15 +457,20 @@ def dashboard(guild_id):
                     <h2 class="card-title" style="color: #ff4757;">🚪 Confirm Logout</h2>
                     <p style="color: var(--text-muted); margin-bottom: 25px;">Are you sure you want to log out? You will need to re-authenticate with Discord to access your kingdoms again.</p>
                     <div class="modal-actions">
-                        <a href="/logout" class="btn" style="flex: 1; background: #ff4757; color: white; text-align: center;">Yes, Logout</a>
+                        <a href="/logout" class="btn" id="confirmLogout" style="flex: 1; background: #ff4757; color: white; text-align: center;">Yes, Logout</a>
                         <button onclick="closeModal('logoutModal')" class="btn" style="flex: 1; background: #25252b; color: #fff;">Cancel</button>
                     </div>
                 </div>
             </div>
 
             <script>
+                const DEFAULT_ASSETS = {json.dumps(DEFAULT_ASSETS)};
                 let roleShop = {json.dumps(role_shop)};
                 let customAssets = {json.dumps(custom_assets)};
+                
+                // Initialize customAssets with defaults if it's empty to show them on first load
+                // but only if the user hasn't saved anything yet (this is for visual consistency)
+                let combinedAssets = {{...DEFAULT_ASSETS, ...customAssets}};
 
                 function openModal(id) {{ document.getElementById(id).style.display = 'flex'; }}
                 function closeModal(id) {{ document.getElementById(id).style.display = 'none'; }}
@@ -468,6 +478,7 @@ def dashboard(guild_id):
                 // Override default logout links to show modal
                 document.querySelectorAll('a[href="/logout"]').forEach(el => {{
                     el.addEventListener('click', function(e) {{
+                        if (this.id === 'confirmLogout') return; // Don't intercept the actual logout button
                         e.preventDefault();
                         openModal('logoutModal');
                     }});
@@ -484,20 +495,24 @@ def dashboard(guild_id):
                     const name = document.getElementById('modalAssetName').value;
                     const price = parseInt(document.getElementById('modalAssetPrice').value);
                     const income = parseInt(document.getElementById('modalAssetIncome').value);
-                    const id = name.toLowerCase().replace(/\s+/g, '_');
-                    customAssets[id] = {{ name, price, income }};
+                    const id = name.toLowerCase().replace(/\\s+/g, '_');
+                    combinedAssets[id] = {{ name, price, income }};
                     updateUI(true);
                 }}
 
                 function deleteItem(type, id) {{
                     if(type === 'role') delete roleShop[id];
-                    else delete customAssets[id];
+                    else delete combinedAssets[id];
                     updateUI(true);
                 }}
 
                 function updateUI(submit = false) {{
                     document.getElementById('roleShopInput').value = JSON.stringify(roleShop);
-                    document.getElementById('assetsInput').value = JSON.stringify(customAssets);
+                    
+                    // We only want to save assets that are DIFFERENT from defaults or new
+                    // But for simplicity, we save the entire combined list to the custom field
+                    // so that deletions of defaults actually persist.
+                    document.getElementById('assetsInput').value = JSON.stringify(combinedAssets);
                     if(submit) document.getElementById('mainForm').submit();
                 }}
 
@@ -513,7 +528,7 @@ def dashboard(guild_id):
     </html>
     """
 
-@app.route('/save/<guild_id>', methods=['POST'])
+@app.route('/save/<int:guild_id>', methods=['POST'])
 def save(guild_id):
     prefix = request.form.get('prefix')
     role_shop = request.form.get('role_shop')
@@ -528,7 +543,7 @@ def save(guild_id):
 
     conn = get_db()
     conn.execute('INSERT OR REPLACE INTO guild_config (guild_id, prefix, role_shop_json, custom_assets_json) VALUES (?, ?, ?, ?)', 
-                 (guild_id, prefix, role_shop, custom_assets))
+                 (int(guild_id), prefix, role_shop, custom_assets))
     conn.commit()
     conn.close()
     return redirect(url_for('dashboard', guild_id=guild_id, success=1))
