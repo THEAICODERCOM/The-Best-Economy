@@ -554,5 +554,6 @@ def logout():
     return redirect(url_for('index'))
 
 if __name__ == '__main__':
-    # Force the app to run on port 5001 because macOS uses 5000 for AirPlay
-    app.run(host='127.0.0.1', port=5001)
+    # Bind to 0.0.0.0 so it's accessible externally on your remote server
+    app.run(host='0.0.0.0', port=5001)
+
