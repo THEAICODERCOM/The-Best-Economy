@@ -198,14 +198,21 @@ async def get_user_data(user_id, guild_id):
     await ensure_user(user_id, guild_id)
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
-        # Prefer last_vote from global_votes table, fallback to user-specific last_vote
+        # Get last_vote from global_votes table (preferred), fallback to user-specific last_vote
+        # Use CASE to properly compare and select the maximum timestamp
         async with db.execute('''
-            SELECT u.*, MAX(u.last_vote, COALESCE(gv.last_vote, 0)) as last_vote
+            SELECT u.*, 
+                   CASE 
+                       WHEN COALESCE(gv.last_vote, 0) > COALESCE(u.last_vote, 0) 
+                       THEN gv.last_vote 
+                       ELSE COALESCE(u.last_vote, 0) 
+                   END as last_vote
             FROM users u
             LEFT JOIN global_votes gv ON u.user_id = gv.user_id
             WHERE u.user_id = ? AND u.guild_id = ?
         ''', (user_id, guild_id)) as cursor:
-            return await cursor.fetchone()
+            row = await cursor.fetchone()
+            return row
 
 async def get_guild_assets(guild_id):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -912,7 +919,11 @@ async def vote(ctx: commands.Context):
     vote_url = f"https://top.gg/bot/{bot.user.id}/vote"
     data = await get_user_data(ctx.author.id, ctx.guild.id)
     now = int(time.time())
-    time_since_vote = now - data['last_vote']
+    last_vote_time = data['last_vote'] if data['last_vote'] else 0
+    time_since_vote = now - last_vote_time
+    
+    # Debug logging
+    print(f"DEBUG: /vote command - User: {ctx.author.id}, Last Vote: {last_vote_time}, Now: {now}, Time Since: {time_since_vote}s")
     
     embed = discord.Embed(title="🗳️ Vote for Empire Nexus", color=0x00d2ff)
     embed.description = f"Support the bot and unlock exclusive rewards for **12 hours**!\n\n" \
@@ -936,8 +947,12 @@ async def autodeposit(ctx: commands.Context):
     await ctx.defer()
     data = await get_user_data(ctx.author.id, ctx.guild.id)
     now = int(time.time())
-    time_since_vote = now - data['last_vote']
+    last_vote_time = data['last_vote'] if data['last_vote'] else 0
+    time_since_vote = now - last_vote_time
     is_voter = time_since_vote < 43200
+    
+    # Debug logging
+    print(f"DEBUG: /autodeposit command - User: {ctx.author.id}, Last Vote: {last_vote_time}, Now: {now}, Time Since: {time_since_vote}s, Is Voter: {is_voter}")
     
     if not is_voter:
         vote_url = f"https://top.gg/bot/{bot.user.id}/vote"
@@ -1187,3 +1202,4 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
