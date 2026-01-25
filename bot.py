@@ -899,6 +899,7 @@ async def withdraw(ctx: commands.Context, amount: str):
 
 @bot.hybrid_command(name="vote", description="Vote for the bot on Top.gg to get rewards!")
 async def vote(ctx: commands.Context):
+    await ctx.defer()
     vote_url = f"https://top.gg/bot/{bot.user.id}/vote"
     data = await get_user_data(ctx.author.id, ctx.guild.id)
     now = int(time.time())
@@ -923,6 +924,7 @@ async def vote(ctx: commands.Context):
 
 @bot.hybrid_command(name="autodeposit", description="Toggle auto-deposit of passive income (requires active vote)")
 async def autodeposit(ctx: commands.Context):
+    await ctx.defer()
     data = await get_user_data(ctx.author.id, ctx.guild.id)
     now = int(time.time())
     time_since_vote = now - data['last_vote']
@@ -1176,4 +1178,3 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
-
