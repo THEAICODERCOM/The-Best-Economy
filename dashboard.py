@@ -596,6 +596,33 @@ def logout():
     session.clear()
     return redirect('/')
 
+@app.route('/topgg/webhook', methods=['POST'])
+def topgg_webhook():
+    # Verify the authorization header from Top.gg
+    auth_header = request.headers.get('Authorization')
+    # The user should set TOPGG_WEBHOOK_SECRET in their .env
+    webhook_secret = os.getenv('TOPGG_WEBHOOK_SECRET', 'nexus_default_secret')
+    
+    if auth_header != webhook_secret:
+        return "Unauthorized", 401
+    
+    data = request.json
+    if not data or data.get('type') != 'upvote':
+        return "Invalid data", 400
+    
+    user_id = int(data.get('user'))
+    now = int(time.time())
+    
+    # Update all rows for this user across all guilds
+    conn = get_db()
+    conn.execute('UPDATE users SET last_vote = ? WHERE user_id = ?', (now, user_id))
+    conn.commit()
+    conn.close()
+    
+    print(f"DEBUG: Received Top.gg vote for user {user_id}")
+    return "OK", 200
+
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
