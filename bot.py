@@ -125,24 +125,32 @@ async def init_db():
             bank INTEGER DEFAULT 0, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1,
             prestige INTEGER DEFAULT 0, last_work INTEGER DEFAULT 0,
             last_crime INTEGER DEFAULT 0, last_rob INTEGER DEFAULT 0,
+            last_vote INTEGER DEFAULT 0, auto_deposit INTEGER DEFAULT 0,
             PRIMARY KEY (user_id, guild_id)
         )''')
+        # Ensure new columns exist for existing databases
+        try:
+            await db.execute('ALTER TABLE users ADD COLUMN last_vote INTEGER DEFAULT 0')
+            await db.execute('ALTER TABLE users ADD COLUMN auto_deposit INTEGER DEFAULT 0')
+        except:
+            pass # Already exists
+            
         await db.execute('''CREATE TABLE IF NOT EXISTS user_assets (
             user_id INTEGER, guild_id INTEGER, asset_id TEXT, count INTEGER DEFAULT 0,
             PRIMARY KEY (user_id, guild_id, asset_id)
         )''')
         await db.execute('''CREATE TABLE IF NOT EXISTS guild_config (
-            guild_id INTEGER PRIMARY KEY, prefix TEXT DEFAULT '!',
+            guild_id INTEGER PRIMARY KEY, prefix TEXT DEFAULT '.',
             role_shop_json TEXT DEFAULT '{}', custom_assets_json TEXT DEFAULT '{}'
         )''')
         await db.commit()
 
 async def get_prefix(bot, message):
-    if not message.guild: return '!'
+    if not message.guild: return '.'
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute('SELECT prefix FROM guild_config WHERE guild_id = ?', (message.guild.id,)) as cursor:
             row = await cursor.fetchone()
-            return row[0] if row else '!'
+            return row[0] if row else '.'
 
 # Bot setup
 intents = discord.Intents.default()
@@ -226,47 +234,53 @@ async def work_logic(user_id, guild_id):
 @tasks.loop(minutes=1)
 async def passive_income_task():
     async with aiosqlite.connect(DB_FILE) as db:
-        # Optimized: Calculate total income per user-guild in one pass and update in bulk
+        # Fetch all assets and user data in one go to handle auto-deposit and income
         async with db.execute('''
-            SELECT ua.user_id, ua.guild_id, SUM(ua.count * CAST(json_extract(gc.custom_assets_json, '$.' || ua.asset_id || '.income') AS INTEGER))
+            SELECT ua.user_id, ua.guild_id, ua.asset_id, ua.count, u.auto_deposit, u.last_vote
             FROM user_assets ua
-            JOIN guild_config gc ON ua.guild_id = gc.guild_id
+            JOIN users u ON ua.user_id = u.user_id AND ua.guild_id = u.guild_id
             WHERE ua.count > 0
-            GROUP BY ua.user_id, ua.guild_id
         ''') as cursor:
-            # Note: This handles custom assets. We also need to account for DEFAULT_ASSETS
-            # Let's use a slightly more robust python-side calculation to ensure DEFAULT_ASSETS are included
-            pass
-
-    # Re-implementing with a more efficient Python mapping to handle both default and custom assets correctly
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT user_id, guild_id, asset_id, count FROM user_assets WHERE count > 0') as cursor:
             rows = await cursor.fetchall()
         
         if not rows: return
 
+        now = int(time.time())
         # Group by guild to fetch configs once
         guild_groups = {}
-        for uid, gid, aid, count in rows:
+        for uid, gid, aid, count, auto_dep, last_vote in rows:
             if gid not in guild_groups: guild_groups[gid] = []
-            guild_groups[gid].append((uid, aid, count))
+            guild_groups[gid].append((uid, aid, count, auto_dep, last_vote))
 
-        updates = [] # List of (income, uid, gid)
+        updates_balance = [] # List of (income, uid, gid)
+        updates_bank = []    # List of (income, uid, gid)
+
         for gid, members in guild_groups.items():
             assets_config = await get_guild_assets(gid)
-            user_income = {} # uid -> total_income
-            for uid, aid, count in members:
+            user_data = {} # uid -> {'income': 0, 'auto_dep': 0, 'last_vote': 0}
+            
+            for uid, aid, count, auto_dep, last_vote in members:
                 if aid in assets_config:
                     income = assets_config[aid]['income'] * count
-                    user_income[uid] = user_income.get(uid, 0) + income
+                    if uid not in user_data:
+                        user_data[uid] = {'income': 0, 'auto_dep': auto_dep, 'last_vote': last_vote}
+                    user_data[uid]['income'] += income
             
-            for uid, income in user_income.items():
-                if income > 0:
-                    updates.append((income, uid, gid))
+            for uid, data in user_data.items():
+                if data['income'] > 0:
+                    # Check if auto-deposit is active (voted in last 12 hours)
+                    is_voter = (now - data['last_vote']) < 43200 # 12 hours
+                    if data['auto_dep'] and is_voter:
+                        updates_bank.append((data['income'], uid, gid))
+                    else:
+                        updates_balance.append((data['income'], uid, gid))
 
-        if updates:
-            await db.executemany('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', updates)
-            await db.commit()
+        if updates_balance:
+            await db.executemany('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', updates_balance)
+        if updates_bank:
+            await db.executemany('UPDATE users SET bank = bank + ? WHERE user_id = ? AND guild_id = ?', updates_bank)
+        
+        await db.commit()
 
 @tasks.loop(hours=1)
 async def interest_task():
@@ -280,6 +294,34 @@ async def interest_task():
                 if interest > 0:
                     await db.execute('UPDATE users SET bank = bank + ? WHERE user_id = ? AND guild_id = ?', (interest, uid, gid))
         await db.commit()
+
+@tasks.loop(minutes=5)
+async def vote_reminder_task():
+    """Check for users whose vote expired in the last 5 minutes and notify them."""
+    now = int(time.time())
+    twelve_hours_ago = now - 43200
+    
+    async with aiosqlite.connect(DB_FILE) as db:
+        # Find users who voted exactly 12h (+/- 5 mins) ago
+        async with db.execute('''
+            SELECT DISTINCT user_id FROM users 
+            WHERE last_vote > ? AND last_vote <= ?
+        ''', (twelve_hours_ago - 300, twelve_hours_ago)) as cursor:
+            rows = await cursor.fetchall()
+            
+    for row in rows:
+        user_id = row[0]
+        try:
+            user = await bot.fetch_user(user_id)
+            if user:
+                vote_url = f"https://top.gg/bot/{bot.user.id}/vote"
+                embed = discord.Embed(title="⌛ Vote Expired!", color=0xffa500)
+                embed.description = f"Your 12-hour vote rewards for **Empire Nexus** have expired!\n\n" \
+                                    f"Vote again now to keep your **Auto-Deposit** active and support the bot!\n\n" \
+                                    f"[**Click here to revote on Top.gg**]({vote_url})"
+                await user.send(embed=embed)
+        except:
+            pass # User might have DMs closed
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -304,6 +346,7 @@ async def on_ready():
     await init_db()
     interest_task.start()
     passive_income_task.start()
+    vote_reminder_task.start()
     
     # Manually register all commands to the tree if they aren't appearing
     for command in bot.commands:
@@ -361,11 +404,20 @@ async def help_command(ctx: commands.Context):
     embed.add_field(name="💰 Economy & Growth", value=(
         f"**`{prefix}balance`** (bal) • Check your vault\n"
         f"**`{prefix}deposit`** (dep) • Safe storage\n"
-        f"**`{prefix}withdraw`** (with) • Access funds\n"
+        f"**`{prefix}withdraw`** • Access funds\n"
         f"**`{prefix}work`** • Supervise mines\n"
         f"**`{prefix}crime`** • High stakes heist\n"
         f"**`{prefix}leaderboard`** (lb) • Global ranks\n"
         f"**`{prefix}rank`** • Check level & XP"
+    ), inline=True)
+
+    embed.add_field(name="🚀 Rewards & Assets", value=(
+        f"**`{prefix}vote`** • Get Top.gg rewards\n"
+        f"**`{prefix}autodeposit`** • Auto-save income\n"
+        f"**`{prefix}shop`** • Buy income assets\n"
+        f"**`{prefix}inventory`** (inv) • Your assets\n"
+        f"**`{prefix}buyrole`** • Purchase server roles\n"
+        f"**`{prefix}prestige`** • Ascend for bonus"
     ), inline=True)
     
     embed.add_field(name="🎰 Royal Casino", value=(
@@ -805,22 +857,65 @@ async def deposit(ctx: commands.Context, amount: str):
         await db.commit()
     await ctx.send(f"🏦 Deposited **{amt:,} coins**.")
 
-@bot.hybrid_command(name="withdraw", aliases=["with"], description="Withdraw coins from the bank")
+@bot.hybrid_command(name="withdraw", description="Withdraw coins from your bank")
 async def withdraw(ctx: commands.Context, amount: str):
-    user = await get_user_data(ctx.author.id, ctx.guild.id)
+    data = await get_user_data(ctx.author.id, ctx.guild.id)
     if amount.lower() == 'all':
-        amt = user['bank']
+        amt = data['bank']
     else:
         try: amt = int(amount)
-        except: return await ctx.send("Enter a valid number or 'all'.")
+        except: return await ctx.send("Invalid amount.")
     
     if amt <= 0: return await ctx.send("Amount must be positive.")
-    if user['bank'] < amt: return await ctx.send("You don't have enough in the bank!")
+    if amt > data['bank']: return await ctx.send("You don't have that much in your bank!")
     
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = balance + ?, bank = bank - ? WHERE user_id = ? AND guild_id = ?', (amt, amt, ctx.author.id, ctx.guild.id))
+        await db.execute('UPDATE users SET balance = balance + ?, bank = bank - ? WHERE user_id = ? AND guild_id = ?', 
+                        (amt, amt, ctx.author.id, ctx.guild.id))
         await db.commit()
-    await ctx.send(f"🏧 Withdrew **{amt:,} coins**.")
+    await ctx.send(f"✅ Withdrew **{amt:,} coins**.")
+
+@bot.hybrid_command(name="vote", description="Vote for the bot on Top.gg to get rewards!")
+async def vote(ctx: commands.Context):
+    vote_url = f"https://top.gg/bot/{bot.user.id}/vote"
+    data = await get_user_data(ctx.author.id, ctx.guild.id)
+    now = int(time.time())
+    time_since_vote = now - data['last_vote']
+    
+    embed = discord.Embed(title="🗳️ Vote for Empire Nexus", color=0x00d2ff)
+    embed.description = f"Support the bot and unlock exclusive rewards for **12 hours**!\n\n" \
+                        f"🎁 **Rewards:**\n" \
+                        f"• 🏦 **Auto-Deposit:** Passive income goes straight to your bank!\n" \
+                        f"• 💰 **Bonus Coins:** (Coming Soon)\n\n" \
+                        f"[**Click here to vote on Top.gg**]({vote_url})"
+    
+    if time_since_vote < 43200:
+        remaining = 43200 - time_since_vote
+        hours, remainder = divmod(remaining, 3600)
+        minutes, _ = divmod(remainder, 60)
+        embed.add_field(name="✅ Status", value=f"You have already voted! Rewards active for **{hours}h {minutes}m**.")
+    else:
+        embed.add_field(name="❌ Status", value="You haven't voted in the last 12 hours.")
+        
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="autodeposit", description="Toggle auto-deposit of passive income (requires active vote)")
+async def autodeposit(ctx: commands.Context):
+    data = await get_user_data(ctx.author.id, ctx.guild.id)
+    now = int(time.time())
+    is_voter = (now - data['last_vote']) < 43200
+    
+    if not is_voter:
+        vote_url = f"https://top.gg/bot/{bot.user.id}/vote"
+        return await ctx.send(f"❌ You need an active vote to use this! [**Vote here**]({vote_url}) to unlock auto-deposit for 12 hours.")
+    
+    new_state = 0 if data['auto_deposit'] else 1
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('UPDATE users SET auto_deposit = ? WHERE user_id = ? AND guild_id = ?', (new_state, ctx.author.id, ctx.guild.id))
+        await db.commit()
+    
+    status = "ENABLED" if new_state else "DISABLED"
+    await ctx.send(f"✅ Auto-deposit is now **{status}**! Your passive income will go straight to your bank for the remainder of your vote.")
 
 @bot.hybrid_command(name="shop", description="View the asset shop")
 async def shop(ctx: commands.Context):
