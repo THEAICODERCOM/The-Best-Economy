@@ -143,6 +143,9 @@ async def init_db():
             guild_id INTEGER PRIMARY KEY, prefix TEXT DEFAULT '.',
             role_shop_json TEXT DEFAULT '{}', custom_assets_json TEXT DEFAULT '{}'
         )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS global_votes (
+            user_id INTEGER PRIMARY KEY, last_vote INTEGER DEFAULT 0
+        )''')
         await db.commit()
 
 async def get_prefix(bot, message):
@@ -195,7 +198,13 @@ async def get_user_data(user_id, guild_id):
     await ensure_user(user_id, guild_id)
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT * FROM users WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
+        # Prefer last_vote from global_votes table, fallback to user-specific last_vote
+        async with db.execute('''
+            SELECT u.*, MAX(u.last_vote, COALESCE(gv.last_vote, 0)) as last_vote
+            FROM users u
+            LEFT JOIN global_votes gv ON u.user_id = gv.user_id
+            WHERE u.user_id = ? AND u.guild_id = ?
+        ''', (user_id, guild_id)) as cursor:
             return await cursor.fetchone()
 
 async def get_guild_assets(guild_id):
