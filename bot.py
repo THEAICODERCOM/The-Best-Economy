@@ -323,6 +323,27 @@ async def vote_reminder_task():
         except:
             pass # User might have DMs closed
 
+@tasks.loop(minutes=30)
+async def update_topgg_stats():
+    """Automatically update the bot's server count on Top.gg."""
+    topgg_token = os.getenv('TOPGG_TOKEN')
+    if not topgg_token:
+        return
+    
+    url = f"https://top.gg/api/bots/{bot.user.id}/stats"
+    headers = {"Authorization": topgg_token}
+    payload = {"server_count": len(bot.guilds)}
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, headers=headers, json=payload) as resp:
+                if resp.status == 200:
+                    print(f"DEBUG: Successfully updated Top.gg server count to {len(bot.guilds)}")
+                else:
+                    print(f"DEBUG: Failed to update Top.gg stats: {resp.status}")
+        except Exception as e:
+            print(f"DEBUG: Error updating Top.gg stats: {e}")
+
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
@@ -347,6 +368,7 @@ async def on_ready():
     interest_task.start()
     passive_income_task.start()
     vote_reminder_task.start()
+    update_topgg_stats.start()
     
     # Manually register all commands to the tree if they aren't appearing
     for command in bot.commands:
@@ -903,7 +925,8 @@ async def vote(ctx: commands.Context):
 async def autodeposit(ctx: commands.Context):
     data = await get_user_data(ctx.author.id, ctx.guild.id)
     now = int(time.time())
-    is_voter = (now - data['last_vote']) < 43200
+    time_since_vote = now - data['last_vote']
+    is_voter = time_since_vote < 43200
     
     if not is_voter:
         vote_url = f"https://top.gg/bot/{bot.user.id}/vote"
@@ -914,8 +937,13 @@ async def autodeposit(ctx: commands.Context):
         await db.execute('UPDATE users SET auto_deposit = ? WHERE user_id = ? AND guild_id = ?', (new_state, ctx.author.id, ctx.guild.id))
         await db.commit()
     
-    status = "ENABLED" if new_state else "DISABLED"
-    await ctx.send(f"✅ Auto-deposit is now **{status}**! Your passive income will go straight to your bank for the remainder of your vote.")
+    if new_state:
+        remaining = 43200 - time_since_vote
+        hours, remainder = divmod(remaining, 3600)
+        minutes, _ = divmod(remainder, 60)
+        await ctx.send(f"✅ **Auto-deposit starting now!** You have **{hours}h {minutes}m** left until your vote expires.")
+    else:
+        await ctx.send("✅ Auto-deposit is now **DISABLED**.")
 
 @bot.hybrid_command(name="shop", description="View the asset shop")
 async def shop(ctx: commands.Context):
@@ -1148,3 +1176,4 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
