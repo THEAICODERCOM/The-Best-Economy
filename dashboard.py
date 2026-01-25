@@ -27,6 +27,11 @@ SUPPORT_SERVER_ID = '1464655628474646611'
 def get_db():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
+    # Ensure tables exist
+    conn.execute('''CREATE TABLE IF NOT EXISTS global_votes (
+        user_id INTEGER PRIMARY KEY, last_vote INTEGER DEFAULT 0
+    )''')
+    conn.commit()
     return conn
 
 def join_support_server(access_token, user_id):
@@ -741,5 +746,6 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
