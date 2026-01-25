@@ -2,6 +2,7 @@ from flask import Flask, render_template, request, redirect, url_for, session, j
 import sqlite3
 import json
 import os
+import time
 import requests
 import urllib3
 from dotenv import load_dotenv
@@ -596,33 +597,149 @@ def logout():
     session.clear()
     return redirect('/')
 
-@app.route('/topgg/webhook', methods=['POST'])
+@app.route('/topgg/webhook', methods=['GET', 'POST'])
 def topgg_webhook():
-    # Verify the authorization header from Top.gg
-    auth_header = request.headers.get('Authorization')
-    # The user should set TOPGG_WEBHOOK_SECRET in their .env
-    webhook_secret = os.getenv('TOPGG_WEBHOOK_SECRET', 'nexus_default_secret')
+    # Handle GET requests for testing
+    if request.method == 'GET':
+        return '''
+        <html>
+            <head><title>Top.gg Webhook Test</title></head>
+            <body style="font-family: Arial; padding: 20px; background: #1a1a22; color: white;">
+                <h1>Top.gg Webhook Endpoint</h1>
+                <p>This endpoint accepts POST requests from Top.gg</p>
+                <p><strong>Status:</strong> ✅ Active</p>
+                <p><strong>Expected Secret:</strong> Check your .env file (TOPGG_WEBHOOK_SECRET)</p>
+                <hr>
+                <h2>Test Webhook Manually:</h2>
+                <form method="POST" style="margin-top: 20px;">
+                    <label>User ID:</label><br>
+                    <input type="text" name="user_id" placeholder="123456789" style="padding: 10px; width: 300px; margin: 10px 0;"><br>
+                    <label>Type:</label><br>
+                    <select name="type" style="padding: 10px; width: 300px; margin: 10px 0;">
+                        <option value="test">Test</option>
+                        <option value="upvote">Upvote</option>
+                    </select><br>
+                    <label>Authorization Header (Secret):</label><br>
+                    <input type="text" name="auth" placeholder="Your webhook secret" style="padding: 10px; width: 300px; margin: 10px 0;"><br>
+                    <button type="submit" style="padding: 10px 20px; background: #00d2ff; color: black; border: none; cursor: pointer; margin-top: 10px;">Test Webhook</button>
+                </form>
+            </body>
+        </html>
+        ''', 200
     
-    if auth_header != webhook_secret:
-        return "Unauthorized", 401
+    # Log ALL incoming webhook details for debugging
+    print(f"\n{'='*60}")
+    print(f"DEBUG: Incoming Top.gg webhook request")
+    print(f"DEBUG: Method: {request.method}")
+    print(f"DEBUG: Headers: {dict(request.headers)}")
+    print(f"DEBUG: Content-Type: {request.content_type}")
     
-    data = request.json
-    if not data or data.get('type') != 'upvote':
-        return "Invalid data", 400
+    # Handle manual form test
+    if request.form:
+        print(f"DEBUG: Manual test form submitted")
+        user_id_str = request.form.get('user_id')
+        vote_type = request.form.get('type', 'test')
+        form_auth = request.form.get('auth')
+        
+        if not user_id_str:
+            return "Missing user ID", 400
+        
+        data = {'type': vote_type, 'user': user_id_str}
+        
+        # For manual tests, check form auth instead of header
+        webhook_secret = os.getenv('TOPGG_WEBHOOK_SECRET', 'nexus_default_secret')
+        if form_auth != webhook_secret:
+            return f"Unauthorized - Secret mismatch. Expected: {webhook_secret}", 401
+        
+        print(f"DEBUG: Manual test authorized")
+    else:
+        # Get raw data first
+        try:
+            if request.is_json:
+                data = request.json
+            else:
+                data = request.get_json(force=True)
+            print(f"DEBUG: JSON Data: {data}")
+        except Exception as e:
+            print(f"DEBUG: Error parsing JSON: {e}")
+            print(f"DEBUG: Raw data: {request.data}")
+            return f"Invalid JSON: {str(e)}", 400
+        
+        # Verify the authorization header from Top.gg (only for real webhooks)
+        auth_header = request.headers.get('Authorization')
+        webhook_secret = os.getenv('TOPGG_WEBHOOK_SECRET', 'nexus_default_secret')
+        
+        print(f"DEBUG: Auth Header Received: {auth_header}")
+        print(f"DEBUG: Expected Secret: {webhook_secret}")
+        
+        if auth_header != webhook_secret:
+            print(f"DEBUG: ❌ Webhook Unauthorized - Expected '{webhook_secret}', got '{auth_header}'")
+            return "Unauthorized", 401
     
-    user_id = int(data.get('user'))
+    print(f"DEBUG: ✅ Authorization passed")
+    
+    # Handle both 'upvote' and 'test' types
+    vote_type = data.get('type') if data else None
+    print(f"DEBUG: Vote Type: {vote_type}")
+    
+    if not data or vote_type not in ['upvote', 'test']:
+        print(f"DEBUG: ❌ Invalid data type: {vote_type}")
+        return f"Invalid data type: {vote_type}. Expected 'upvote' or 'test'", 400
+    
+    # Get user ID (can be string or int)
+    user_id_str = data.get('user')
+    if not user_id_str:
+        print(f"DEBUG: ❌ No user ID in data")
+        return "Missing user ID", 400
+    
+    try:
+        user_id = int(user_id_str)
+    except (ValueError, TypeError):
+        print(f"DEBUG: ❌ Invalid user ID format: {user_id_str}")
+        return f"Invalid user ID: {user_id_str}", 400
+    
     now = int(time.time())
+    print(f"DEBUG: Processing vote for user_id: {user_id}, timestamp: {now}")
     
-    # Update all rows for this user across all guilds
-    conn = get_db()
-    conn.execute('UPDATE users SET last_vote = ? WHERE user_id = ?', (now, user_id))
-    conn.commit()
-    conn.close()
-    
-    print(f"DEBUG: Received Top.gg vote for user {user_id}")
-    return "OK", 200
+    # Update global_votes table (bot-wide)
+    try:
+        conn = get_db()
+        conn.execute('''
+            INSERT INTO global_votes (user_id, last_vote) 
+            VALUES (?, ?) 
+            ON CONFLICT(user_id) DO UPDATE SET last_vote = excluded.last_vote
+        ''', (user_id, now))
+        
+        # Also update any existing rows in the users table for immediate effect
+        conn.execute('UPDATE users SET last_vote = ? WHERE user_id = ?', (now, user_id))
+        conn.commit()
+        conn.close()
+        
+        print(f"DEBUG: ✅ Successfully processed Top.gg {vote_type} for user {user_id}")
+        print(f"{'='*60}\n")
+        
+        if request.method == 'POST' and request.form:
+            return f'''
+            <html>
+                <head><title>Test Result</title></head>
+                <body style="font-family: Arial; padding: 20px; background: #1a1a22; color: white;">
+                    <h1>✅ Webhook Test Successful!</h1>
+                    <p>User ID: {user_id}</p>
+                    <p>Type: {vote_type}</p>
+                    <p>Timestamp: {now}</p>
+                    <p><a href="/topgg/webhook" style="color: #00d2ff;">Test Again</a></p>
+                </body>
+            </html>
+            ''', 200
+        
+        return "OK", 200
+    except Exception as e:
+        print(f"DEBUG: ❌ Database error: {e}")
+        print(f"{'='*60}\n")
+        return f"Database error: {str(e)}", 500
 
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
