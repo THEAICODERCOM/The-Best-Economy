@@ -381,7 +381,7 @@ def dashboard(guild_id):
         <div class="list-item">
             <div class="list-item-info">
                 <div class="list-item-name">{data['name']}</div>
-                <div class="list-item-price">{data['price']:,} coins • {data['income']:,}/min</div>
+                <div class="list-item-price">{data['price']:,} coins • {data['income']:,}/10min</div>
             </div>
             <button onclick="deleteItem('asset', '{a_id}')" class="btn-delete">×</button>
         </div>
@@ -490,7 +490,7 @@ def dashboard(guild_id):
                         <input type="number" id="modalAssetPrice" value="5000">
                     </div>
                     <div class="form-group">
-                        <label>Income per Minute</label>
+                        <label>Income per 10 Minutes</label>
                         <input type="number" id="modalAssetIncome" value="50">
                     </div>
                     <div style="display: flex; gap: 10px;">
@@ -746,6 +746,10 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
+
+
+
 
 
 
