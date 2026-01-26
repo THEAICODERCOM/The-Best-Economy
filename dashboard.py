@@ -362,6 +362,7 @@ def dashboard(guild_id):
     prefix = config['prefix'] if config else '!'
     role_shop = json.loads(config['role_shop_json']) if config and config['role_shop_json'] else {}
     custom_assets = json.loads(config['custom_assets_json']) if config and config['custom_assets_json'] else {}
+    bank_plans = json.loads(config['bank_plans_json']) if config and config['bank_plans_json'] else {}
     wonder_level = wonder['level']
     wonder_progress = wonder['progress']
     wonder_goal = wonder['goal']
@@ -411,6 +412,30 @@ def dashboard(guild_id):
     
     from bot import DEFAULT_ASSETS
     display_assets = {**DEFAULT_ASSETS, **custom_assets}
+
+    bank_items_html = ""
+    if not bank_plans:
+        bank_plans = {
+            "standard": {
+                "name": "Standard Vault",
+                "min": 0.01,
+                "max": 0.02,
+                "price": 0,
+                "min_level": 0
+            }
+        }
+    for b_id, data in bank_plans.items():
+        rate_min = float(data.get("min", 0.01)) * 100
+        rate_max = float(data.get("max", 0.02)) * 100
+        bank_items_html += f"""
+        <div class="list-item">
+            <div class="list-item-info">
+                <div class="list-item-name">{data.get('name', b_id)}</div>
+                <div class="list-item-price">{rate_min:.2f}%–{rate_max:.2f}%/h • Cost: {int(data.get('price', 0)):,} • Min Lvl: {int(data.get('min_level', 0))}</div>
+            </div>
+            <button onclick="deleteItem('bank', '{b_id}')" class="btn-delete">×</button>
+        </div>
+        """
 
     for a_id, data in display_assets.items():
         asset_items_html += f"""
@@ -475,6 +500,15 @@ def dashboard(guild_id):
                             </div>
                             <div id="roleList">{role_items_html}</div>
                             <input type="hidden" name="role_shop" id="roleShopInput" value='{json.dumps(role_shop)}'>
+                        </div>
+
+                        <div class="card">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;">
+                                <h2 class="card-title" style="margin: 0;">Bank Plans</h2>
+                                <button type="button" onclick="openModal('bankModal')" class="btn" style="padding: 8px 16px; font-size: 12px;">+ Add Plan</button>
+                            </div>
+                            <div id="bankList">{bank_items_html}</div>
+                            <input type="hidden" name="bank_plans" id="bankPlansInput" value='{json.dumps(bank_plans)}'>
                         </div>
 
                         <div class="card">
@@ -561,6 +595,40 @@ def dashboard(guild_id):
                 </div>
             </div>
 
+            <div id="bankModal" class="modal">
+                <div class="modal-content">
+                    <h2 class="card-title">Create Bank Plan</h2>
+                    <div class="form-group">
+                        <label>Plan ID</label>
+                        <input type="text" id="modalBankId" placeholder="e.g. royal_vault">
+                    </div>
+                    <div class="form-group">
+                        <label>Display Name</label>
+                        <input type="text" id="modalBankName" placeholder="e.g. Royal Vault">
+                    </div>
+                    <div class="form-group">
+                        <label>Min Interest %/h</label>
+                        <input type="number" id="modalBankMin" value="1">
+                    </div>
+                    <div class="form-group">
+                        <label>Max Interest %/h</label>
+                        <input type="number" id="modalBankMax" value="2">
+                    </div>
+                    <div class="form-group">
+                        <label>Price</label>
+                        <input type="number" id="modalBankPrice" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label>Minimum Level</label>
+                        <input type="number" id="modalBankMinLevel" value="0">
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button onclick="addBank()" class="btn" style="flex: 1;">Save</button>
+                        <button onclick="closeModal('bankModal')" class="btn btn-secondary" style="flex: 1; background: #25252b; color: #fff;">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- Logout Confirmation Modal -->
             <div id="logoutModal" class="modal">
                 <div class="modal-content">
@@ -577,6 +645,7 @@ def dashboard(guild_id):
                 const DEFAULT_ASSETS = {json.dumps(DEFAULT_ASSETS)};
                 let roleShop = {json.dumps(role_shop)};
                 let customAssets = {json.dumps(custom_assets)};
+                let bankPlans = {json.dumps(bank_plans)};
                 
                 // Initialize customAssets with defaults if it's empty to show them on first load
                 // but only if the user hasn't saved anything yet (this is for visual consistency)
@@ -612,7 +681,20 @@ def dashboard(guild_id):
 
                 function deleteItem(type, id) {{
                     if(type === 'role') delete roleShop[id];
-                    else delete combinedAssets[id];
+                    else if(type === 'asset') delete combinedAssets[id];
+                    else if(type === 'bank') delete bankPlans[id];
+                    updateUI(true);
+                }}
+
+                function addBank() {{
+                    const id = document.getElementById('modalBankId').value.toLowerCase().replace(/\\s+/g, '_');
+                    const name = document.getElementById('modalBankName').value;
+                    const min = parseFloat(document.getElementById('modalBankMin').value) / 100.0;
+                    const max = parseFloat(document.getElementById('modalBankMax').value) / 100.0;
+                    const price = parseInt(document.getElementById('modalBankPrice').value);
+                    const minLevel = parseInt(document.getElementById('modalBankMinLevel').value);
+                    if(!id) return;
+                    bankPlans[id] = {{ name, min, max, price, min_level: minLevel }};
                     updateUI(true);
                 }}
 
@@ -623,6 +705,7 @@ def dashboard(guild_id):
                     // But for simplicity, we save the entire combined list to the custom field
                     // so that deletions of defaults actually persist.
                     document.getElementById('assetsInput').value = JSON.stringify(combinedAssets);
+                    document.getElementById('bankPlansInput').value = JSON.stringify(bankPlans);
                     if(submit) document.getElementById('mainForm').submit();
                 }}
 
@@ -643,17 +726,18 @@ def save(guild_id):
     prefix = request.form.get('prefix')
     role_shop = request.form.get('role_shop')
     custom_assets = request.form.get('custom_assets')
+    bank_plans = request.form.get('bank_plans')
     
-    # Basic validation
     try:
         json.loads(role_shop)
         json.loads(custom_assets)
+        json.loads(bank_plans)
     except:
         return "Invalid JSON format! Go back and fix it.", 400
 
     conn = get_db()
-    conn.execute('INSERT OR REPLACE INTO guild_config (guild_id, prefix, role_shop_json, custom_assets_json) VALUES (?, ?, ?, ?)', 
-                 (int(guild_id), prefix, role_shop, custom_assets))
+    conn.execute('INSERT OR REPLACE INTO guild_config (guild_id, prefix, role_shop_json, custom_assets_json, bank_plans_json) VALUES (?, ?, ?, ?, ?)', 
+                 (int(guild_id), prefix, role_shop, custom_assets, bank_plans))
     conn.commit()
     conn.close()
     return redirect(f'/dashboard/{guild_id}?success=1')
@@ -807,6 +891,7 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
 
