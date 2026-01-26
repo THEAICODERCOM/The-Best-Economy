@@ -31,6 +31,14 @@ def get_db():
     conn.execute('''CREATE TABLE IF NOT EXISTS global_votes (
         user_id INTEGER PRIMARY KEY, last_vote INTEGER DEFAULT 0
     )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_wonder (
+        guild_id INTEGER PRIMARY KEY,
+        level INTEGER DEFAULT 0,
+        progress INTEGER DEFAULT 0,
+        goal INTEGER DEFAULT 50000,
+        boost_multiplier REAL DEFAULT 1.25,
+        boost_until INTEGER DEFAULT 0
+    )''')
     conn.commit()
     return conn
 
@@ -97,6 +105,14 @@ STYLE = """
     .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 30px; margin-bottom: 30px; }
     .card-title { font-size: 18px; font-weight: 700; color: var(--accent); margin-top: 0; margin-bottom: 20px; text-transform: uppercase; letter-spacing: 1px; }
     .form-group { margin-bottom: 25px; }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 20px; }
+    .stat-item { background: var(--bg-dark); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+    .stat-label { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; }
+    .stat-value { font-size: 18px; font-weight: 800; color: var(--text-main); }
+    .progress-track { width: 100%; height: 12px; background: #0b0b10; border-radius: 999px; border: 1px solid var(--border); overflow: hidden; }
+    .progress-fill { height: 100%; background: linear-gradient(90deg, #00d2ff, #91eae4); }
+    .badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 999px; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; font-weight: 800; background: rgba(0, 210, 255, 0.12); color: var(--accent); border: 1px solid rgba(0, 210, 255, 0.3); }
+    .hint { color: var(--text-muted); font-size: 13px; margin-top: 14px; }
     label { display: block; font-weight: 700; color: var(--text-muted); text-transform: uppercase; font-size: 12px; margin-bottom: 10px; }
     input, select, textarea { width: 100%; padding: 14px; background: var(--bg-dark); border: 1px solid var(--border); border-radius: 8px; color: #fff; box-sizing: border-box; font-family: inherit; font-size: 14px; }
     input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 10px rgba(0, 210, 255, 0.1); }
@@ -336,11 +352,31 @@ def dashboard(guild_id):
     
     conn = get_db()
     config = conn.execute('SELECT * FROM guild_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    wonder = conn.execute('SELECT * FROM guild_wonder WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    if not wonder:
+        conn.execute('INSERT INTO guild_wonder (guild_id) VALUES (?)', (int(guild_id),))
+        conn.commit()
+        wonder = conn.execute('SELECT * FROM guild_wonder WHERE guild_id = ?', (int(guild_id),)).fetchone()
     conn.close()
     
     prefix = config['prefix'] if config else '!'
     role_shop = json.loads(config['role_shop_json']) if config and config['role_shop_json'] else {}
     custom_assets = json.loads(config['custom_assets_json']) if config and config['custom_assets_json'] else {}
+    wonder_level = wonder['level']
+    wonder_progress = wonder['progress']
+    wonder_goal = wonder['goal']
+    wonder_boost_multiplier = wonder['boost_multiplier']
+    wonder_boost_until = wonder['boost_until']
+    now = int(time.time())
+    wonder_progress_pct = int((wonder_progress / wonder_goal) * 100) if wonder_goal else 0
+    if wonder_boost_until > now:
+        remaining = wonder_boost_until - now
+        hours, remainder = divmod(remaining, 3600)
+        minutes, _ = divmod(remainder, 60)
+        wonder_boost_status = f"Active • {wonder_boost_multiplier:.2f}x • {hours}h {minutes}m left"
+    else:
+        wonder_boost_status = "Inactive"
+    wonder_next_multiplier = min(2.0, 1.25 + ((wonder_level + 1) * 0.05))
     
     roles = get_server_roles(guild_id)
     
@@ -439,6 +475,31 @@ def dashboard(guild_id):
                             </div>
                             <div id="roleList">{role_items_html}</div>
                             <input type="hidden" name="role_shop" id="roleShopInput" value='{json.dumps(role_shop)}'>
+                        </div>
+
+                        <div class="card">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;">
+                                <h2 class="card-title" style="margin: 0;">Wonder Project</h2>
+                                <span class="badge">{wonder_boost_status}</span>
+                            </div>
+                            <div class="stat-grid">
+                                <div class="stat-item">
+                                    <div class="stat-label">Wonder Level</div>
+                                    <div class="stat-value">{wonder_level}</div>
+                                </div>
+                                <div class="stat-item">
+                                    <div class="stat-label">Progress</div>
+                                    <div class="stat-value">{wonder_progress:,} / {wonder_goal:,}</div>
+                                </div>
+                                <div class="stat-item">
+                                    <div class="stat-label">Next Boost</div>
+                                    <div class="stat-value">{wonder_next_multiplier:.2f}x</div>
+                                </div>
+                            </div>
+                            <div class="progress-track">
+                                <div class="progress-fill" style="width: {wonder_progress_pct}%;"></div>
+                            </div>
+                            <div class="hint">Players can fund the Wonder with /contribute &lt;amount&gt; to unlock a server-wide income boost for 6 hours.</div>
                         </div>
 
                         <!-- Assets Card -->
@@ -746,6 +807,7 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
 
