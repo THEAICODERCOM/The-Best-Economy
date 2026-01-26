@@ -721,7 +721,6 @@ async def start_tutorial(ctx: commands.Context):
 @bot.hybrid_command(name="help", description="Show all available commands")
 async def help_command(ctx: commands.Context):
     prefix = await get_prefix(bot, ctx.message)
-    is_test_guild = ctx.guild and ctx.guild.id == TEST_GUILD_ID
     embed = discord.Embed(
         title="🏰 Empire Nexus | Grand Library", 
         description=(
@@ -742,23 +741,19 @@ async def help_command(ctx: commands.Context):
         f"**`{prefix}rank`** • Check level & XP"
     ), inline=True)
 
-    rewards_value = (
+    embed.add_field(name="🚀 Rewards & Assets", value=(
         f"**`{prefix}vote`** • Get Top.gg rewards\n"
         f"**`{prefix}autodeposit`** • Auto-save income\n"
         f"**`{prefix}shop`** • Buy income assets\n"
         f"**`{prefix}inventory`** (inv) • Your assets\n"
         f"**`{prefix}buyrole`** • Purchase server roles\n"
-        f"**`{prefix}prestige`** • Ascend for bonus"
-    )
-    if is_test_guild:
-        rewards_value += (
-            f"\n**`{prefix}bank`** • View/switch bank plans\n"
-            f"**`{prefix}dailyquests`** • Daily quest checklist\n"
-            f"**`{prefix}weeklyquests`** • Weekly quest checklist\n"
-            f"**`{prefix}jobs`** • List available jobs\n"
-            f"**`{prefix}applyjob`** • Apply for a job"
-        )
-    embed.add_field(name="🚀 Rewards & Assets", value=rewards_value, inline=True)
+        f"**`{prefix}prestige`** • Ascend for bonus\n"
+        f"**`{prefix}bank`** • View/switch bank plans\n"
+        f"**`{prefix}dailyquests`** • Daily quest checklist\n"
+        f"**`{prefix}weeklyquests`** • Weekly quest checklist\n"
+        f"**`{prefix}jobs`** • List available jobs\n"
+        f"**`{prefix}applyjob`** • Apply for a job"
+    ), inline=True)
     
     embed.add_field(name="🎰 Royal Casino", value=(
         f"**`{prefix}blackjack`** (bj) • Pro Blackjack\n"
@@ -1426,9 +1421,6 @@ async def crime(ctx: commands.Context):
 
 @bot.hybrid_command(name="dailyquests", description="View your daily quest progress")
 async def dailyquests(ctx: commands.Context):
-    if ctx.guild.id != TEST_GUILD_ID:
-        await ctx.send("This command is currently only available in the test server.")
-        return
     await ensure_quest_resets(ctx.author.id, ctx.guild.id)
     data = await get_user_data(ctx.author.id, ctx.guild.id)
     done = data['daily_commands']
@@ -1460,9 +1452,6 @@ async def dailyquests(ctx: commands.Context):
 
 @bot.hybrid_command(name="weeklyquests", description="View your weekly quest progress")
 async def weeklyquests(ctx: commands.Context):
-    if ctx.guild.id != TEST_GUILD_ID:
-        await ctx.send("This command is currently only available in the test server.")
-        return
     await ensure_quest_resets(ctx.author.id, ctx.guild.id)
     data = await get_user_data(ctx.author.id, ctx.guild.id)
     done = data['weekly_commands']
@@ -1516,12 +1505,8 @@ async def balance(ctx: commands.Context, member: discord.Member = None):
     embed.set_footer(text=f"Total: {data['balance'] + data['bank']:,} coins")
     await ctx.send(embed=embed)
 
-@app_commands.guilds(discord.Object(id=TEST_GUILD_ID))
 @bot.hybrid_command(name="bank", description="View and switch bank plans")
 async def bank_cmd(ctx: commands.Context, plan_id: str = None):
-    if ctx.guild.id != TEST_GUILD_ID:
-        await ctx.send("This command is currently only available in the test server.")
-        return
     data = await get_user_data(ctx.author.id, ctx.guild.id)
     banks = await get_guild_banks(ctx.guild.id)
     current = data['bank_plan'] if 'bank_plan' in data.keys() and data['bank_plan'] else 'standard'
@@ -1701,12 +1686,8 @@ async def setup_cmd(ctx: commands.Context):
     embed.set_footer(text="Rule with iron, prosper with gold.")
     await ctx.send(embed=embed)
 
-@app_commands.guilds(discord.Object(id=TEST_GUILD_ID))
 @bot.hybrid_command(name="jobs", description="List available jobs")
 async def jobs(ctx: commands.Context):
-    if ctx.guild.id != TEST_GUILD_ID:
-        await ctx.send("This command is currently only available in the test server.")
-        return
     current = await get_user_job(ctx.author.id, ctx.guild.id)
     data = await get_user_data(ctx.author.id, ctx.guild.id)
     desc = ""
@@ -1721,12 +1702,8 @@ async def jobs(ctx: commands.Context):
     embed.set_footer(text=f"Your level: {data['level']}. Use /applyjob <id> to apply.")
     await ctx.send(embed=embed)
 
-@app_commands.guilds(discord.Object(id=TEST_GUILD_ID))
 @bot.hybrid_command(name="applyjob", description="Apply for a job")
 async def applyjob(ctx: commands.Context, job_id: str):
-    if ctx.guild.id != TEST_GUILD_ID:
-        await ctx.send("This command is currently only available in the test server.")
-        return
     job_id = job_id.lower()
     if job_id not in JOBS:
         await ctx.send("Invalid job id.")
@@ -1778,3 +1755,4 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
