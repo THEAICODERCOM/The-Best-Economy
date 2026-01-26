@@ -532,13 +532,14 @@ async def inventory(ctx: commands.Context, member: discord.Member = None):
         if aid in assets_config:
             name = assets_config[aid]['name']
             income = assets_config[aid]['income'] * count
-            inv_str += f"• **{count}x {name}** (Income: 💸 {income:,}/min)\n"
+            inv_str += f"• **{count}x {name}** (Income: 💸 {income:,}/10min)\n"
             total_income += income
         else:
             inv_str += f"• **{count}x {aid}** (Unknown Asset)\n"
-
-    embed = discord.Embed(title=f"📦 {target.display_name}'s Inventory", description=inv_str, color=0x00d2ff)
-    embed.add_field(name="📈 Total Passive Income", value=f"💸 {total_income:,} coins / minute")
+            
+    embed = discord.Embed(title=f"🎒 {target.display_name}'s Assets", color=0x00d2ff)
+    embed.description = inv_str
+    embed.add_field(name="📈 Total Passive Income", value=f"💸 {total_income:,} coins / 10 minutes")
     await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="roulette", description="Bet your coins on a roulette spin")
@@ -974,9 +975,9 @@ async def autodeposit(ctx: commands.Context):
 @bot.hybrid_command(name="shop", description="View the asset shop")
 async def shop(ctx: commands.Context):
     assets = await get_guild_assets(ctx.guild.id)
-    embed = discord.Embed(title="🛒 Kingdom Asset Shop", description="Buy assets to earn passive income every minute!", color=0x00d2ff)
+    embed = discord.Embed(title="🛒 Kingdom Asset Shop", description="Buy assets to earn passive income every 10 minutes!", color=0x00d2ff)
     for aid, data in assets.items():
-        embed.add_field(name=f"{data['name']} (ID: {aid})", value=f"Price: 🪙 {data['price']:,}\nIncome: 💸 {data['income']:,}/min", inline=False)
+        embed.add_field(name=f"{data['name']} (ID: {aid})", value=f"Price: 🪙 {data['price']:,}\nIncome: 💸 {data['income']:,}/10min", inline=False)
     await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="buy", description="Buy a passive income asset")
