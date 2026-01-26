@@ -39,6 +39,7 @@ aiohttp.ClientSession.ws_connect = new_ws_connect
 
 # Database Setup
 DB_FILE = 'empire_v2.db'
+TEST_GUILD_ID = 1465437620245889237
 
 # Default Assets
 DEFAULT_ASSETS = {
@@ -46,6 +47,58 @@ DEFAULT_ASSETS = {
     "gaming_pc": {"name": "Gaming PC", "price": 2500, "income": 30},
     "coffee_shop": {"name": "Coffee Shop", "price": 10000, "income": 150},
 }
+
+JOBS = {
+    "miner": {
+        "name": "Mine Overseer",
+        "difficulty": "Easy",
+        "min_level": 1,
+        "focus": "work",
+        "question": "Which command lets you supervise the mines for coins?",
+        "answer": "work",
+        "multiplier": 1.2
+    },
+    "enforcer": {
+        "name": "City Enforcer",
+        "difficulty": "Medium",
+        "min_level": 5,
+        "focus": "crime",
+        "question": "Which command do you use to attempt a high-risk heist?",
+        "answer": "crime",
+        "multiplier": 1.3
+    },
+    "croupier": {
+        "name": "Casino Croupier",
+        "difficulty": "Hard",
+        "min_level": 10,
+        "focus": "blackjack",
+        "question": "Which command starts a game of blackjack?",
+        "answer": "blackjack",
+        "multiplier": 1.4
+    }
+}
+
+DAILY_QUESTS = [
+    {"id": "daily_cmd_25", "description": "Use 25 commands today", "target": 25, "reward": 10000},
+    {"id": "daily_cmd_50", "description": "Use 50 commands today", "target": 50, "reward": 20000},
+    {"id": "daily_cmd_75", "description": "Use 75 commands today", "target": 75, "reward": 35000},
+    {"id": "daily_cmd_100", "description": "Use 100 commands today", "target": 100, "reward": 50000},
+    {"id": "daily_cmd_150", "description": "Use 150 commands today", "target": 150, "reward": 80000},
+    {"id": "daily_cmd_10", "description": "Use 10 commands today", "target": 10, "reward": 5000},
+    {"id": "daily_cmd_5", "description": "Use 5 commands today", "target": 5, "reward": 2000},
+    {"id": "daily_cmd_200", "description": "Use 200 commands today", "target": 200, "reward": 120000}
+]
+
+WEEKLY_QUESTS = [
+    {"id": "weekly_cmd_100", "description": "Use 100 commands this week", "target": 100, "reward": 40000},
+    {"id": "weekly_cmd_200", "description": "Use 200 commands this week", "target": 200, "reward": 90000},
+    {"id": "weekly_cmd_300", "description": "Use 300 commands this week", "target": 300, "reward": 140000},
+    {"id": "weekly_cmd_400", "description": "Use 400 commands this week", "target": 400, "reward": 190000},
+    {"id": "weekly_cmd_500", "description": "Use 500 commands this week", "target": 500, "reward": 250000},
+    {"id": "weekly_cmd_750", "description": "Use 750 commands this week", "target": 750, "reward": 375000},
+    {"id": "weekly_cmd_50", "description": "Use 50 commands this week", "target": 50, "reward": 25000},
+    {"id": "weekly_cmd_1000", "description": "Use 1000 commands this week", "target": 1000, "reward": 500000}
+]
 
 # Blackjack Card Emojis
 CARD_EMOJIS = {
@@ -126,14 +179,42 @@ async def init_db():
             prestige INTEGER DEFAULT 0, last_work INTEGER DEFAULT 0,
             last_crime INTEGER DEFAULT 0, last_rob INTEGER DEFAULT 0,
             last_vote INTEGER DEFAULT 0, auto_deposit INTEGER DEFAULT 0,
+            bank_plan TEXT DEFAULT 'standard',
+            daily_commands INTEGER DEFAULT 0, daily_reset INTEGER DEFAULT 0,
+            daily_reward_claimed INTEGER DEFAULT 0,
+            weekly_commands INTEGER DEFAULT 0, weekly_reset INTEGER DEFAULT 0,
+            weekly_reward_claimed INTEGER DEFAULT 0,
+            daily_quest_completed_json TEXT DEFAULT '{}',
+            weekly_quest_completed_json TEXT DEFAULT '{}',
+            daily_stats_json TEXT DEFAULT '{}',
+            weekly_stats_json TEXT DEFAULT '{}',
             PRIMARY KEY (user_id, guild_id)
         )''')
-        # Ensure new columns exist for existing databases
         try:
             await db.execute('ALTER TABLE users ADD COLUMN last_vote INTEGER DEFAULT 0')
             await db.execute('ALTER TABLE users ADD COLUMN auto_deposit INTEGER DEFAULT 0')
         except:
-            pass # Already exists
+            pass
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN bank_plan TEXT DEFAULT 'standard'")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN daily_commands INTEGER DEFAULT 0")
+            await db.execute("ALTER TABLE users ADD COLUMN daily_reset INTEGER DEFAULT 0")
+            await db.execute("ALTER TABLE users ADD COLUMN daily_reward_claimed INTEGER DEFAULT 0")
+            await db.execute("ALTER TABLE users ADD COLUMN weekly_commands INTEGER DEFAULT 0")
+            await db.execute("ALTER TABLE users ADD COLUMN weekly_reset INTEGER DEFAULT 0")
+            await db.execute("ALTER TABLE users ADD COLUMN weekly_reward_claimed INTEGER DEFAULT 0")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN daily_quest_completed_json TEXT DEFAULT '{}'")
+            await db.execute("ALTER TABLE users ADD COLUMN weekly_quest_completed_json TEXT DEFAULT '{}'")
+            await db.execute("ALTER TABLE users ADD COLUMN daily_stats_json TEXT DEFAULT '{}'")
+            await db.execute("ALTER TABLE users ADD COLUMN weekly_stats_json TEXT DEFAULT '{}'")
+        except:
+            pass
             
         await db.execute('''CREATE TABLE IF NOT EXISTS user_assets (
             user_id INTEGER, guild_id INTEGER, asset_id TEXT, count INTEGER DEFAULT 0,
@@ -141,8 +222,13 @@ async def init_db():
         )''')
         await db.execute('''CREATE TABLE IF NOT EXISTS guild_config (
             guild_id INTEGER PRIMARY KEY, prefix TEXT DEFAULT '.',
-            role_shop_json TEXT DEFAULT '{}', custom_assets_json TEXT DEFAULT '{}'
+            role_shop_json TEXT DEFAULT '{}', custom_assets_json TEXT DEFAULT '{}',
+            bank_plans_json TEXT DEFAULT '{}'
         )''')
+        try:
+            await db.execute("ALTER TABLE guild_config ADD COLUMN bank_plans_json TEXT DEFAULT '{}'")
+        except:
+            pass
         await db.execute('''CREATE TABLE IF NOT EXISTS guild_wonder (
             guild_id INTEGER PRIMARY KEY,
             level INTEGER DEFAULT 0,
@@ -150,6 +236,10 @@ async def init_db():
             goal INTEGER DEFAULT 50000,
             boost_multiplier REAL DEFAULT 1.25,
             boost_until INTEGER DEFAULT 0
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS user_jobs (
+            user_id INTEGER, guild_id INTEGER, job_id TEXT,
+            PRIMARY KEY (user_id, guild_id)
         )''')
         await db.execute('''CREATE TABLE IF NOT EXISTS global_votes (
             user_id INTEGER PRIMARY KEY, last_vote INTEGER DEFAULT 0
@@ -236,6 +326,27 @@ async def get_guild_assets(guild_id):
                     return DEFAULT_ASSETS
     return DEFAULT_ASSETS
 
+async def get_guild_banks(guild_id):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT bank_plans_json FROM guild_config WHERE guild_id = ?', (int(guild_id),)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                try:
+                    data = json.loads(row[0])
+                    if isinstance(data, dict) and data:
+                        return data
+                except json.JSONDecodeError:
+                    pass
+    return {
+        "standard": {
+            "name": "Standard Vault",
+            "min": 0.01,
+            "max": 0.02,
+            "price": 0,
+            "min_level": 0
+        }
+    }
+
 def compute_boost_multiplier(level):
     return min(2.0, 1.25 + (level * 0.05))
 
@@ -251,6 +362,132 @@ async def get_wonder(guild_id):
         async with db.execute('SELECT * FROM guild_wonder WHERE guild_id = ?', (guild_id,)) as cursor:
             return await cursor.fetchone()
 
+async def get_user_job(user_id, guild_id):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT job_id FROM user_jobs WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+async def ensure_quest_resets(user_id, guild_id):
+    now = int(time.time())
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT daily_reset, weekly_reset, daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_quest_completed_json, weekly_quest_completed_json, daily_stats_json, weekly_stats_json FROM users WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return
+        daily_reset, weekly_reset, daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_completed_json, weekly_completed_json, daily_stats_json, weekly_stats_json = row
+        changed = False
+        if daily_reset is None or daily_reset == 0 or now - daily_reset >= 86400:
+            daily_reset = now
+            daily_commands = 0
+            daily_reward_claimed = 0
+            daily_completed_json = '{}'
+            daily_stats_json = '{}'
+            changed = True
+        if weekly_reset is None or weekly_reset == 0 or now - weekly_reset >= 604800:
+            weekly_reset = now
+            weekly_commands = 0
+            weekly_reward_claimed = 0
+            weekly_completed_json = '{}'
+            weekly_stats_json = '{}'
+            changed = True
+        if changed:
+            await db.execute('UPDATE users SET daily_reset = ?, weekly_reset = ?, daily_commands = ?, weekly_commands = ?, daily_reward_claimed = ?, weekly_reward_claimed = ?, daily_quest_completed_json = ?, weekly_quest_completed_json = ?, daily_stats_json = ?, weekly_stats_json = ? WHERE user_id = ? AND guild_id = ?', (daily_reset, weekly_reset, daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_completed_json, weekly_completed_json, daily_stats_json, weekly_stats_json, user_id, guild_id))
+            await db.commit()
+
+async def increment_quests(user_id, guild_id, command_name=None):
+    await ensure_quest_resets(user_id, guild_id)
+    now = int(time.time())
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_quest_completed_json, weekly_quest_completed_json, daily_stats_json, weekly_stats_json FROM users WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return
+        daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_completed_json, weekly_completed_json, daily_stats_json, weekly_stats_json = row
+        try:
+            daily_completed = json.loads(daily_completed_json) if daily_completed_json else {}
+        except:
+            daily_completed = {}
+        try:
+            weekly_completed = json.loads(weekly_completed_json) if weekly_completed_json else {}
+        except:
+            weekly_completed = {}
+        try:
+            daily_stats = json.loads(daily_stats_json) if daily_stats_json else {}
+        except:
+            daily_stats = {}
+        try:
+            weekly_stats = json.loads(weekly_stats_json) if weekly_stats_json else {}
+        except:
+            weekly_stats = {}
+        daily_commands += 1
+        weekly_commands += 1
+        kinds = ["commands"]
+        if command_name:
+            name = command_name.lower()
+            if name == "work":
+                kinds.append("work")
+            if name == "crime":
+                kinds.append("crime")
+            if name in ["blackjack", "roulette"]:
+                kinds.append("gamble")
+        for k in kinds:
+            daily_stats[k] = int(daily_stats.get(k, 0)) + 1
+            weekly_stats[k] = int(weekly_stats.get(k, 0)) + 1
+        daily_active = get_active_daily_quests(guild_id, now)
+        weekly_active = get_active_weekly_quests(guild_id, now)
+        reward_balance_changes = 0
+        for quest in daily_active:
+            qid = quest["id"]
+            if not daily_completed.get(qid):
+                kind = quest.get("kind", "commands")
+                if kind == "commands":
+                    progress_val = daily_commands
+                else:
+                    progress_val = int(daily_stats.get(kind, 0))
+                if progress_val >= quest["target"]:
+                    reward_balance_changes += quest["reward"]
+                    daily_completed[qid] = True
+        for quest in weekly_active:
+            qid = quest["id"]
+            if not weekly_completed.get(qid):
+                kind = quest.get("kind", "commands")
+                if kind == "commands":
+                    progress_val = weekly_commands
+                else:
+                    progress_val = int(weekly_stats.get(kind, 0))
+                if progress_val >= quest["target"]:
+                    reward_balance_changes += quest["reward"]
+                    weekly_completed[qid] = True
+        daily_completed_json = json.dumps(daily_completed)
+        weekly_completed_json = json.dumps(weekly_completed)
+        daily_stats_json = json.dumps(daily_stats)
+        weekly_stats_json = json.dumps(weekly_stats)
+        await db.execute('UPDATE users SET daily_commands = ?, weekly_commands = ?, daily_reward_claimed = ?, weekly_reward_claimed = ?, daily_quest_completed_json = ?, weekly_quest_completed_json = ?, daily_stats_json = ?, weekly_stats_json = ? WHERE user_id = ? AND guild_id = ?', (daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_completed_json, weekly_completed_json, daily_stats_json, weekly_stats_json, user_id, guild_id))
+        if reward_balance_changes > 0:
+            await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (reward_balance_changes, user_id, guild_id))
+        await db.commit()
+
+def get_active_daily_quests(guild_id, timestamp=None):
+    if timestamp is None:
+        timestamp = int(time.time())
+    day = timestamp // 86400
+    seed = f"{guild_id}-{day}-daily"
+    rng = random.Random(seed)
+    pool = list(DAILY_QUESTS)
+    rng.shuffle(pool)
+    return pool[:3]
+
+def get_active_weekly_quests(guild_id, timestamp=None):
+    if timestamp is None:
+        timestamp = int(time.time())
+    week = timestamp // 604800
+    seed = f"{guild_id}-{week}-weekly"
+    rng = random.Random(seed)
+    pool = list(WEEKLY_QUESTS)
+    rng.shuffle(pool)
+    return pool[:3]
+
 # --- Logic Functions (Shared by Prefix & Slash) ---
 async def work_logic(user_id, guild_id):
     data = await get_user_data(user_id, guild_id)
@@ -258,7 +495,12 @@ async def work_logic(user_id, guild_id):
     if now - data['last_work'] < 300:
         return False, f"⏳ Your workers are tired! Wait **{300 - (now - data['last_work'])}s**."
     
-    earned = random.randint(100, 300) * data['level'] * (data['prestige'] + 1)
+    base = random.randint(100, 300) * data['level'] * (data['prestige'] + 1)
+    job_id = await get_user_job(user_id, guild_id)
+    multiplier = 1.0
+    if job_id and job_id in JOBS and JOBS[job_id].get('focus') == 'work':
+        multiplier = float(JOBS[job_id].get('multiplier', 1.0))
+    earned = int(base * multiplier)
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('UPDATE users SET balance = balance + ?, last_work = ? WHERE user_id = ? AND guild_id = ?', 
                         (earned, now, user_id, guild_id))
@@ -331,14 +573,31 @@ async def passive_income_task():
 @tasks.loop(hours=1)
 async def interest_task():
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT user_id, guild_id, bank FROM users WHERE bank > 0') as cursor:
+        async with db.execute('SELECT user_id, guild_id, bank, bank_plan FROM users WHERE bank > 0') as cursor:
             rows = await cursor.fetchall()
-            for row in rows:
-                uid, gid, bank = row
-                # 1% to 2% random interest
-                interest = int(bank * random.uniform(0.01, 0.02))
+        if not rows:
+            return
+        guild_groups = {}
+        for uid, gid, bank, plan in rows:
+            if gid not in guild_groups:
+                guild_groups[gid] = []
+            guild_groups[gid].append((uid, bank, plan or 'standard'))
+        updates = []
+        for gid, members in guild_groups.items():
+            banks_config = await get_guild_banks(gid)
+            for uid, bank, plan in members:
+                plan_data = banks_config.get(plan) or banks_config.get('standard')
+                if not plan_data:
+                    rate_min = 0.01
+                    rate_max = 0.02
+                else:
+                    rate_min = float(plan_data.get('min', 0.01))
+                    rate_max = float(plan_data.get('max', 0.02))
+                interest = int(bank * random.uniform(rate_min, rate_max))
                 if interest > 0:
-                    await db.execute('UPDATE users SET bank = bank + ? WHERE user_id = ? AND guild_id = ?', (interest, uid, gid))
+                    updates.append((interest, uid, gid))
+        if updates:
+            await db.executemany('UPDATE users SET bank = bank + ? WHERE user_id = ? AND guild_id = ?', updates)
         await db.commit()
 
 @tasks.loop(minutes=5)
@@ -403,8 +662,11 @@ async def on_command_error(ctx, error):
 
 @bot.event
 async def on_command_completion(ctx):
-    # Reward 5 XP per command used
+    if ctx.guild is None:
+        return
     leveled_up, new_level = await add_xp(ctx.author.id, ctx.guild.id, 5)
+    cmd_name = ctx.command.name if ctx.command else None
+    await increment_quests(ctx.author.id, ctx.guild.id, cmd_name)
     if leveled_up:
         await ctx.send(f"🎊 **LEVEL UP!** {ctx.author.mention} reached **Level {new_level}**!")
 
@@ -459,6 +721,7 @@ async def start_tutorial(ctx: commands.Context):
 @bot.hybrid_command(name="help", description="Show all available commands")
 async def help_command(ctx: commands.Context):
     prefix = await get_prefix(bot, ctx.message)
+    is_test_guild = ctx.guild and ctx.guild.id == TEST_GUILD_ID
     embed = discord.Embed(
         title="🏰 Empire Nexus | Grand Library", 
         description=(
@@ -479,14 +742,23 @@ async def help_command(ctx: commands.Context):
         f"**`{prefix}rank`** • Check level & XP"
     ), inline=True)
 
-    embed.add_field(name="🚀 Rewards & Assets", value=(
+    rewards_value = (
         f"**`{prefix}vote`** • Get Top.gg rewards\n"
         f"**`{prefix}autodeposit`** • Auto-save income\n"
         f"**`{prefix}shop`** • Buy income assets\n"
         f"**`{prefix}inventory`** (inv) • Your assets\n"
         f"**`{prefix}buyrole`** • Purchase server roles\n"
         f"**`{prefix}prestige`** • Ascend for bonus"
-    ), inline=True)
+    )
+    if is_test_guild:
+        rewards_value += (
+            f"\n**`{prefix}bank`** • View/switch bank plans\n"
+            f"**`{prefix}dailyquests`** • Daily quest checklist\n"
+            f"**`{prefix}weeklyquests`** • Weekly quest checklist\n"
+            f"**`{prefix}jobs`** • List available jobs\n"
+            f"**`{prefix}applyjob`** • Apply for a job"
+        )
+    embed.add_field(name="🚀 Rewards & Assets", value=rewards_value, inline=True)
     
     embed.add_field(name="🎰 Royal Casino", value=(
         f"**`{prefix}blackjack`** (bj) • Pro Blackjack\n"
@@ -800,6 +1072,10 @@ async def blackjack(ctx: commands.Context, amount: str = None):
     
     user = await get_user_data(ctx.author.id, ctx.guild.id)
     balance = user['balance']
+    job_id = await get_user_job(ctx.author.id, ctx.guild.id)
+    bj_multiplier = 1.0
+    if job_id and job_id in JOBS and JOBS[job_id].get('focus') == 'blackjack':
+        bj_multiplier = float(JOBS[job_id].get('multiplier', 1.0))
 
     if amount.lower() == 'all':
         bet_amount = balance
@@ -1130,8 +1406,13 @@ async def crime(ctx: commands.Context):
     if now - data['last_crime'] < 1800: 
         return await ctx.send(f"🚔 Cops are searching for you! Wait **{1800 - (now - data['last_crime'])}s**.")
     
-    if random.random() < 0.30: # Slightly lower success rate for higher stakes
-        earned = random.randint(1000, 3000) * (data['level'])
+    if random.random() < 0.30:
+        base = random.randint(1000, 3000) * data['level']
+        job_id = await get_user_job(ctx.author.id, ctx.guild.id)
+        multiplier = 1.0
+        if job_id and job_id in JOBS and JOBS[job_id].get('focus') == 'crime':
+            multiplier = float(JOBS[job_id].get('multiplier', 1.0))
+        earned = int(base * multiplier)
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute('UPDATE users SET balance = balance + ?, last_crime = ? WHERE user_id = ? AND guild_id = ?', (earned, now, ctx.author.id, ctx.guild.id))
             await db.commit()
@@ -1143,17 +1424,143 @@ async def crime(ctx: commands.Context):
             await db.commit()
         await ctx.send(f"👮 BUSTED! You lost **{loss:,} coins** while escaping.")
 
+@bot.hybrid_command(name="dailyquests", description="View your daily quest progress")
+async def dailyquests(ctx: commands.Context):
+    if ctx.guild.id != TEST_GUILD_ID:
+        await ctx.send("This command is currently only available in the test server.")
+        return
+    await ensure_quest_resets(ctx.author.id, ctx.guild.id)
+    data = await get_user_data(ctx.author.id, ctx.guild.id)
+    done = data['daily_commands']
+    try:
+        completed = json.loads(data['daily_quest_completed_json']) if data['daily_quest_completed_json'] else {}
+    except:
+        completed = {}
+    quests = get_active_daily_quests(ctx.guild.id)
+    embed = discord.Embed(title="📅 Daily Quests", color=0x00d2ff)
+    if not quests:
+        embed.description = "No quests configured."
+    else:
+        for q in quests:
+            target = q["target"]
+            reward = q["reward"]
+            progress_pct = min(100, int(done / target * 100)) if target > 0 else 100
+            bar_len = 12
+            filled = int(bar_len * progress_pct / 100)
+            bar = "🟦" * filled + "⬛" * (bar_len - filled)
+            is_done = completed.get(q["id"], False)
+            prefix = "✅" if is_done else "❌"
+            status = "Completed" if is_done else ("Ready" if done >= target else "In progress")
+            embed.add_field(
+                name=f"{prefix} {q['description']}",
+                value=f"Reward: {reward:,} coins\nProgress: {min(done, target)} / {target} ({progress_pct}%)\n{bar}\nStatus: {status}",
+                inline=False
+            )
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="weeklyquests", description="View your weekly quest progress")
+async def weeklyquests(ctx: commands.Context):
+    if ctx.guild.id != TEST_GUILD_ID:
+        await ctx.send("This command is currently only available in the test server.")
+        return
+    await ensure_quest_resets(ctx.author.id, ctx.guild.id)
+    data = await get_user_data(ctx.author.id, ctx.guild.id)
+    done = data['weekly_commands']
+    try:
+        completed = json.loads(data['weekly_quest_completed_json']) if data['weekly_quest_completed_json'] else {}
+    except:
+        completed = {}
+    quests = get_active_weekly_quests(ctx.guild.id)
+    embed = discord.Embed(title="📆 Weekly Quests", color=0x00d2ff)
+    if not quests:
+        embed.description = "No quests configured."
+    else:
+        for q in quests:
+            target = q["target"]
+            reward = q["reward"]
+            progress_pct = min(100, int(done / target * 100)) if target > 0 else 100
+            bar_len = 12
+            filled = int(bar_len * progress_pct / 100)
+            bar = "🟦" * filled + "⬛" * (bar_len - filled)
+            is_done = completed.get(q["id"], False)
+            prefix = "✅" if is_done else "❌"
+            status = "Completed" if is_done else ("Ready" if done >= target else "In progress")
+            embed.add_field(
+                name=f"{prefix} {q['description']}",
+                value=f"Reward: {reward:,} coins\nProgress: {min(done, target)} / {target} ({progress_pct}%)\n{bar}\nStatus: {status}",
+                inline=False
+            )
+    await ctx.send(embed=embed)
+
 # --- Hybrid Commands (Prefix + Slash) ---
 
 @bot.hybrid_command(name="balance", aliases=["bal"], description="Check your balance")
 async def balance(ctx: commands.Context, member: discord.Member = None):
     target = member or ctx.author
     data = await get_user_data(target.id, ctx.guild.id)
+    bank_plan = data['bank_plan'] if 'bank_plan' in data.keys() else 'standard'
+    banks = await get_guild_banks(ctx.guild.id)
+    plan = banks.get(bank_plan) or banks.get('standard')
+    if plan:
+        rate_min = plan.get('min', 0.01)
+        rate_max = plan.get('max', 0.02)
+        plan_name = plan.get('name', 'Standard Vault')
+        rate_str = f"{rate_min*100:.2f}%–{rate_max*100:.2f}%/h"
+    else:
+        plan_name = "Standard Vault"
+        rate_str = "1.00%–2.00%/h"
     embed = discord.Embed(title=f"💰 {target.display_name}'s Vault", color=0xf1c40f)
     embed.add_field(name="Wallet", value=f"🪙 `{data['balance']:,}`", inline=True)
     embed.add_field(name="Bank", value=f"🏦 `{data['bank']:,}`", inline=True)
+    embed.add_field(name="Bank Plan", value=f"{plan_name}\n{rate_str}", inline=False)
     embed.set_footer(text=f"Total: {data['balance'] + data['bank']:,} coins")
     await ctx.send(embed=embed)
+
+@app_commands.guilds(discord.Object(id=TEST_GUILD_ID))
+@bot.hybrid_command(name="bank", description="View and switch bank plans")
+async def bank_cmd(ctx: commands.Context, plan_id: str = None):
+    if ctx.guild.id != TEST_GUILD_ID:
+        await ctx.send("This command is currently only available in the test server.")
+        return
+    data = await get_user_data(ctx.author.id, ctx.guild.id)
+    banks = await get_guild_banks(ctx.guild.id)
+    current = data['bank_plan'] if 'bank_plan' in data.keys() and data['bank_plan'] else 'standard'
+    if not plan_id:
+        desc = ""
+        for b_id, info in banks.items():
+            rate_min = float(info.get('min', 0.01)) * 100
+            rate_max = float(info.get('max', 0.02)) * 100
+            price = int(info.get('price', 0))
+            min_level = int(info.get('min_level', 0))
+            marker = "✅" if b_id == current else "➖"
+            desc += f"{marker} **{info.get('name', b_id)}** (`{b_id}`)\n{rate_min:.2f}%–{rate_max:.2f}%/h • Cost: {price:,} • Min Lvl: {min_level}\n\n"
+        embed = discord.Embed(title="🏦 Bank Plans", description=desc or "No plans configured.", color=0x00d2ff)
+        embed.set_footer(text="Use /bank <plan_id> to switch.")
+        await ctx.send(embed=embed)
+        return
+    plan_id = plan_id.lower()
+    if plan_id not in banks:
+        await ctx.send("Invalid bank plan id.")
+        return
+    if plan_id == current:
+        await ctx.send("You already use this bank plan.")
+        return
+    info = banks[plan_id]
+    price = int(info.get('price', 0))
+    min_level = int(info.get('min_level', 0))
+    if data['level'] < min_level:
+        await ctx.send(f"You need at least level {min_level} to use this plan.")
+        return
+    if price > 0 and data['balance'] < price:
+        await ctx.send(f"You need {price - data['balance']:,} more coins in your wallet.")
+        return
+    async with aiosqlite.connect(DB_FILE) as db:
+        if price > 0:
+            await db.execute('UPDATE users SET balance = balance - ?, bank_plan = ? WHERE user_id = ? AND guild_id = ?', (price, plan_id, ctx.author.id, ctx.guild.id))
+        else:
+            await db.execute('UPDATE users SET bank_plan = ? WHERE user_id = ? AND guild_id = ?', (plan_id, ctx.author.id, ctx.guild.id))
+        await db.commit()
+    await ctx.send(f"Switched your bank plan to **{info.get('name', plan_id)}**.")
 
 @bot.hybrid_command(name="work", description="Work to earn coins")
 @commands.cooldown(1, 300, commands.BucketType.user)
@@ -1294,6 +1701,70 @@ async def setup_cmd(ctx: commands.Context):
     embed.set_footer(text="Rule with iron, prosper with gold.")
     await ctx.send(embed=embed)
 
+@app_commands.guilds(discord.Object(id=TEST_GUILD_ID))
+@bot.hybrid_command(name="jobs", description="List available jobs")
+async def jobs(ctx: commands.Context):
+    if ctx.guild.id != TEST_GUILD_ID:
+        await ctx.send("This command is currently only available in the test server.")
+        return
+    current = await get_user_job(ctx.author.id, ctx.guild.id)
+    data = await get_user_data(ctx.author.id, ctx.guild.id)
+    desc = ""
+    for job_id, info in JOBS.items():
+        marker = "✅" if job_id == current else "➖"
+        name = info.get("name", job_id)
+        diff = info.get("difficulty", "Unknown")
+        min_level = info.get("min_level", 0)
+        mult = float(info.get("multiplier", 1.0))
+        desc += f"{marker} **{name}** (`{job_id}`)\nDifficulty: {diff} • Min Lvl: {min_level} • Income x{mult:.2f}\n\n"
+    embed = discord.Embed(title="⚒️ Available Jobs", description=desc or "No jobs configured.", color=0x00d2ff)
+    embed.set_footer(text=f"Your level: {data['level']}. Use /applyjob <id> to apply.")
+    await ctx.send(embed=embed)
+
+@app_commands.guilds(discord.Object(id=TEST_GUILD_ID))
+@bot.hybrid_command(name="applyjob", description="Apply for a job")
+async def applyjob(ctx: commands.Context, job_id: str):
+    if ctx.guild.id != TEST_GUILD_ID:
+        await ctx.send("This command is currently only available in the test server.")
+        return
+    job_id = job_id.lower()
+    if job_id not in JOBS:
+        await ctx.send("Invalid job id.")
+        return
+    info = JOBS[job_id]
+    data = await get_user_data(ctx.author.id, ctx.guild.id)
+    if await get_user_job(ctx.author.id, ctx.guild.id) == job_id:
+        await ctx.send("You already have this job.")
+        return
+    if data['level'] < info.get("min_level", 0):
+        await ctx.send(f"You need at least level {info.get('min_level', 0)} for this job.")
+        return
+    question = info.get("question", "")
+    answer = info.get("answer", "").lower()
+    if not question or not answer:
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('INSERT OR REPLACE INTO user_jobs (user_id, guild_id, job_id) VALUES (?, ?, ?)', (ctx.author.id, ctx.guild.id, job_id))
+            await db.commit()
+        await ctx.send(f"You are now hired as **{info.get('name', job_id)}**.")
+        return
+    await ctx.send(f"Application question for **{info.get('name', job_id)}**:\n{question}")
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+    try:
+        reply = await bot.wait_for('message', check=check, timeout=60)
+    except:
+        await ctx.send("Application timed out.")
+        return
+    text = reply.content.strip().lower()
+    cleaned = text.lstrip("./!").split()[0] if text else ""
+    if answer not in text and cleaned != answer:
+        await ctx.send("Application rejected.")
+        return
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR REPLACE INTO user_jobs (user_id, guild_id, job_id) VALUES (?, ?, ?)', (ctx.author.id, ctx.guild.id, job_id))
+        await db.commit()
+    await ctx.send(f"Application accepted. You are now **{info.get('name', job_id)}**.")
+
 @bot.hybrid_command(name="setprefix", description="Change the bot's prefix for this server")
 @commands.has_permissions(administrator=True)
 async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
@@ -1307,5 +1778,3 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
-
-
