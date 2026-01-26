@@ -247,7 +247,7 @@ async def work_logic(user_id, guild_id):
     return True, f"⚒️ You supervised the mines and earned **{earned:,} coins**!" + (f"\n🎊 **LEVEL UP!** You reached **Level {new_level}**!" if leveled_up else "")
 
 # --- Tasks ---
-@tasks.loop(minutes=1)
+@tasks.loop(minutes=10)
 async def passive_income_task():
     async with aiosqlite.connect(DB_FILE) as db:
         # Fetch all assets and user data in one go to handle auto-deposit and income
@@ -412,7 +412,7 @@ async def start_tutorial(ctx: commands.Context):
             "**Step 1: Get Started**\n"
             "Use `.work` or `/work` to supervise the mines and earn your first coins.\n\n"
             "**Step 2: Invest Wisely**\n"
-            "Visit the `.shop` and buy your first **Lemonade Stand**. It will generate income for you every minute, even while you sleep!\n\n"
+            "Visit the `.shop` and buy your first **Lemonade Stand**. It will generate income for you every 10 minutes, even while you sleep!\n\n"
             "**Step 3: Secure Your Wealth**\n"
             "Other rulers can `.rob` you! Use `.deposit <amount>` (or `.dep`) to move your coins into the **Bank**. Banked coins are safe from thieves and earn **hourly interest**.\n\n"
             "**Step 4: Expand & Conquer**\n"
