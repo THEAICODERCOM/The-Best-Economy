@@ -143,6 +143,14 @@ async def init_db():
             guild_id INTEGER PRIMARY KEY, prefix TEXT DEFAULT '.',
             role_shop_json TEXT DEFAULT '{}', custom_assets_json TEXT DEFAULT '{}'
         )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS guild_wonder (
+            guild_id INTEGER PRIMARY KEY,
+            level INTEGER DEFAULT 0,
+            progress INTEGER DEFAULT 0,
+            goal INTEGER DEFAULT 50000,
+            boost_multiplier REAL DEFAULT 1.25,
+            boost_until INTEGER DEFAULT 0
+        )''')
         await db.execute('''CREATE TABLE IF NOT EXISTS global_votes (
             user_id INTEGER PRIMARY KEY, last_vote INTEGER DEFAULT 0
         )''')
@@ -228,6 +236,21 @@ async def get_guild_assets(guild_id):
                     return DEFAULT_ASSETS
     return DEFAULT_ASSETS
 
+def compute_boost_multiplier(level):
+    return min(2.0, 1.25 + (level * 0.05))
+
+async def ensure_wonder(guild_id):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR IGNORE INTO guild_wonder (guild_id) VALUES (?)', (guild_id,))
+        await db.commit()
+
+async def get_wonder(guild_id):
+    await ensure_wonder(guild_id)
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM guild_wonder WHERE guild_id = ?', (guild_id,)) as cursor:
+            return await cursor.fetchone()
+
 # --- Logic Functions (Shared by Prefix & Slash) ---
 async def work_logic(user_id, guild_id):
     data = await get_user_data(user_id, guild_id)
@@ -273,6 +296,12 @@ async def passive_income_task():
 
         for gid, members in guild_groups.items():
             assets_config = await get_guild_assets(gid)
+            await db.execute('INSERT OR IGNORE INTO guild_wonder (guild_id) VALUES (?)', (gid,))
+            async with db.execute('SELECT boost_multiplier, boost_until FROM guild_wonder WHERE guild_id = ?', (gid,)) as cursor:
+                wonder_row = await cursor.fetchone()
+            boost_multiplier = 1.0
+            if wonder_row:
+                boost_multiplier = wonder_row[0] if now < wonder_row[1] else 1.0
             user_data = {} # uid -> {'income': 0, 'auto_dep': 0, 'last_vote': 0}
             
             for uid, aid, count, auto_dep, last_vote in members:
@@ -286,10 +315,11 @@ async def passive_income_task():
                 if data['income'] > 0:
                     # Check if auto-deposit is active (voted in last 12 hours)
                     is_voter = (now - data['last_vote']) < 43200 # 12 hours
+                    adjusted_income = int(data['income'] * boost_multiplier)
                     if data['auto_dep'] and is_voter:
-                        updates_bank.append((data['income'], uid, gid))
+                        updates_bank.append((adjusted_income, uid, gid))
                     else:
-                        updates_balance.append((data['income'], uid, gid))
+                        updates_balance.append((adjusted_income, uid, gid))
 
         if updates_balance:
             await db.executemany('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', updates_balance)
@@ -469,6 +499,8 @@ async def help_command(ctx: commands.Context):
         f"**`{prefix}shop`** • Browse assets\n"
         f"**`{prefix}buy <id>`** • Expand empire\n"
         f"**`{prefix}inventory`** • View assets\n"
+        f"**`{prefix}wonder`** • Server wonder status\n"
+        f"**`{prefix}contribute`** • Fund the wonder\n"
         f"**`{prefix}profile`** • Detailed stats\n"
         f"**`{prefix}prestige`** • Level 10 reset\n"
         f"**`{prefix}buyrole`** • Buy server roles"
@@ -541,6 +573,78 @@ async def inventory(ctx: commands.Context, member: discord.Member = None):
     embed.description = inv_str
     embed.add_field(name="📈 Total Passive Income", value=f"💸 {total_income:,} coins / 10 minutes")
     await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="wonder", description="View your server Wonder progress")
+async def wonder(ctx: commands.Context):
+    data = await get_wonder(ctx.guild.id)
+    now = int(time.time())
+    goal = data['goal'] or 0
+    progress = data['progress']
+    level = data['level']
+    boost_multiplier = data['boost_multiplier']
+    boost_until = data['boost_until']
+    progress_pct = int((progress / goal) * 100) if goal > 0 else 0
+    bar_length = 12
+    filled = int((progress_pct / 100) * bar_length)
+    bar = "🟦" * filled + "⬛" * (bar_length - filled)
+    if boost_until > now:
+        remaining = boost_until - now
+        hours, remainder = divmod(remaining, 3600)
+        minutes, _ = divmod(remainder, 60)
+        boost_status = f"Active • {boost_multiplier:.2f}x • {hours}h {minutes}m left"
+    else:
+        boost_status = "Inactive"
+    embed = discord.Embed(title=f"🏛️ {ctx.guild.name} Wonder", color=0x00d2ff)
+    embed.add_field(name="Level", value=f"{level}", inline=True)
+    embed.add_field(name="Progress", value=f"{progress:,} / {goal:,} coins", inline=True)
+    embed.add_field(name="Boost", value=boost_status, inline=False)
+    embed.add_field(name="Progress Bar", value=bar, inline=False)
+    embed.set_footer(text="Contribute with /contribute <amount>")
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="contribute", description="Contribute coins to your server Wonder")
+async def contribute(ctx: commands.Context, amount: int):
+    if amount <= 0:
+        return await ctx.send("❌ Enter a positive amount.")
+    user = await get_user_data(ctx.author.id, ctx.guild.id)
+    if user['balance'] < amount:
+        return await ctx.send(f"❌ You need **{amount - user['balance']:,} more coins**.")
+    now = int(time.time())
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR IGNORE INTO guild_wonder (guild_id) VALUES (?)', (ctx.guild.id,))
+        async with db.execute('SELECT level, progress, goal, boost_multiplier, boost_until FROM guild_wonder WHERE guild_id = ?', (ctx.guild.id,)) as cursor:
+            row = await cursor.fetchone()
+        level, progress, goal, boost_multiplier, boost_until = row
+        remaining = amount
+        leveled_up = 0
+        while remaining > 0:
+            to_goal = max(0, goal - progress)
+            if to_goal == 0:
+                level += 1
+                goal = int(goal * 1.5 + 10000)
+                boost_multiplier = compute_boost_multiplier(level)
+                boost_until = now + 21600
+                leveled_up += 1
+                progress = 0
+                continue
+            if remaining < to_goal:
+                progress += remaining
+                remaining = 0
+            else:
+                remaining -= to_goal
+                level += 1
+                progress = 0
+                goal = int(goal * 1.5 + 10000)
+                boost_multiplier = compute_boost_multiplier(level)
+                boost_until = now + 21600
+                leveled_up += 1
+        await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = ?', (amount, ctx.author.id, ctx.guild.id))
+        await db.execute('UPDATE guild_wonder SET level = ?, progress = ?, goal = ?, boost_multiplier = ?, boost_until = ? WHERE guild_id = ?', (level, progress, goal, boost_multiplier, boost_until, ctx.guild.id))
+        await db.commit()
+    if leveled_up > 0:
+        await ctx.send(f"🏛️ **Wonder Level Up!** Your server reached **Level {level}** and unlocked **{boost_multiplier:.2f}x** passive income for 6 hours.")
+    else:
+        await ctx.send(f"✅ Contributed **{amount:,} coins** to the Wonder. Progress: **{progress:,} / {goal:,}**.")
 
 @bot.hybrid_command(name="roulette", description="Bet your coins on a roulette spin")
 async def roulette(ctx: commands.Context, amount: str = None, space: str = None):
@@ -1203,4 +1307,5 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
