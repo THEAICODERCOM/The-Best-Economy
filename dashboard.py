@@ -360,9 +360,18 @@ def dashboard(guild_id):
     conn.close()
     
     prefix = config['prefix'] if config else '!'
-    role_shop = json.loads(config['role_shop_json']) if config and config['role_shop_json'] else {}
-    custom_assets = json.loads(config['custom_assets_json']) if config and config['custom_assets_json'] else {}
-    bank_plans = json.loads(config['bank_plans_json']) if config and config['bank_plans_json'] else {}
+    try:
+        role_shop = json.loads(config['role_shop_json']) if config and config['role_shop_json'] else {}
+    except Exception:
+        role_shop = {}
+    try:
+        custom_assets = json.loads(config['custom_assets_json']) if config and config['custom_assets_json'] else {}
+    except Exception:
+        custom_assets = {}
+    try:
+        bank_plans = json.loads(config['bank_plans_json']) if config and config['bank_plans_json'] else {}
+    except Exception:
+        bank_plans = {}
     wonder_level = wonder['level']
     wonder_progress = wonder['progress']
     wonder_goal = wonder['goal']
@@ -716,7 +725,7 @@ def dashboard(guild_id):
                     const allowedMinPct = 1 + steps * 1;
                     const allowedMaxPct = 2 + steps * 2;
                     if(minPercent > allowedMinPct || maxPercent > allowedMaxPct) {{
-                        alert(`For this price, max allowed interest is ${allowedMinPct.toFixed(2)}% min / ${allowedMaxPct.toFixed(2)}% max.`);
+                        alert("For this price, max allowed interest is " + allowedMinPct.toFixed(2) + "% min / " + allowedMaxPct.toFixed(2) + "% max.");
                         return;
                     }}
                     const min = minPercent / 100.0;
@@ -953,3 +962,4 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
