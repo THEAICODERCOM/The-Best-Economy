@@ -48,6 +48,30 @@ DEFAULT_ASSETS = {
     "coffee_shop": {"name": "Coffee Shop", "price": 10000, "income": 150},
 }
 
+DEFAULT_BANK_PLANS = {
+    "standard": {
+        "name": "Standard Vault",
+        "min": 0.01,
+        "max": 0.02,
+        "price": 0,
+        "min_level": 0
+    },
+    "saver": {
+        "name": "Saver Vault",
+        "min": 0.015,
+        "max": 0.025,
+        "price": 25000,
+        "min_level": 5
+    },
+    "royal": {
+        "name": "Royal Vault",
+        "min": 0.02,
+        "max": 0.03,
+        "price": 100000,
+        "min_level": 10
+    }
+}
+
 JOBS = {
     "miner": {
         "name": "Mine Overseer",
@@ -319,9 +343,27 @@ async def get_guild_assets(guild_id):
             if row and row[0]:
                 try:
                     custom = json.loads(row[0])
-                    # Merge default and custom
-                    # Custom assets (which include defaults if edited in dashboard) will overwrite
-                    return {**DEFAULT_ASSETS, **custom}
+                    if isinstance(custom, dict):
+                        fixed = {}
+                        for key, data in custom.items():
+                            try:
+                                price = int(data.get("price", 0))
+                                income = int(data.get("income", 0))
+                            except Exception:
+                                continue
+                            if price <= 0:
+                                continue
+                            if income < 0:
+                                income = 0
+                            max_income = price * 20
+                            if income > max_income:
+                                income = max_income
+                            fixed[key] = {
+                                "name": data.get("name", key),
+                                "price": price,
+                                "income": income
+                            }
+                        return {**DEFAULT_ASSETS, **fixed}
                 except json.JSONDecodeError:
                     return DEFAULT_ASSETS
     return DEFAULT_ASSETS
@@ -334,18 +376,41 @@ async def get_guild_banks(guild_id):
                 try:
                     data = json.loads(row[0])
                     if isinstance(data, dict) and data:
-                        return data
+                        fixed = {}
+                        for key, info in data.items():
+                            try:
+                                price = int(info.get("price", 0))
+                            except Exception:
+                                price = 0
+                            steps = max(0, price // 50000)
+                            allowed_min_pct = 1 + steps * 1
+                            allowed_max_pct = 2 + steps * 2
+                            try:
+                                min_rate = float(info.get("min", 0.01))
+                                max_rate = float(info.get("max", 0.02))
+                            except Exception:
+                                min_rate = 0.01
+                                max_rate = 0.02
+                            min_pct = max(0.0, min_rate * 100.0)
+                            max_pct = max(0.0, max_rate * 100.0)
+                            if min_pct > allowed_min_pct:
+                                min_pct = allowed_min_pct
+                            if max_pct > allowed_max_pct:
+                                max_pct = allowed_max_pct
+                            if max_pct < min_pct:
+                                max_pct = min_pct
+                            fixed[key] = {
+                                "name": info.get("name", key),
+                                "min": min_pct / 100.0,
+                                "max": max_pct / 100.0,
+                                "price": price,
+                                "min_level": int(info.get("min_level", 0))
+                            }
+                        if fixed:
+                            return fixed
                 except json.JSONDecodeError:
                     pass
-    return {
-        "standard": {
-            "name": "Standard Vault",
-            "min": 0.01,
-            "max": 0.02,
-            "price": 0,
-            "min_level": 0
-        }
-    }
+    return DEFAULT_BANK_PLANS
 
 def compute_boost_multiplier(level):
     return min(2.0, 1.25 + (level * 0.05))
@@ -1755,4 +1820,3 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
-
