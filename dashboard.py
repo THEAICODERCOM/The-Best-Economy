@@ -403,7 +403,10 @@ def dashboard(guild_id):
                 <div class="list-item-name">{role_name}</div>
                 <div class="list-item-price">{price:,} coins</div>
             </div>
-            <button onclick="deleteItem('role', '{r_id}')" class="btn-delete">×</button>
+            <div style="display: flex; gap: 6px;">
+                <button onclick="editItem('role', '{r_id}')" class="btn-delete" style="background: #2980b9;">✎</button>
+                <button onclick="deleteItem('role', '{r_id}')" class="btn-delete">×</button>
+            </div>
         </div>
         """
         
@@ -415,15 +418,8 @@ def dashboard(guild_id):
 
     bank_items_html = ""
     if not bank_plans:
-        bank_plans = {
-            "standard": {
-                "name": "Standard Vault",
-                "min": 0.01,
-                "max": 0.02,
-                "price": 0,
-                "min_level": 0
-            }
-        }
+        from bot import DEFAULT_BANK_PLANS
+        bank_plans = DEFAULT_BANK_PLANS
     for b_id, data in bank_plans.items():
         rate_min = float(data.get("min", 0.01)) * 100
         rate_max = float(data.get("max", 0.02)) * 100
@@ -433,7 +429,10 @@ def dashboard(guild_id):
                 <div class="list-item-name">{data.get('name', b_id)}</div>
                 <div class="list-item-price">{rate_min:.2f}%–{rate_max:.2f}%/h • Cost: {int(data.get('price', 0)):,} • Min Lvl: {int(data.get('min_level', 0))}</div>
             </div>
-            <button onclick="deleteItem('bank', '{b_id}')" class="btn-delete">×</button>
+            <div style="display: flex; gap: 6px;">
+                <button onclick="editItem('bank', '{b_id}')" class="btn-delete" style="background: #2980b9;">✎</button>
+                <button onclick="deleteItem('bank', '{b_id}')" class="btn-delete">×</button>
+            </div>
         </div>
         """
 
@@ -444,7 +443,10 @@ def dashboard(guild_id):
                 <div class="list-item-name">{data['name']}</div>
                 <div class="list-item-price">{data['price']:,} coins • {data['income']:,}/10min</div>
             </div>
-            <button onclick="deleteItem('asset', '{a_id}')" class="btn-delete">×</button>
+            <div style="display: flex; gap: 6px;">
+                <button onclick="editItem('asset', '{a_id}')" class="btn-delete" style="background: #2980b9;">✎</button>
+                <button onclick="deleteItem('asset', '{a_id}')" class="btn-delete">×</button>
+            </div>
         </div>
         """
 
@@ -554,7 +556,7 @@ def dashboard(guild_id):
             <!-- Role Modal -->
             <div id="roleModal" class="modal">
                 <div class="modal-content">
-                    <h2 class="card-title">Add Role to Shop</h2>
+                    <h2 class="card-title" id="roleModalTitle">Add Role to Shop</h2>
                     <div class="form-group">
                         <label>Select Role</label>
                         <select id="modalRoleSelect">
@@ -575,7 +577,7 @@ def dashboard(guild_id):
             <!-- Asset Modal -->
             <div id="assetModal" class="modal">
                 <div class="modal-content">
-                    <h2 class="card-title">Create New Asset</h2>
+                    <h2 class="card-title" id="assetModalTitle">Create New Asset</h2>
                     <div class="form-group">
                         <label>Asset Name</label>
                         <input type="text" id="modalAssetName" placeholder="e.g. Gold Mine">
@@ -597,7 +599,7 @@ def dashboard(guild_id):
 
             <div id="bankModal" class="modal">
                 <div class="modal-content">
-                    <h2 class="card-title">Create Bank Plan</h2>
+                    <h2 class="card-title" id="bankModalTitle">Create Bank Plan</h2>
                     <div class="form-group">
                         <label>Plan ID</label>
                         <input type="text" id="modalBankId" placeholder="e.g. royal_vault">
@@ -646,6 +648,9 @@ def dashboard(guild_id):
                 let roleShop = {json.dumps(role_shop)};
                 let customAssets = {json.dumps(custom_assets)};
                 let bankPlans = {json.dumps(bank_plans)};
+                let editingRoleId = null;
+                let editingAssetId = null;
+                let editingBankId = null;
                 
                 // Initialize customAssets with defaults if it's empty to show them on first load
                 // but only if the user hasn't saved anything yet (this is for visual consistency)
@@ -666,7 +671,9 @@ def dashboard(guild_id):
                 function addRole() {{
                     const id = document.getElementById('modalRoleSelect').value;
                     const price = parseInt(document.getElementById('modalRolePrice').value);
+                    if(!id || isNaN(price) || price <= 0) return;
                     roleShop[id] = price;
+                    editingRoleId = null;
                     updateUI(true);
                 }}
 
@@ -674,8 +681,16 @@ def dashboard(guild_id):
                     const name = document.getElementById('modalAssetName').value;
                     const price = parseInt(document.getElementById('modalAssetPrice').value);
                     const income = parseInt(document.getElementById('modalAssetIncome').value);
-                    const id = name.toLowerCase().replace(/\\s+/g, '_');
+                    if(!name || isNaN(price) || price <= 0 || isNaN(income) || income < 0) return;
+                    const maxIncome = price * 20;
+                    if(income > maxIncome) {{
+                        alert('Income cannot be more than price × 20.');
+                        return;
+                    }}
+                    let id = editingAssetId;
+                    if(!id) id = name.toLowerCase().replace(/\\s+/g, '_');
                     combinedAssets[id] = {{ name, price, income }};
+                    editingAssetId = null;
                     updateUI(true);
                 }}
 
@@ -687,15 +702,62 @@ def dashboard(guild_id):
                 }}
 
                 function addBank() {{
-                    const id = document.getElementById('modalBankId').value.toLowerCase().replace(/\\s+/g, '_');
+                    const rawId = document.getElementById('modalBankId').value.toLowerCase().replace(/\\s+/g, '_');
                     const name = document.getElementById('modalBankName').value;
-                    const min = parseFloat(document.getElementById('modalBankMin').value) / 100.0;
-                    const max = parseFloat(document.getElementById('modalBankMax').value) / 100.0;
+                    const minPercent = parseFloat(document.getElementById('modalBankMin').value);
+                    const maxPercent = parseFloat(document.getElementById('modalBankMax').value);
                     const price = parseInt(document.getElementById('modalBankPrice').value);
                     const minLevel = parseInt(document.getElementById('modalBankMinLevel').value);
-                    if(!id) return;
+                    if(!rawId || !name || isNaN(minPercent) || isNaN(maxPercent) || minPercent <= 0 || maxPercent <= 0 || maxPercent < minPercent || isNaN(price) || price < 0 || isNaN(minLevel) || minLevel < 0) {{
+                        alert('Invalid bank plan values.');
+                        return;
+                    }}
+                    const steps = Math.floor(price / 50000);
+                    const allowedMinPct = 1 + steps * 1;
+                    const allowedMaxPct = 2 + steps * 2;
+                    if(minPercent > allowedMinPct || maxPercent > allowedMaxPct) {{
+                        alert(`For this price, max allowed interest is ${allowedMinPct.toFixed(2)}% min / ${allowedMaxPct.toFixed(2)}% max.`);
+                        return;
+                    }}
+                    const min = minPercent / 100.0;
+                    const max = maxPercent / 100.0;
+                    let id = editingBankId || rawId;
                     bankPlans[id] = {{ name, min, max, price, min_level: minLevel }};
+                    editingBankId = null;
                     updateUI(true);
+                }}
+
+                function editItem(type, id) {{
+                    if(type === 'role') {{
+                        editingRoleId = id;
+                        const select = document.getElementById('modalRoleSelect');
+                        const priceInput = document.getElementById('modalRolePrice');
+                        document.getElementById('roleModalTitle').textContent = 'Edit Role in Shop';
+                        if(select) select.value = id;
+                        if(priceInput) priceInput.value = roleShop[id] || 0;
+                        openModal('roleModal');
+                    }} else if(type === 'asset') {{
+                        editingAssetId = id;
+                        const data = combinedAssets[id];
+                        if(!data) return;
+                        document.getElementById('assetModalTitle').textContent = 'Edit Asset';
+                        document.getElementById('modalAssetName').value = data.name;
+                        document.getElementById('modalAssetPrice').value = data.price;
+                        document.getElementById('modalAssetIncome').value = data.income;
+                        openModal('assetModal');
+                    }} else if(type === 'bank') {{
+                        editingBankId = id;
+                        const data = bankPlans[id];
+                        if(!data) return;
+                        document.getElementById('bankModalTitle').textContent = 'Edit Bank Plan';
+                        document.getElementById('modalBankId').value = id;
+                        document.getElementById('modalBankName').value = data.name || id;
+                        document.getElementById('modalBankMin').value = (parseFloat(data.min || 0.01) * 100).toFixed(2);
+                        document.getElementById('modalBankMax').value = (parseFloat(data.max || 0.02) * 100).toFixed(2);
+                        document.getElementById('modalBankPrice').value = data.price || 0;
+                        document.getElementById('modalBankMinLevel').value = data.min_level || 0;
+                        openModal('bankModal');
+                    }}
                 }}
 
                 function updateUI(submit = false) {{
@@ -891,12 +953,3 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
-
-
-
-
-
-
-
-
-
