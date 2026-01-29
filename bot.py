@@ -784,7 +784,7 @@ async def start_tutorial(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="help", description="Show all available commands")
-async def help_command(ctx: commands.Context, category: str = None):
+async def help_command(ctx: commands.Context, *, category: str = None):
     prefix = await get_prefix(bot, ctx.message)
     categories = {
         "making money": {
@@ -1884,5 +1884,3 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
-
-
