@@ -307,7 +307,7 @@ async def add_xp(user_id, guild_id, amount):
             row = await cursor.fetchone()
             if row:
                 current_xp, current_level = row
-                next_level_xp = current_level * 500
+                next_level_xp = current_level * 100
                 if current_xp >= next_level_xp:
                     new_level = current_level + 1
                     await db.execute('UPDATE users SET level = ?, xp = xp - ? WHERE user_id = ? AND guild_id = ?', 
@@ -1747,7 +1747,7 @@ async def rank(ctx: commands.Context, member: discord.Member = None):
     
     xp = data['xp']
     level = data['level']
-    needed_xp = level * 500
+    needed_xp = level * 100
     
     # Simple progress bar
     progress = min(1.0, xp / needed_xp)
