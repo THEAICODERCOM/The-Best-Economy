@@ -784,67 +784,131 @@ async def start_tutorial(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="help", description="Show all available commands")
-async def help_command(ctx: commands.Context):
+async def help_command(ctx: commands.Context, category: str = None):
     prefix = await get_prefix(bot, ctx.message)
+    categories = {
+        "making money": {
+            "title": "💸 Making Money",
+            "commands": [
+                f"`{prefix}work`, `/work` – Supervise mines for coins.",
+                f"`{prefix}crime`, `/crime` – High risk, high reward heists.",
+                f"`{prefix}blackjack`, `/blackjack` – Casino blackjack.",
+                f"`{prefix}roulette`, `/roulette` – Spin the wheel.",
+                f"`{prefix}riddle`, `/riddle` and `{prefix}answer` – Solve riddles.",
+                f"`{prefix}jobs`, `/jobs` – View available jobs.",
+                f"`{prefix}applyjob <id>`, `/applyjob` – Apply for a job.",
+                f"`{prefix}dailyquests`, `/dailyquests` – Daily quest checklist.",
+                f"`{prefix}weeklyquests`, `/weeklyquests` – Weekly quest checklist."
+            ],
+            "explain": (
+                "Use **work**, **crime**, and the **casino** commands to generate coins. "
+                "Pick a **job** with `jobs`/`applyjob` to boost income from your favourite activity. "
+                "Daily and weekly quests reward you for using commands consistently, so if you grind "
+                "work, crime, blackjack or roulette while quests are active you will complete multiple "
+                "quests at once and snowball much faster."
+            )
+        },
+        "banking": {
+            "title": "🏦 Banking",
+            "commands": [
+                f"`{prefix}deposit <amount>`, `/deposit` – Move coins into the bank.",
+                f"`{prefix}withdraw <amount>`, `/withdraw` – Take coins out of the bank.",
+                f"`{prefix}balance`, `/balance` – View wallet, bank and bank plan.",
+                f"`{prefix}bank`, `/bank` – View and switch bank plans.",
+                f"`{prefix}autodeposit`, `/autodeposit` – Auto‑deposit passive income (with vote).",
+                f"`{prefix}vote`, `/vote` – Vote for Top.gg rewards.",
+                f"`{prefix}leaderboard`, `/leaderboard` – Money or XP rankings."
+            ],
+            "explain": (
+                "Make money first, then **secure** it in the bank with `deposit`. "
+                "Choosing a better **bank plan** with `bank` increases your hourly interest, "
+                "so long‑term savings grow faster than coins left in your wallet. "
+                "If you enable `autodeposit` after voting, passive income goes straight to the bank, "
+                "compounding with interest. Use `balance` to monitor your totals and `leaderboard` "
+                "to see how your wealth compares to others."
+            )
+        },
+        "assets": {
+            "title": "🏗️ Assets & Empire",
+            "commands": [
+                f"`{prefix}shop`, `/shop` – Browse passive income assets.",
+                f"`{prefix}buy <id>`, `/buy` – Buy assets.",
+                f"`{prefix}inventory`, `/inventory` – View your assets.",
+                f"`{prefix}profile`, `/profile` – Full empire overview.",
+                f"`{prefix}prestige`, `/prestige` – Reset for permanent multipliers.",
+                f"`{prefix}buyrole`, `/buyrole` – Buy server roles with coins."
+            ],
+            "explain": (
+                "Use `shop` and `buy` to invest your coins into **assets** that pay every 10 minutes. "
+                "Check `inventory` and `profile` to see how much passive income your empire produces. "
+                "Once you reach the requirements, `prestige` lets you reset progress in exchange for "
+                "permanent income multipliers, making every future asset and income source stronger. "
+                "If the server owner set up a role shop, `buyrole` lets you convert economic progress "
+                "into cosmetic or utility roles."
+            )
+        },
+        "wonder": {
+            "title": "🏛️ Wonder & Server Progress",
+            "commands": [
+                f"`{prefix}wonder`, `/wonder` – View server Wonder level and boost.",
+                f"`{prefix}contribute <amount>`, `/contribute` – Fund the Wonder for global boosts."
+            ],
+            "explain": (
+                "The Wonder is a **server‑wide project**. Everyone can contribute coins with "
+                "`contribute` to level it up. Each level makes the Wonder more expensive but "
+                "unlocks stronger passive income boosts for the entire server for a limited time. "
+                "Use `wonder` regularly to see progress and coordinate contributions with your community."
+            )
+        },
+        "utility": {
+            "title": "⚙️ Setup & Utility",
+            "commands": [
+                f"`{prefix}help`, `/help` – Overview and category help.",
+                f"`{prefix}rank`, `/rank` – View level and XP bar.",
+                f"`{prefix}setup`, `/setup` – Dashboard link and setup info.",
+                f"`{prefix}setprefix`, `/setprefix` – Change the bot prefix (admin).",
+                f"`{prefix}start`, `/start` – Tutorial for new players."
+            ],
+            "explain": (
+                "Use `start` to onboard new players and explain the basic gameplay loop. "
+                "`help` and `help <category>` give quick references and explanations for all systems. "
+                "Admins can run `setprefix` to change how commands are triggered, and `setup` to access "
+                "the web dashboard for configuring banks, assets, and role shops. `rank` shows players "
+                "their level progression and encourages long‑term engagement."
+            )
+        }
+    }
+    if category:
+        key = category.lower().strip()
+        if key in categories:
+            data = categories[key]
+            embed = discord.Embed(
+                title=f"{data['title']}",
+                description=data["explain"],
+                color=0x00d2ff
+            )
+            embed.set_footer(text=f"Use {prefix}help to see all categories.")
+            await ctx.send(embed=embed)
+            return
+        else:
+            valid = ", ".join([name.title() for name in categories.keys()])
+            await ctx.send(f"❌ Unknown help category. Available: {valid}")
+            return
     embed = discord.Embed(
-        title="🏰 Empire Nexus | Grand Library", 
+        title="🏰 Empire Nexus | Command Index", 
         description=(
-            f"Welcome to the Nexus. Use `{prefix}command` or `/command` to interact.\n\n"
+            f"Below is a full list of commands grouped by category.\n"
+            f"Use `{prefix}help <category>` or `/help <category>` to read how a system works as a whole.\n\n"
             "🔗 [**Nexus Dashboard**](https://thegoatchessbot.alwaysdata.net/)\n"
             "🛠️ [**Support Server**](https://discord.gg/zsqWFX2gBV)"
-        ), 
+        ),
         color=0x00d2ff
     )
-    
-    embed.add_field(name="💰 Economy & Growth", value=(
-        f"**`{prefix}balance`** (bal) • Check your vault\n"
-        f"**`{prefix}deposit`** (dep) • Safe storage\n"
-        f"**`{prefix}withdraw`** • Access funds\n"
-        f"**`{prefix}work`** • Supervise mines\n"
-        f"**`{prefix}crime`** • High stakes heist\n"
-        f"**`{prefix}leaderboard`** (lb) • Global ranks\n"
-        f"**`{prefix}rank`** • Check level & XP"
-    ), inline=True)
-
-    embed.add_field(name="🚀 Rewards & Assets", value=(
-        f"**`{prefix}vote`** • Get Top.gg rewards\n"
-        f"**`{prefix}autodeposit`** • Auto-save income\n"
-        f"**`{prefix}shop`** • Buy income assets\n"
-        f"**`{prefix}inventory`** (inv) • Your assets\n"
-        f"**`{prefix}buyrole`** • Purchase server roles\n"
-        f"**`{prefix}prestige`** • Ascend for bonus\n"
-        f"**`{prefix}bank`** • View/switch bank plans\n"
-        f"**`{prefix}dailyquests`** • Daily quest checklist\n"
-        f"**`{prefix}weeklyquests`** • Weekly quest checklist\n"
-        f"**`{prefix}jobs`** • List available jobs\n"
-        f"**`{prefix}applyjob`** • Apply for a job"
-    ), inline=True)
-    
-    embed.add_field(name="🎰 Royal Casino", value=(
-        f"**`{prefix}blackjack`** (bj) • Pro Blackjack\n"
-        f"**`{prefix}roulette`** • Spin the wheel\n"
-        f"**`{prefix}riddle`** • Mental challenge\n"
-        f"*(Roulette: try red, black, 1st, 2nd, 3rd, or 0-36)*"
-    ), inline=True)
-    
-    embed.add_field(name="🏗️ Empire Management", value=(
-        f"**`{prefix}shop`** • Browse assets\n"
-        f"**`{prefix}buy <id>`** • Expand empire\n"
-        f"**`{prefix}inventory`** • View assets\n"
-        f"**`{prefix}wonder`** • Server wonder status\n"
-        f"**`{prefix}contribute`** • Fund the wonder\n"
-        f"**`{prefix}profile`** • Detailed stats\n"
-        f"**`{prefix}prestige`** • Level 10 reset\n"
-        f"**`{prefix}buyrole`** • Buy server roles"
-    ), inline=False)
-    
-    embed.add_field(name="⚙️ Configuration", value=(
-        f"**`{prefix}setup`** • Dashboard link\n"
-        f"**`{prefix}setprefix`** • Admin only"
-    ), inline=True)
-
+    for key, data in categories.items():
+        cmds_text = "\n".join(f"- {line}" for line in data["commands"])
+        embed.add_field(name=data["title"], value=cmds_text, inline=False)
     embed.set_thumbnail(url=bot.user.display_avatar.url)
-    embed.set_footer(text="Use .start for a quick tutorial!")
+    embed.set_footer(text="Tip: combine slash commands with your prefix for maximum control.")
     await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="prestige", description="Reset your balance and level for a permanent income multiplier")
@@ -1820,4 +1884,5 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
