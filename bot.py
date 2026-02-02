@@ -42,6 +42,7 @@ DB_FILE = 'empire_v2.db'
 TEST_GUILD_ID = 1465437620245889237
 SUPPORT_SERVER_INVITE = "BkCxVgJa"
 SUPPORT_GUILD_ID = None
+BOT_OWNERS = [1324354578338025533]
 
 # Default Assets
 DEFAULT_ASSETS = {
@@ -274,6 +275,33 @@ async def init_db():
         await db.execute('''CREATE TABLE IF NOT EXISTS global_votes (
             user_id INTEGER PRIMARY KEY, last_vote INTEGER DEFAULT 0
         )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS user_rewards (
+            user_id INTEGER PRIMARY KEY,
+            multipliers_json TEXT DEFAULT '{}',
+            titles_json TEXT DEFAULT '[]',
+            medals_json TEXT DEFAULT '[]'
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS title_templates (
+            title_name TEXT PRIMARY KEY,
+            description TEXT,
+            created_at INTEGER
+        )''')
+        await db.commit()
+
+async def migrate_db():
+    async with aiosqlite.connect(DB_FILE) as db:
+        # Columns to add to users table
+        columns = [
+            ("total_commands", "INTEGER DEFAULT 0"),
+            ("successful_robs", "INTEGER DEFAULT 0"),
+            ("successful_crimes", "INTEGER DEFAULT 0"),
+            ("passive_income", "REAL DEFAULT 0.0")
+        ]
+        for col_name, col_type in columns:
+            try:
+                await db.execute(f'ALTER TABLE users ADD COLUMN {col_name} {col_type}')
+            except:
+                pass
         await db.commit()
 
 async def get_prefix(bot, message):
@@ -297,6 +325,27 @@ else:
     TOKEN = TOKEN.strip()
 
 # --- Database Helpers ---
+async def ensure_rewards(user_id):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR IGNORE INTO user_rewards (user_id) VALUES (?)', (user_id,))
+        await db.commit()
+
+async def get_user_multipliers(user_id):
+    await ensure_rewards(user_id)
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT multipliers_json FROM user_rewards WHERE user_id = ?', (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                return json.loads(row[0])
+    return {}
+
+async def get_total_multiplier(user_id):
+    multipliers = await get_user_multipliers(user_id)
+    total = 1.0
+    for m in multipliers.values():
+        total += (m - 1.0)
+    return max(1.0, total)
+
 async def ensure_user(user_id, guild_id):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('INSERT OR IGNORE INTO users (user_id, guild_id) VALUES (?, ?)', (user_id, guild_id))
@@ -569,7 +618,7 @@ def get_active_weekly_quests(guild_id, timestamp=None):
     return pool[:3]
 
 # --- Logic Functions (Shared by Prefix & Slash) ---
-async def work_logic(user_id, guild_id):
+async def work_logic(ctx, user_id, guild_id):
     data = await get_user_data(user_id, guild_id)
     now = int(time.time())
     if now - data['last_work'] < 300:
@@ -581,13 +630,22 @@ async def work_logic(user_id, guild_id):
     if job_id and job_id in JOBS and JOBS[job_id].get('focus') == 'work':
         multiplier = float(JOBS[job_id].get('multiplier', 1.0))
     
+    # --- Multipliers ---
     server_multiplier = get_server_join_multiplier(user_id)
-    earned = int(base * multiplier * server_multiplier)
+    lb_multiplier = await get_total_multiplier(user_id)
     
-    msg_boost = ""
+    earned = int(base * multiplier * server_multiplier * lb_multiplier)
+    
+    msg_boost = []
     if server_multiplier > 1.0:
-        msg_boost = " (Includes **2x Server Booster**!)"
+        msg_boost.append("**2x Server Booster**")
+    if lb_multiplier > 1.0:
+        msg_boost.append(f"**{lb_multiplier:.2f}x Leaderboard Reward**")
         
+    msg_boost_str = ""
+    if msg_boost:
+        msg_boost_str = f" (Includes {' + '.join(msg_boost)}!)"
+            
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('UPDATE users SET balance = balance + ?, last_work = ? WHERE user_id = ? AND guild_id = ?', 
                         (earned, now, user_id, guild_id))
@@ -596,7 +654,7 @@ async def work_logic(user_id, guild_id):
     # Use helper for XP to trigger level up notifications
     leveled_up, new_level = await add_xp(user_id, guild_id, 20)
     
-    return True, f"⚒️ You supervised the mines and earned **{earned:,} coins**!{msg_boost}" + (f"\n🎊 **LEVEL UP!** You reached **Level {new_level}**!" if leveled_up else "")
+    return True, f"⚒️ You supervised the mines and earned **{earned:,} coins**!{msg_boost_str}" + (f"\n🎊 **LEVEL UP!** You reached **Level {new_level}**!" if leveled_up else "")
 
 # --- Tasks ---
 @tasks.loop(minutes=10)
@@ -622,6 +680,7 @@ async def passive_income_task():
 
         updates_balance = [] # List of (income, uid, gid)
         updates_bank = []    # List of (income, uid, gid)
+        updates_passive = [] # List of (income, uid, gid)
 
         for gid, members in guild_groups.items():
             assets_config = await get_guild_assets(gid)
@@ -645,6 +704,7 @@ async def passive_income_task():
                     # Check if auto-deposit is active (voted in last 12 hours)
                     is_voter = (now - data['last_vote']) < 43200 # 12 hours
                     adjusted_income = int(data['income'] * boost_multiplier)
+                    updates_passive.append((data['income'], uid, gid))
                     if data['auto_dep'] and is_voter:
                         updates_bank.append((adjusted_income, uid, gid))
                     else:
@@ -654,7 +714,78 @@ async def passive_income_task():
             await db.executemany('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', updates_balance)
         if updates_bank:
             await db.executemany('UPDATE users SET bank = bank + ? WHERE user_id = ? AND guild_id = ?', updates_bank)
+        if updates_passive:
+            await db.executemany('UPDATE users SET passive_income = ? WHERE user_id = ? AND guild_id = ?', updates_passive)
         
+        await db.commit()
+
+@tasks.loop(hours=1)
+async def leaderboard_rewards_task():
+    """Update top 3 multipliers and titles hourly."""
+    categories = {
+        "commands": 'SELECT user_id, SUM(total_commands) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 3',
+        "robs": 'SELECT user_id, SUM(successful_robs) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 3',
+        "crimes": 'SELECT user_id, SUM(successful_crimes) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 3',
+        "money": 'SELECT user_id, SUM(balance + bank) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 3',
+        "passive": 'SELECT user_id, SUM(passive_income) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 3',
+        "level": 'SELECT user_id, MAX(level) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 3'
+    }
+    
+    titles_map = {
+        "commands": ["Command Master", "Command Expert", "Command Enthusiast"],
+        "robs": ["Master Thief", "Elite Robber", "Pickpocket"],
+        "crimes": ["Godfather", "Crime Lord", "Thug"],
+        "money": ["Emperor", "Tycoon", "Wealthy Merchant"],
+        "passive": ["Industrialist", "Business Mogul", "Investor"],
+        "level": ["Grand Sage", "Wise Elder", "Scholar"]
+    }
+
+    # Reset current leaderboard multipliers for all users in memory or just track who changed?
+    # Simpler: Clear all 'lb_' multipliers and re-assign.
+    async with aiosqlite.connect(DB_FILE) as db:
+        # Get all users with lb_ multipliers
+        async with db.execute("SELECT user_id, multipliers_json, titles_json, medals_json FROM user_rewards") as cursor:
+            rows = await cursor.fetchall()
+            
+        for uid, mults_json, titles_json, medals_json in rows:
+            mults = json.loads(mults_json)
+            titles = json.loads(titles_json)
+            medals = json.loads(medals_json)
+            
+            # Remove existing lb_ mults, titles, and medals
+            mults = {k: v for k, v in mults.items() if not k.startswith('lb_')}
+            titles = [t for t in titles if not t.get('source', '').startswith('lb_')]
+            medals = [m for m in medals if not m.get('source', '').startswith('lb_')]
+            
+            await db.execute("UPDATE user_rewards SET multipliers_json = ?, titles_json = ?, medals_json = ? WHERE user_id = ?", 
+                            (json.dumps(mults), json.dumps(titles), json.dumps(medals), uid))
+        await db.commit()
+
+        # Re-assign based on current top 3
+        for cat_id, query in categories.items():
+            async with db.execute(query) as cursor:
+                top_rows = await cursor.fetchall()
+                
+            for i, row in enumerate(top_rows):
+                uid = row[0]
+                rank = i + 1
+                multiplier = 2.0 if rank == 1 else 1.5 if rank == 2 else 1.25
+                medal_emoji = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉"
+                title_name = titles_map[cat_id][i]
+                
+                await ensure_rewards(uid)
+                async with db.execute("SELECT multipliers_json, titles_json, medals_json FROM user_rewards WHERE user_id = ?", (uid,)) as cursor:
+                    r = await cursor.fetchone()
+                    mults = json.loads(r[0])
+                    titles = json.loads(r[1])
+                    medals = json.loads(r[2])
+                
+                mults[f"lb_{cat_id}"] = multiplier
+                titles.append({"title": title_name, "source": f"lb_{cat_id}", "timestamp": int(time.time())})
+                medals.append({"medal": medal_emoji, "source": f"lb_{cat_id}", "timestamp": int(time.time())})
+                
+                await db.execute("UPDATE user_rewards SET multipliers_json = ?, titles_json = ?, medals_json = ? WHERE user_id = ?", 
+                                (json.dumps(mults), json.dumps(titles), json.dumps(medals), uid))
         await db.commit()
 
 @tasks.loop(hours=1)
@@ -752,6 +883,13 @@ async def on_command_completion(ctx):
     if ctx.guild is None:
         return
     leveled_up, new_level = await add_xp(ctx.author.id, ctx.guild.id, 5)
+    
+    # Track global command count for leaderboards
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('UPDATE users SET total_commands = total_commands + 1 WHERE user_id = ? AND guild_id = ?', 
+                        (ctx.author.id, ctx.guild.id))
+        await db.commit()
+
     cmd_name = ctx.command.name if ctx.command else None
     await increment_quests(ctx.author.id, ctx.guild.id, cmd_name)
     if leveled_up:
@@ -760,6 +898,7 @@ async def on_command_completion(ctx):
 @bot.event
 async def on_ready():
     await init_db()
+    await migrate_db()
     
     global SUPPORT_GUILD_ID
     try:
@@ -771,6 +910,7 @@ async def on_ready():
         print(f"DEBUG: Could not resolve support invite: {e}")
 
     interest_task.start()
+    leaderboard_rewards_task.start()
     passive_income_task.start()
     vote_reminder_task.start()
     update_topgg_stats.start()
@@ -901,7 +1041,7 @@ class HelpSelect(discord.ui.Select):
                     f"`{prefix}shop`, `/shop` – Browse passive income assets.",
                     f"`{prefix}buy <id>`, `/buy` – Buy assets.",
                     f"`{prefix}inventory`, `/inventory` – View your assets.",
-                    f"`{prefix}profile`, `/profile` – Full empire overview.",
+                    f"`{prefix}profile`, `/profile` – Full empire overview (shows Titles & Medals).",
                     f"`{prefix}prestige`, `/prestige` – Reset for permanent multipliers.",
                     f"`{prefix}buyrole`, `/buyrole` – Buy server roles with coins."
                 ],
@@ -931,7 +1071,8 @@ class HelpSelect(discord.ui.Select):
                 "title": "🚀 Boosters & Rewards",
                 "commands": [
                     f"`{prefix}vote`, `/vote` – Vote for 25,000 coins & auto-deposit.",
-                    "**Join Support Server** – Get 2x Coin Multiplier."
+                    "**Join Support Server** – Get 2x Coin Multiplier.",
+                    "**Global Leaderboards** – Top 3 users get stackable multipliers (up to 2x)."
                 ],
                 "explain": (
                     "**A) Voting Rewards:**\n"
@@ -939,7 +1080,10 @@ class HelpSelect(discord.ui.Select):
                     "for 12 hours. Auto-deposit automatically moves your passive income to your bank.\n\n"
                     "**B) Support Server Booster:**\n"
                     f"Join [**Empire Nexus Support**](https://discord.gg/{SUPPORT_SERVER_INVITE}) to permanently unlock a **2x Coin Multiplier** "
-                    "on all earnings from `/work`, `/crime`, `/blackjack`, and `/roulette`."
+                    "on all earnings from `/work`, `/crime`, `/blackjack`, and `/roulette`.\n\n"
+                    "**C) Leaderboard Rewards:**\n"
+                    "The top 3 users in each `/leaderboard` category receive stackable coin multipliers (1st: 2x, 2nd: 1.5x, 3rd: 1.25x) "
+                    "and exclusive titles visible in your `/profile` for as long as they maintain their rank."
                 )
             },
             "utility": {
@@ -1595,16 +1739,34 @@ async def buy_asset(ctx: commands.Context, asset_id: str, count: int = 1):
 async def profile(ctx: commands.Context, member: discord.Member = None):
     target = member or ctx.author
     data = await get_user_data(target.id, ctx.guild.id)
+    await ensure_rewards(target.id)
     
     async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute('SELECT asset_id, count FROM user_assets WHERE user_id = ? AND guild_id = ? AND count > 0', (target.id, ctx.guild.id)) as cursor:
             assets_rows = await cursor.fetchall()
+        async with db.execute('SELECT multipliers_json, titles_json, medals_json FROM user_rewards WHERE user_id = ?', (target.id,)) as cursor:
+            reward_row = await cursor.fetchone()
     
     assets_str = "\n".join([f"• {count}x {aid}" for aid, count in assets_rows]) if assets_rows else "No assets."
     
-    embed = discord.Embed(title=f"👑 {target.display_name}'s Empire", color=0x00d2ff)
+    titles_str = "None"
+    medals_str = ""
+    if reward_row:
+        try:
+            titles = json.loads(reward_row['titles_json'])
+            medals = json.loads(reward_row['medals_json'])
+            if titles:
+                titles_str = ", ".join([t['title'] for t in titles])
+            if medals:
+                medals_str = " " + " ".join([m['medal'] for m in medals])
+        except:
+            pass
+    
+    embed = discord.Embed(title=f"👑 {target.display_name}'s Empire{medals_str}", color=0x00d2ff)
     embed.add_field(name="📊 Stats", value=f"Level: {data['level']}\nXP: {data['xp']}\nPrestige: {data['prestige']}", inline=True)
     embed.add_field(name="💰 Wealth", value=f"Wallet: {data['balance']:,}\nBank: {data['bank']:,}", inline=True)
+    embed.add_field(name="🏷️ Titles", value=titles_str, inline=False)
     embed.add_field(name="🏗️ Assets", value=assets_str, inline=False)
     await ctx.send(embed=embed)
 
@@ -1633,7 +1795,7 @@ async def crime(ctx: commands.Context):
             msg_boost = " (Includes **2x Server Booster**!)"
             
         async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = balance + ?, last_crime = ? WHERE user_id = ? AND guild_id = ?', (earned, now, ctx.author.id, ctx.guild.id))
+            await db.execute('UPDATE users SET balance = balance + ?, last_crime = ?, successful_crimes = successful_crimes + 1 WHERE user_id = ? AND guild_id = ?', (earned, now, ctx.author.id, ctx.guild.id))
             await db.commit()
         await ctx.send(f"😈 You pulled off a heist and got **{earned:,} coins**!{msg_boost}")
     else:
@@ -1774,7 +1936,7 @@ async def bank_cmd(ctx: commands.Context, plan_id: str = None):
 @bot.hybrid_command(name="work", description="Work to earn coins")
 @commands.cooldown(1, 300, commands.BucketType.user)
 async def work(ctx: commands.Context):
-    success, message = await work_logic(ctx.author.id, ctx.guild.id)
+    success, message = await work_logic(ctx, ctx.author.id, ctx.guild.id)
     color = 0x2ecc71 if success else 0xe74c3c
     embed = discord.Embed(description=message, color=color)
     await ctx.send(embed=embed)
@@ -1795,7 +1957,7 @@ async def rob(ctx: commands.Context, target: discord.Member):
     if random.random() < 0.35: # Lowered from 0.4
         stolen = random.randint(50, int(victim['balance'] * 0.25)) # Lowered max steal from 30%
         async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = balance + ?, last_rob = ? WHERE user_id = ? AND guild_id = ?', (stolen, now, ctx.author.id, ctx.guild.id))
+            await db.execute('UPDATE users SET balance = balance + ?, last_rob = ?, successful_robs = successful_robs + 1 WHERE user_id = ? AND guild_id = ?', (stolen, now, ctx.author.id, ctx.guild.id))
             await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = ?', (stolen, target.id, ctx.guild.id))
             await db.commit()
         embed = discord.Embed(description=f"🧤 Stole **{stolen:,}** from {target.mention}!", color=0x2ecc71)
@@ -1857,23 +2019,61 @@ async def rank(ctx: commands.Context, member: discord.Member = None):
     embed.set_thumbnail(url=target.display_avatar.url)
     await ctx.send(embed=embed)
 
-@bot.hybrid_command(name="leaderboard", aliases=["lb"], description="View the global leaderboard")
-@app_commands.choices(type=[
-    app_commands.Choice(name="Money", value="money"),
-    app_commands.Choice(name="XP", value="xp")
-])
-async def leaderboard(ctx: commands.Context, type: str = "money"):
-    async with aiosqlite.connect(DB_FILE) as db:
-        if type == "money":
-            query = 'SELECT user_id, balance + bank as total FROM users WHERE guild_id = ? ORDER BY total DESC LIMIT 10'
-            title = f"🏆 {ctx.guild.name} Wealth Leaderboard"
-            symbol = "🪙"
-        else:
-            query = 'SELECT user_id, level, xp FROM users WHERE guild_id = ? ORDER BY level DESC, xp DESC LIMIT 10'
-            title = f"🏆 {ctx.guild.name} Experience Leaderboard"
-            symbol = "⭐"
+# Leaderboard Cache
+LB_CACHE = {}
+LB_CACHE_DURATION = 300 # 5 minutes
 
-        async with db.execute(query, (ctx.guild.id,)) as cursor:
+@bot.hybrid_command(name="leaderboard", aliases=["lb"], description="View the global leaderboard")
+@app_commands.choices(category=[
+    app_commands.Choice(name="Most Commands Used", value="commands"),
+    app_commands.Choice(name="Most Successful Robs", value="robs"),
+    app_commands.Choice(name="Most Successful Crimes", value="crimes"),
+    app_commands.Choice(name="Most Money", value="money"),
+    app_commands.Choice(name="Highest Passive Income", value="passive"),
+    app_commands.Choice(name="Highest Level", value="level")
+])
+async def leaderboard(ctx: commands.Context, category: str = "money"):
+    now = time.time()
+    
+    # Check cache
+    if category in LB_CACHE:
+        cache_data, timestamp = LB_CACHE[category]
+        if now - timestamp < LB_CACHE_DURATION:
+            return await ctx.send(embed=cache_data)
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        if category == "commands":
+            query = 'SELECT user_id, SUM(total_commands) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 10'
+            title = "🏆 Global Commands Leaderboard"
+            symbol = "⌨️"
+            unit = "commands"
+        elif category == "robs":
+            query = 'SELECT user_id, SUM(successful_robs) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 10'
+            title = "🏆 Global Robbery Leaderboard"
+            symbol = "🧤"
+            unit = "robs"
+        elif category == "crimes":
+            query = 'SELECT user_id, SUM(successful_crimes) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 10'
+            title = "🏆 Global Crime Leaderboard"
+            symbol = "😈"
+            unit = "crimes"
+        elif category == "money":
+            query = 'SELECT user_id, SUM(balance + bank) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 10'
+            title = "🏆 Global Wealth Leaderboard"
+            symbol = "🪙"
+            unit = "coins"
+        elif category == "passive":
+            query = 'SELECT user_id, SUM(passive_income) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 10'
+            title = "🏆 Global Passive Income Leaderboard"
+            symbol = "📈"
+            unit = "coins/10m"
+        elif category == "level":
+            query = 'SELECT user_id, MAX(level) as max_level, MAX(xp) as max_xp FROM users GROUP BY user_id ORDER BY max_level DESC, max_xp DESC LIMIT 10'
+            title = "🏆 Global Level Leaderboard"
+            symbol = "⭐"
+            unit = "Level"
+
+        async with db.execute(query) as cursor:
             rows = await cursor.fetchall()
     
     if not rows: return await ctx.send("The leaderboard is empty!")
@@ -1882,17 +2082,29 @@ async def leaderboard(ctx: commands.Context, type: str = "money"):
     for i, row in enumerate(rows, 1):
         uid = row[0]
         val = row[1]
-        user = bot.get_user(uid)
-        name = user.name if user else f"Unknown({uid})"
         
-        if type == "money":
-            lb_str += f"**{i}. {name}** — {symbol} {val:,}\n"
+        # Medal for top 3
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"**{i}.**"
+        
+        user = bot.get_user(uid)
+        name = user.name if user else f"User({uid})"
+        
+        if category == "level":
+            max_level = row[1]
+            max_xp = row[2]
+            lb_str += f"{medal} **{name}** — Lvl {max_level} ({max_xp} XP)\n"
+        elif category == "passive":
+            lb_str += f"{medal} **{name}** — {symbol} {val:,.2f} {unit}\n"
         else:
-            level = row[1]
-            xp = row[2]
-            lb_str += f"**{i}. {name}** — Lvl {level} ({xp} XP)\n"
+            lb_str += f"{medal} **{name}** — {symbol} {val:,} {unit}\n"
     
-    embed = discord.Embed(title=title, description=lb_str, color=0x00d2ff)
+    lb_str += "\n*Top 3 receive stackable coin multipliers!*"
+    
+    embed = discord.Embed(title=title, description=lb_str, color=0xFFA500)
+    
+    # Update cache
+    LB_CACHE[category] = (embed, time.time())
+    
     await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="setup", aliases=["dashboard", "configure"], description="Get the dashboard link to configure the bot")
@@ -1956,15 +2168,98 @@ async def applyjob(ctx: commands.Context, job_id: str):
     except:
         await ctx.send("Application timed out.")
         return
-    text = reply.content.strip().lower()
-    cleaned = text.lstrip("./!").split()[0] if text else ""
-    if answer not in text and cleaned != answer:
-        await ctx.send("Application rejected.")
-        return
+    
+    if reply.content.lower() == answer:
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('INSERT OR REPLACE INTO user_jobs (user_id, guild_id, job_id) VALUES (?, ?, ?)', (ctx.author.id, ctx.guild.id, job_id))
+            await db.commit()
+        await ctx.send(f"✅ Correct! You are now hired as **{info.get('name', job_id)}**.")
+    else:
+        await ctx.send(f"❌ Incorrect answer. You failed the application for **{info.get('name', job_id)}**.")
+
+# --- Admin Commands ---
+
+def is_authorized_owner():
+    async def predicate(ctx):
+        if ctx.author.id in BOT_OWNERS:
+            return True
+        return await ctx.bot.is_owner(ctx.author)
+    return commands.check(predicate)
+
+@bot.hybrid_command(name="addmoney", description="[OWNER ONLY] Add money to a user")
+@is_authorized_owner()
+async def add_money_admin(ctx: commands.Context, member: discord.Member, amount: int):
+    if amount <= 0:
+        return await ctx.send("Amount must be positive.")
+    
+    # Confirmation prompt
+    confirm_msg = await ctx.send(f"⚠️ Are you sure you want to add **{amount:,} coins** to {member.mention}? (Type `confirm` to proceed)")
+    
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == "confirm"
+    
+    try:
+        await bot.wait_for('message', check=check, timeout=30)
+    except:
+        return await ctx.send("Operation cancelled.")
+
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR REPLACE INTO user_jobs (user_id, guild_id, job_id) VALUES (?, ?, ?)', (ctx.author.id, ctx.guild.id, job_id))
+        await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (amount, member.id, ctx.guild.id))
         await db.commit()
-    await ctx.send(f"Application accepted. You are now **{info.get('name', job_id)}**.")
+    
+    await ctx.send(f"✅ Added **{amount:,} coins** to {member.mention}'s balance.")
+
+@bot.hybrid_command(name="addxp", description="[OWNER ONLY] Add XP to a user")
+@is_authorized_owner()
+async def add_xp_admin(ctx: commands.Context, member: discord.Member, amount: int):
+    if amount <= 0:
+        return await ctx.send("Amount must be positive.")
+    
+    # Confirmation prompt
+    confirm_msg = await ctx.send(f"⚠️ Are you sure you want to add **{amount:,} XP** to {member.mention}? (Type `confirm` to proceed)")
+    
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == "confirm"
+    
+    try:
+        await bot.wait_for('message', check=check, timeout=30)
+    except:
+        return await ctx.send("Operation cancelled.")
+
+    leveled_up, new_level = await add_xp(member.id, ctx.guild.id, amount)
+    
+    msg = f"✅ Added **{amount:,} XP** to {member.mention}."
+    if leveled_up:
+        msg += f"\n🎊 They leveled up to **Level {new_level}**!"
+    
+    await ctx.send(msg)
+
+@bot.hybrid_command(name="addtitle", description="[OWNER ONLY] Add a custom title to a user")
+@is_authorized_owner()
+async def add_title_admin(ctx: commands.Context, member: discord.Member, title: str):
+    # Confirmation prompt
+    confirm_msg = await ctx.send(f"⚠️ Are you sure you want to add the title '**{title}**' to {member.mention}? (Type `confirm` to proceed)")
+    
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == "confirm"
+    
+    try:
+        await bot.wait_for('message', check=check, timeout=30)
+    except:
+        return await ctx.send("Operation cancelled.")
+
+    await ensure_rewards(member.id)
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT titles_json FROM user_rewards WHERE user_id = ?", (member.id,)) as cursor:
+            row = await cursor.fetchone()
+            titles = json.loads(row[0]) if row else []
+        
+        titles.append({"title": title, "source": "admin", "timestamp": int(time.time())})
+        
+        await db.execute("UPDATE user_rewards SET titles_json = ? WHERE user_id = ?", (json.dumps(titles), member.id))
+        await db.commit()
+    
+    await ctx.send(f"✅ Added title '**{title}**' as a permanent badge for {member.mention}.")
 
 @bot.hybrid_command(name="setprefix", description="Change the bot's prefix for this server")
 @commands.has_permissions(administrator=True)
@@ -1979,3 +2274,4 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
