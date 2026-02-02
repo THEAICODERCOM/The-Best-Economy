@@ -834,6 +834,7 @@ class HelpSelect(discord.ui.Select):
             discord.SelectOption(label="Banking", description="Deposit, withdraw, and bank plans", emoji="🏦"),
             discord.SelectOption(label="Assets & Empire", description="Shop, inventory, and prestige", emoji="🏗️"),
             discord.SelectOption(label="Wonder & Server Progress", description="Server-wide projects and boosts", emoji="🏛️"),
+            discord.SelectOption(label="Boosters & Rewards", description="Voting and support server bonuses", emoji="🚀"),
             discord.SelectOption(label="Setup & Utility", description="Help, settings, and tutorial", emoji="⚙️")
         ]
         super().__init__(placeholder="Select a category to view its commands!", min_values=1, max_values=1, options=options)
@@ -844,6 +845,7 @@ class HelpSelect(discord.ui.Select):
             "Banking": "banking",
             "Assets & Empire": "assets",
             "Wonder & Server Progress": "wonder",
+            "Boosters & Rewards": "boosters",
             "Setup & Utility": "utility"
         }
         
@@ -923,6 +925,21 @@ class HelpSelect(discord.ui.Select):
                     "`contribute` to level it up. Each level makes the Wonder more expensive but "
                     "unlocks stronger passive income boosts for the entire server for a limited time. "
                     "Use `wonder` regularly to see progress and coordinate contributions with your community."
+                )
+            },
+            "boosters": {
+                "title": "🚀 Boosters & Rewards",
+                "commands": [
+                    f"`{prefix}vote`, `/vote` – Vote for 25,000 coins & auto-deposit.",
+                    "**Join Support Server** – Get 2x Coin Multiplier."
+                ],
+                "explain": (
+                    "**A) Voting Rewards:**\n"
+                    "Vote for the bot on Top.gg to receive **25,000 coins** instantly and unlock **Auto-Deposit** "
+                    "for 12 hours. Auto-deposit automatically moves your passive income to your bank.\n\n"
+                    "**B) Support Server Booster:**\n"
+                    f"Join [**Empire Nexus Support**](https://discord.gg/{SUPPORT_SERVER_INVITE}) to permanently unlock a **2x Coin Multiplier** "
+                    "on all earnings from `/work`, `/crime`, `/blackjack`, and `/roulette`."
                 )
             },
             "utility": {
@@ -1505,7 +1522,7 @@ async def vote(ctx: commands.Context):
     embed.description = f"Support the bot and unlock exclusive rewards for **12 hours**!\n\n" \
                         f"🎁 **Rewards:**\n" \
                         f"• 🏦 **Auto-Deposit:** Passive income goes straight to your bank!\n" \
-                        f"• 💰 **Bonus Coins:** (Coming Soon)\n\n" \
+                        f"• 💰 **Bonus Coins:** 25,000 Coins (Instant)\n\n" \
                         f"[**Click here to vote on Top.gg**]({vote_url})"
     
     if time_since_vote < 43200:
