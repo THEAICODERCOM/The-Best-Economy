@@ -40,6 +40,8 @@ aiohttp.ClientSession.ws_connect = new_ws_connect
 # Database Setup
 DB_FILE = 'empire_v2.db'
 TEST_GUILD_ID = 1465437620245889237
+SUPPORT_SERVER_INVITE = "BkCxVgJa"
+SUPPORT_GUILD_ID = None
 
 # Default Assets
 DEFAULT_ASSETS = {
@@ -239,6 +241,10 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN weekly_stats_json TEXT DEFAULT '{}'")
         except:
             pass
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN started INTEGER DEFAULT 0")
+        except:
+            pass
             
         await db.execute('''CREATE TABLE IF NOT EXISTS user_assets (
             user_id INTEGER, guild_id INTEGER, asset_id TEXT, count INTEGER DEFAULT 0,
@@ -433,6 +439,15 @@ async def get_user_job(user_id, guild_id):
             row = await cursor.fetchone()
             return row[0] if row else None
 
+def get_server_join_multiplier(user_id):
+    if not SUPPORT_GUILD_ID:
+        return 1.0
+    guild = bot.get_guild(SUPPORT_GUILD_ID)
+    if not guild:
+        return 1.0
+    member = guild.get_member(user_id)
+    return 2.0 if member else 1.0
+
 async def ensure_quest_resets(user_id, guild_id):
     now = int(time.time())
     async with aiosqlite.connect(DB_FILE) as db:
@@ -565,7 +580,14 @@ async def work_logic(user_id, guild_id):
     multiplier = 1.0
     if job_id and job_id in JOBS and JOBS[job_id].get('focus') == 'work':
         multiplier = float(JOBS[job_id].get('multiplier', 1.0))
-    earned = int(base * multiplier)
+    
+    server_multiplier = get_server_join_multiplier(user_id)
+    earned = int(base * multiplier * server_multiplier)
+    
+    msg_boost = ""
+    if server_multiplier > 1.0:
+        msg_boost = " (Includes **2x Server Booster**!)"
+        
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('UPDATE users SET balance = balance + ?, last_work = ? WHERE user_id = ? AND guild_id = ?', 
                         (earned, now, user_id, guild_id))
@@ -574,7 +596,7 @@ async def work_logic(user_id, guild_id):
     # Use helper for XP to trigger level up notifications
     leveled_up, new_level = await add_xp(user_id, guild_id, 20)
     
-    return True, f"⚒️ You supervised the mines and earned **{earned:,} coins**!" + (f"\n🎊 **LEVEL UP!** You reached **Level {new_level}**!" if leveled_up else "")
+    return True, f"⚒️ You supervised the mines and earned **{earned:,} coins**!{msg_boost}" + (f"\n🎊 **LEVEL UP!** You reached **Level {new_level}**!" if leveled_up else "")
 
 # --- Tasks ---
 @tasks.loop(minutes=10)
@@ -738,6 +760,16 @@ async def on_command_completion(ctx):
 @bot.event
 async def on_ready():
     await init_db()
+    
+    global SUPPORT_GUILD_ID
+    try:
+        invite = await bot.fetch_invite(SUPPORT_SERVER_INVITE)
+        if invite.guild:
+            SUPPORT_GUILD_ID = invite.guild.id
+            print(f"DEBUG: Resolved Support Guild ID: {SUPPORT_GUILD_ID}")
+    except Exception as e:
+        print(f"DEBUG: Could not resolve support invite: {e}")
+
     interest_task.start()
     passive_income_task.start()
     vote_reminder_task.start()
@@ -762,10 +794,21 @@ async def on_ready():
 
 @bot.hybrid_command(name="start", description="New to the Empire? Start your tutorial here!")
 async def start_tutorial(ctx: commands.Context):
+    data = await get_user_data(ctx.author.id, ctx.guild.id)
+    msg_bonus = ""
+    
+    # Check if 'started' is 0 or None (handle case where column was just added so it might be 0)
+    # The default is 0.
+    if not data['started']:
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('UPDATE users SET balance = balance + 500, started = 1 WHERE user_id = ? AND guild_id = ?', (ctx.author.id, ctx.guild.id))
+            await db.commit()
+        msg_bonus = "\n\n🎉 **Welcome Bonus!** You received **500 coins** for starting your journey!"
+
     embed = discord.Embed(
         title="🌅 Welcome to Empire Nexus",
         description=(
-            "You have inherited a small plot of land and 100 coins. Your goal: **Build the wealthiest empire in the server.**\n\n"
+            f"You have inherited a small plot of land and 100 coins. Your goal: **Build the wealthiest empire in the server.**{msg_bonus}\n\n"
             "**Step 1: Get Started**\n"
             "Use `.work` or `/work` to supervise the mines and earn your first coins.\n\n"
             "**Step 2: Invest Wisely**\n"
@@ -783,133 +826,151 @@ async def start_tutorial(ctx: commands.Context):
     embed.set_footer(text="Your journey to greatness begins now.")
     await ctx.send(embed=embed)
 
+class HelpSelect(discord.ui.Select):
+    def __init__(self, prefix):
+        self.prefix = prefix
+        options = [
+            discord.SelectOption(label="Making Money", description="Work, crime, gambling, and jobs", emoji="💸"),
+            discord.SelectOption(label="Banking", description="Deposit, withdraw, and bank plans", emoji="🏦"),
+            discord.SelectOption(label="Assets & Empire", description="Shop, inventory, and prestige", emoji="🏗️"),
+            discord.SelectOption(label="Wonder & Server Progress", description="Server-wide projects and boosts", emoji="🏛️"),
+            discord.SelectOption(label="Setup & Utility", description="Help, settings, and tutorial", emoji="⚙️")
+        ]
+        super().__init__(placeholder="Select a category to view its commands!", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        category_map = {
+            "Making Money": "making money",
+            "Banking": "banking",
+            "Assets & Empire": "assets",
+            "Wonder & Server Progress": "wonder",
+            "Setup & Utility": "utility"
+        }
+        
+        selected_label = self.values[0]
+        key = category_map.get(selected_label)
+        prefix = self.prefix
+        
+        categories = {
+            "making money": {
+                "title": "💸 Making Money",
+                "commands": [
+                    f"`{prefix}work`, `/work` – Supervise mines for coins.",
+                    f"`{prefix}crime`, `/crime` – High risk, high reward heists.",
+                    f"`{prefix}blackjack`, `/blackjack` – Casino blackjack.",
+                    f"`{prefix}roulette`, `/roulette` – Spin the wheel.",
+                    f"`{prefix}riddle`, `/riddle` and `{prefix}answer` – Solve riddles.",
+                    f"`{prefix}jobs`, `/jobs` – View available jobs.",
+                    f"`{prefix}applyjob <id>`, `/applyjob` – Apply for a job.",
+                    f"`{prefix}dailyquests`, `/dailyquests` – Daily quest checklist.",
+                    f"`{prefix}weeklyquests`, `/weeklyquests` – Weekly quest checklist."
+                ],
+                "explain": (
+                    "Use **work**, **crime**, and the **casino** commands to generate coins. "
+                    "Pick a **job** with `jobs`/`applyjob` to boost income from your favourite activity. "
+                    "Daily and weekly quests reward you for using commands consistently, so if you grind "
+                    "work, crime, blackjack or roulette while quests are active you will complete multiple "
+                    "quests at once and snowball much faster."
+                )
+            },
+            "banking": {
+                "title": "🏦 Banking",
+                "commands": [
+                    f"`{prefix}deposit <amount>`, `/deposit` – Move coins into the bank.",
+                    f"`{prefix}withdraw <amount>`, `/withdraw` – Take coins out of the bank.",
+                    f"`{prefix}balance`, `/balance` – View wallet, bank and bank plan.",
+                    f"`{prefix}bank`, `/bank` – View and switch bank plans.",
+                    f"`{prefix}autodeposit`, `/autodeposit` – Auto‑deposit passive income (with vote).",
+                    f"`{prefix}vote`, `/vote` – Vote for Top.gg rewards.",
+                    f"`{prefix}leaderboard`, `/leaderboard` – Money or XP rankings."
+                ],
+                "explain": (
+                    "Make money first, then **secure** it in the bank with `deposit`. "
+                    "Choosing a better **bank plan** with `bank` increases your hourly interest, "
+                    "so long‑term savings grow faster than coins left in your wallet. "
+                    "If you enable `autodeposit` after voting, passive income goes straight to the bank, "
+                    "compounding with interest. Use `balance` to monitor your totals and `leaderboard` "
+                    "to see how your wealth compares to others."
+                )
+            },
+            "assets": {
+                "title": "🏗️ Assets & Empire",
+                "commands": [
+                    f"`{prefix}shop`, `/shop` – Browse passive income assets.",
+                    f"`{prefix}buy <id>`, `/buy` – Buy assets.",
+                    f"`{prefix}inventory`, `/inventory` – View your assets.",
+                    f"`{prefix}profile`, `/profile` – Full empire overview.",
+                    f"`{prefix}prestige`, `/prestige` – Reset for permanent multipliers.",
+                    f"`{prefix}buyrole`, `/buyrole` – Buy server roles with coins."
+                ],
+                "explain": (
+                    "Use `shop` and `buy` to invest your coins into **assets** that pay every 10 minutes. "
+                    "Check `inventory` and `profile` to see how much passive income your empire produces. "
+                    "Once you reach the requirements, `prestige` lets you reset progress in exchange for "
+                    "permanent income multipliers, making every future asset and income source stronger. "
+                    "If the server owner set up a role shop, `buyrole` lets you convert economic progress "
+                    "into cosmetic or utility roles."
+                )
+            },
+            "wonder": {
+                "title": "🏛️ Wonder & Server Progress",
+                "commands": [
+                    f"`{prefix}wonder`, `/wonder` – View server Wonder level and boost.",
+                    f"`{prefix}contribute <amount>`, `/contribute` – Fund the Wonder for global boosts."
+                ],
+                "explain": (
+                    "The Wonder is a **server‑wide project**. Everyone can contribute coins with "
+                    "`contribute` to level it up. Each level makes the Wonder more expensive but "
+                    "unlocks stronger passive income boosts for the entire server for a limited time. "
+                    "Use `wonder` regularly to see progress and coordinate contributions with your community."
+                )
+            },
+            "utility": {
+                "title": "⚙️ Setup & Utility",
+                "commands": [
+                    f"`{prefix}help`, `/help` – Overview and category help.",
+                    f"`{prefix}rank`, `/rank` – View level and XP bar.",
+                    f"`{prefix}setup`, `/setup` – Dashboard link and setup info.",
+                    f"`{prefix}setprefix`, `/setprefix` – Change the bot prefix (admin).",
+                    f"`{prefix}start`, `/start` – Tutorial for new players."
+                ],
+                "explain": (
+                    "Use `start` to onboard new players and explain the basic gameplay loop. "
+                    "`help` and `help <category>` give quick references and explanations for all systems. "
+                    "Admins can run `setprefix` to change how commands are triggered, and `setup` to access "
+                    "the web dashboard for configuring banks, assets, and role shops. `rank` shows players "
+                    "their level progression and encourages long‑term engagement."
+                )
+            }
+        }
+        
+        data = categories[key]
+        embed = discord.Embed(
+            title=f"{data['title']}",
+            description=data["explain"],
+            color=0x00d2ff
+        )
+        cmds_text = "\n".join(f"- {line}" for line in data["commands"])
+        embed.add_field(name="Commands", value=cmds_text, inline=False)
+        embed.set_footer(text=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+        await interaction.response.edit_message(embed=embed)
+
+class HelpView(discord.ui.View):
+    def __init__(self, prefix):
+        super().__init__(timeout=120)
+        self.add_item(HelpSelect(prefix))
+
 @bot.hybrid_command(name="help", description="Show all available commands")
 async def help_command(ctx: commands.Context, *, category: str = None):
     prefix = await get_prefix(bot, ctx.message)
-    categories = {
-        "making money": {
-            "title": "💸 Making Money",
-            "commands": [
-                f"`{prefix}work`, `/work` – Supervise mines for coins.",
-                f"`{prefix}crime`, `/crime` – High risk, high reward heists.",
-                f"`{prefix}blackjack`, `/blackjack` – Casino blackjack.",
-                f"`{prefix}roulette`, `/roulette` – Spin the wheel.",
-                f"`{prefix}riddle`, `/riddle` and `{prefix}answer` – Solve riddles.",
-                f"`{prefix}jobs`, `/jobs` – View available jobs.",
-                f"`{prefix}applyjob <id>`, `/applyjob` – Apply for a job.",
-                f"`{prefix}dailyquests`, `/dailyquests` – Daily quest checklist.",
-                f"`{prefix}weeklyquests`, `/weeklyquests` – Weekly quest checklist."
-            ],
-            "explain": (
-                "Use **work**, **crime**, and the **casino** commands to generate coins. "
-                "Pick a **job** with `jobs`/`applyjob` to boost income from your favourite activity. "
-                "Daily and weekly quests reward you for using commands consistently, so if you grind "
-                "work, crime, blackjack or roulette while quests are active you will complete multiple "
-                "quests at once and snowball much faster."
-            )
-        },
-        "banking": {
-            "title": "🏦 Banking",
-            "commands": [
-                f"`{prefix}deposit <amount>`, `/deposit` – Move coins into the bank.",
-                f"`{prefix}withdraw <amount>`, `/withdraw` – Take coins out of the bank.",
-                f"`{prefix}balance`, `/balance` – View wallet, bank and bank plan.",
-                f"`{prefix}bank`, `/bank` – View and switch bank plans.",
-                f"`{prefix}autodeposit`, `/autodeposit` – Auto‑deposit passive income (with vote).",
-                f"`{prefix}vote`, `/vote` – Vote for Top.gg rewards.",
-                f"`{prefix}leaderboard`, `/leaderboard` – Money or XP rankings."
-            ],
-            "explain": (
-                "Make money first, then **secure** it in the bank with `deposit`. "
-                "Choosing a better **bank plan** with `bank` increases your hourly interest, "
-                "so long‑term savings grow faster than coins left in your wallet. "
-                "If you enable `autodeposit` after voting, passive income goes straight to the bank, "
-                "compounding with interest. Use `balance` to monitor your totals and `leaderboard` "
-                "to see how your wealth compares to others."
-            )
-        },
-        "assets": {
-            "title": "🏗️ Assets & Empire",
-            "commands": [
-                f"`{prefix}shop`, `/shop` – Browse passive income assets.",
-                f"`{prefix}buy <id>`, `/buy` – Buy assets.",
-                f"`{prefix}inventory`, `/inventory` – View your assets.",
-                f"`{prefix}profile`, `/profile` – Full empire overview.",
-                f"`{prefix}prestige`, `/prestige` – Reset for permanent multipliers.",
-                f"`{prefix}buyrole`, `/buyrole` – Buy server roles with coins."
-            ],
-            "explain": (
-                "Use `shop` and `buy` to invest your coins into **assets** that pay every 10 minutes. "
-                "Check `inventory` and `profile` to see how much passive income your empire produces. "
-                "Once you reach the requirements, `prestige` lets you reset progress in exchange for "
-                "permanent income multipliers, making every future asset and income source stronger. "
-                "If the server owner set up a role shop, `buyrole` lets you convert economic progress "
-                "into cosmetic or utility roles."
-            )
-        },
-        "wonder": {
-            "title": "🏛️ Wonder & Server Progress",
-            "commands": [
-                f"`{prefix}wonder`, `/wonder` – View server Wonder level and boost.",
-                f"`{prefix}contribute <amount>`, `/contribute` – Fund the Wonder for global boosts."
-            ],
-            "explain": (
-                "The Wonder is a **server‑wide project**. Everyone can contribute coins with "
-                "`contribute` to level it up. Each level makes the Wonder more expensive but "
-                "unlocks stronger passive income boosts for the entire server for a limited time. "
-                "Use `wonder` regularly to see progress and coordinate contributions with your community."
-            )
-        },
-        "utility": {
-            "title": "⚙️ Setup & Utility",
-            "commands": [
-                f"`{prefix}help`, `/help` – Overview and category help.",
-                f"`{prefix}rank`, `/rank` – View level and XP bar.",
-                f"`{prefix}setup`, `/setup` – Dashboard link and setup info.",
-                f"`{prefix}setprefix`, `/setprefix` – Change the bot prefix (admin).",
-                f"`{prefix}start`, `/start` – Tutorial for new players."
-            ],
-            "explain": (
-                "Use `start` to onboard new players and explain the basic gameplay loop. "
-                "`help` and `help <category>` give quick references and explanations for all systems. "
-                "Admins can run `setprefix` to change how commands are triggered, and `setup` to access "
-                "the web dashboard for configuring banks, assets, and role shops. `rank` shows players "
-                "their level progression and encourages long‑term engagement."
-            )
-        }
-    }
-    if category:
-        key = category.lower().strip()
-        if key in categories:
-            data = categories[key]
-            embed = discord.Embed(
-                title=f"{data['title']}",
-                description=data["explain"],
-                color=0x00d2ff
-            )
-            embed.set_footer(text=f"Use {prefix}help to see all categories.")
-            await ctx.send(embed=embed)
-            return
-        else:
-            valid = ", ".join([name.title() for name in categories.keys()])
-            await ctx.send(f"❌ Unknown help category. Available: {valid}")
-            return
+    view = HelpView(prefix)
     embed = discord.Embed(
-        title="🏰 Empire Nexus | Command Index", 
-        description=(
-            f"Below is a full list of commands grouped by category.\n"
-            f"Use `{prefix}help <category>` or `/help <category>` to read how a system works as a whole.\n\n"
-            "🔗 [**Nexus Dashboard**](https://thegoatchessbot.alwaysdata.net/)\n"
-            "🛠️ [**Support Server**](https://discord.gg/zsqWFX2gBV)"
-        ),
-        color=0x00d2ff
+        title="Help Menu",
+        description="Select a category from the dropdown menu below to view the commands.",
+        color=0x2f3136
     )
-    for key, data in categories.items():
-        cmds_text = "\n".join(f"- {line}" for line in data["commands"])
-        embed.add_field(name=data["title"], value=cmds_text, inline=False)
-    embed.set_thumbnail(url=bot.user.display_avatar.url)
-    embed.set_footer(text="Tip: combine slash commands with your prefix for maximum control.")
-    await ctx.send(embed=embed)
+    embed.set_footer(text="Empire Nexus Help System")
+    await ctx.send(embed=embed, view=view)
 
 @bot.hybrid_command(name="prestige", description="Reset your balance and level for a permanent income multiplier")
 async def prestige(ctx: commands.Context):
@@ -1116,9 +1177,15 @@ async def roulette(ctx: commands.Context, amount: str = None, space: str = None)
 
     async with aiosqlite.connect(DB_FILE) as db:
         if win:
-            winnings = bet_amount * (multiplier - 1)
+            server_multiplier = get_server_join_multiplier(ctx.author.id)
+            winnings = int(bet_amount * (multiplier - 1) * server_multiplier)
             await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (winnings, ctx.author.id, ctx.guild.id))
-            result_msg = f"✅ **WIN!** The ball landed on **{roll_color.upper()} {roll}**.\nYou won **{bet_amount * multiplier:,} coins**!"
+            
+            boost_msg = ""
+            if server_multiplier > 1.0:
+                boost_msg = " (Includes **2x Server Booster**!)"
+                
+            result_msg = f"✅ **WIN!** The ball landed on **{roll_color.upper()} {roll}**.\nYou won **{winnings:,} coins**!{boost_msg}"
             color_embed = 0x2ecc71 # Green
         else:
             await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = ?', (bet_amount, ctx.author.id, ctx.guild.id))
@@ -1376,7 +1443,11 @@ async def blackjack(ctx: commands.Context, amount: str = None):
 
     async with aiosqlite.connect(DB_FILE) as db:
         if win_status == "win":
-            await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (bet_amount, ctx.author.id, ctx.guild.id))
+            server_multiplier = get_server_join_multiplier(ctx.author.id)
+            final_win = int(bet_amount * server_multiplier)
+            await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (final_win, ctx.author.id, ctx.guild.id))
+            if server_multiplier > 1.0:
+                result += " (2x Boost!)"
         elif win_status == "loss":
             await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = ?', (bet_amount, ctx.author.id, ctx.guild.id))
         await db.commit()
@@ -1536,11 +1607,18 @@ async def crime(ctx: commands.Context):
         multiplier = 1.0
         if job_id and job_id in JOBS and JOBS[job_id].get('focus') == 'crime':
             multiplier = float(JOBS[job_id].get('multiplier', 1.0))
-        earned = int(base * multiplier)
+            
+        server_multiplier = get_server_join_multiplier(ctx.author.id)
+        earned = int(base * multiplier * server_multiplier)
+        
+        msg_boost = ""
+        if server_multiplier > 1.0:
+            msg_boost = " (Includes **2x Server Booster**!)"
+            
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute('UPDATE users SET balance = balance + ?, last_crime = ? WHERE user_id = ? AND guild_id = ?', (earned, now, ctx.author.id, ctx.guild.id))
             await db.commit()
-        await ctx.send(f"😈 You pulled off a heist and got **{earned:,} coins**!")
+        await ctx.send(f"😈 You pulled off a heist and got **{earned:,} coins**!{msg_boost}")
     else:
         loss = random.randint(500, 1000)
         async with aiosqlite.connect(DB_FILE) as db:
