@@ -932,7 +932,8 @@ def topgg_webhook():
         ''', (user_id, now))
         
         # Also update any existing rows in the users table for immediate effect
-        conn.execute('UPDATE users SET last_vote = ? WHERE user_id = ?', (now, user_id))
+        # Adding 25,000 coins as a voting reward
+        conn.execute('UPDATE users SET last_vote = ?, balance = balance + 25000 WHERE user_id = ?', (now, user_id))
         conn.commit()
         conn.close()
         
@@ -962,6 +963,4 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
-
-
 
