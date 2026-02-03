@@ -158,6 +158,19 @@ def get_server_roles(guild_id):
         print(f"DEBUG: Error fetching roles for {guild_id}: {e}")
         return []
 
+def get_server_channels(guild_id):
+    headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
+    try:
+        r = requests.get(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/channels", headers=headers, verify=False)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        # Filter for text channels (type 0)
+        return [c for c in r.json() if c['type'] == 0]
+    except Exception as e:
+        print(f"DEBUG: Error fetching channels for {guild_id}: {e}")
+        return []
+
 @app.route('/favicon.ico')
 def favicon():
     return '', 204
@@ -828,7 +841,19 @@ def moderation_dashboard(guild_id):
     conn.close()
 
     roles = get_server_roles(guild_id)
-    if roles is None: return redirect('/servers')
+    channels = get_server_channels(guild_id)
+    if roles is None or channels is None: return redirect('/servers')
+
+    channel_options = '<option value="">Select a channel...</option>'
+    for ch in channels:
+        channel_options += f'<option value="{ch["id"]}">{ch["name"]}</option>'
+
+    def get_selected_channel_options(selected_id):
+        opts = '<option value="">None</option>'
+        for ch in channels:
+            sel = 'selected' if str(ch['id']) == str(selected_id) else ''
+            opts += f'<option value="{ch["id"]}" {sel}>#{ch["name"]}</option>'
+        return opts
 
     automod_html = ""
     for word_row in automod_words:
@@ -864,16 +889,20 @@ def moderation_dashboard(guild_id):
                         <div class="card">
                             <h2 class="card-title">Welcome & Farewell</h2>
                             <div class="form-group">
-                                <label>Welcome Channel ID</label>
-                                <input type="text" name="welcome_channel" value="{mod_config['welcome_channel'] if mod_config else ''}" placeholder="Channel ID">
+                                <label>Welcome Channel</label>
+                                <select name="welcome_channel">
+                                    {get_selected_channel_options(mod_config['welcome_channel'] if mod_config else '')}
+                                </select>
                             </div>
                             <div class="form-group">
                                 <label>Welcome Message</label>
                                 <textarea name="welcome_message" rows="3">{mod_config['welcome_message'] if mod_config else 'Welcome {user} to the server!'}</textarea>
                             </div>
                             <div class="form-group">
-                                <label>Farewell Channel ID</label>
-                                <input type="text" name="farewell_channel" value="{mod_config['farewell_channel'] if mod_config else ''}" placeholder="Channel ID">
+                                <label>Farewell Channel</label>
+                                <select name="farewell_channel">
+                                    {get_selected_channel_options(mod_config['farewell_channel'] if mod_config else '')}
+                                </select>
                             </div>
                             <div class="form-group">
                                 <label>Farewell Message</label>
@@ -910,6 +939,16 @@ def logging_dashboard(guild_id):
     log_config = conn.execute('SELECT * FROM logging_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
     conn.close()
 
+    channels = get_server_channels(guild_id)
+    if channels is None: return redirect('/servers')
+
+    def get_selected_channel_options(selected_id):
+        opts = '<option value="">None</option>'
+        for ch in channels:
+            sel = 'selected' if str(ch['id']) == str(selected_id) else ''
+            opts += f'<option value="{ch["id"]}" {sel}>#{ch["name"]}</option>'
+        return opts
+
     return f"""
     <html>
         <head><title>Logging | {guild_id}</title>{STYLE}</head>
@@ -931,31 +970,43 @@ def logging_dashboard(guild_id):
                     <p class="page-desc">Configure granular logging channels for various server events.</p>
                     <form action="/save-logging/{guild_id}" method="post">
                         <div class="card">
-                            <h2 class="card-title">Log Channels (Enter Channel IDs)</h2>
+                            <h2 class="card-title">Log Channels</h2>
                             <div class="stat-grid">
                                 <div class="form-group">
                                     <label>Message Logs</label>
-                                    <input type="text" name="message_log" value="{log_config['message_log_channel'] if log_config else ''}" placeholder="Channel ID">
+                                    <select name="message_log">
+                                        {get_selected_channel_options(log_config['message_log_channel'] if log_config else '')}
+                                    </select>
                                 </div>
                                 <div class="form-group">
                                     <label>Member Logs</label>
-                                    <input type="text" name="member_log" value="{log_config['member_log_channel'] if log_config else ''}" placeholder="Channel ID">
+                                    <select name="member_log">
+                                        {get_selected_channel_options(log_config['member_log_channel'] if log_config else '')}
+                                    </select>
                                 </div>
                                 <div class="form-group">
                                     <label>Mod Logs</label>
-                                    <input type="text" name="mod_log" value="{log_config['mod_log_channel'] if log_config else ''}" placeholder="Channel ID">
+                                    <select name="mod_log">
+                                        {get_selected_channel_options(log_config['mod_log_channel'] if log_config else '')}
+                                    </select>
                                 </div>
                                 <div class="form-group">
                                     <label>AutoMod Logs</label>
-                                    <input type="text" name="automod_log" value="{log_config['automod_log_channel'] if log_config else ''}" placeholder="Channel ID">
+                                    <select name="automod_log">
+                                        {get_selected_channel_options(log_config['automod_log_channel'] if log_config else '')}
+                                    </select>
                                 </div>
                                 <div class="form-group">
                                     <label>Server Logs</label>
-                                    <input type="text" name="server_log" value="{log_config['server_log_channel'] if log_config else ''}" placeholder="Channel ID">
+                                    <select name="server_log">
+                                        {get_selected_channel_options(log_config['server_log_channel'] if log_config else '')}
+                                    </select>
                                 </div>
                                 <div class="form-group">
                                     <label>Voice Logs</label>
-                                    <input type="text" name="voice_log" value="{log_config['voice_log_channel'] if log_config else ''}" placeholder="Channel ID">
+                                    <select name="voice_log">
+                                        {get_selected_channel_options(log_config['voice_log_channel'] if log_config else '')}
+                                    </select>
                                 </div>
                             </div>
                         </div>
@@ -1277,3 +1328,4 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
