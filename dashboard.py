@@ -83,7 +83,9 @@ def init_db():
         welcome_channel TEXT,
         welcome_message TEXT,
         farewell_channel TEXT,
-        farewell_message TEXT
+        farewell_message TEXT,
+        welcome_embed_json TEXT,
+        farewell_embed_json TEXT
     )''')
     conn.execute('''CREATE TABLE IF NOT EXISTS automod_words (
         word_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,6 +114,14 @@ def init_db():
         conn.execute("ALTER TABLE guild_config ADD COLUMN bank_plans_json TEXT DEFAULT '{}'")
     except sqlite3.OperationalError:
         pass # Already exists
+    try:
+        conn.execute("ALTER TABLE welcome_farewell ADD COLUMN welcome_embed_json TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE welcome_farewell ADD COLUMN farewell_embed_json TEXT")
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
     conn.close()
@@ -231,6 +241,11 @@ def get_server_channels(guild_id):
     # Filter for text channels (type 0)
     return [ch for ch in channels if ch['type'] == 0]
 
+def get_bot_user_id():
+    headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
+    data = get_cached_api(f"{DISCORD_API_BASE_URL}/users/@me", headers, "bot_user")
+    if not data: return None
+    return str(data['id'])
 @app.route('/favicon.ico')
 def favicon():
     return '', 204
@@ -896,7 +911,6 @@ def save(guild_id):
 def moderation_dashboard(guild_id):
     if 'access_token' not in session: return redirect('/')
     conn = get_db()
-    mod_config = conn.execute('SELECT * FROM welcome_farewell WHERE guild_id = ?', (int(guild_id),)).fetchone()
     automod_words = conn.execute('SELECT * FROM automod_words WHERE guild_id = ?', (int(guild_id),)).fetchall()
     conn.close()
 
@@ -936,6 +950,7 @@ def moderation_dashboard(guild_id):
                 <div class="sidebar-menu">
                     <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
                     <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item active"><span class="menu-label">🛡️ Moderation</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
@@ -945,32 +960,6 @@ def moderation_dashboard(guild_id):
             <div class="main-content">
                 <div class="container">
                     <h1 class="page-title">🛡️ Moderation Settings</h1>
-                    <form action="/save-moderation/{guild_id}" method="post">
-                        <div class="card">
-                            <h2 class="card-title">Welcome & Farewell</h2>
-                            <div class="form-group">
-                                <label>Welcome Channel</label>
-                                <select name="welcome_channel">
-                                    {get_selected_channel_options(mod_config['welcome_channel'] if mod_config else '')}
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label>Welcome Message</label>
-                                <textarea name="welcome_message" rows="3">{mod_config['welcome_message'] if mod_config else 'Welcome {user} to the server!'}</textarea>
-                            </div>
-                            <div class="form-group">
-                                <label>Farewell Channel</label>
-                                <select name="farewell_channel">
-                                    {get_selected_channel_options(mod_config['farewell_channel'] if mod_config else '')}
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label>Farewell Message</label>
-                                <textarea name="farewell_message" rows="3">{mod_config['farewell_message'] if mod_config else '{user} just left the server.'}</textarea>
-                            </div>
-                        </div>
-                        <button type="submit" class="btn">Save Moderation</button>
-                    </form>
 
                     <div class="card" style="margin-top: 30px;">
                         <h2 class="card-title">AutoMod (Word Filter)</h2>
@@ -991,6 +980,129 @@ def moderation_dashboard(guild_id):
         </body>
     </html>
     """
+
+@app.route('/dashboard/<int:guild_id>/welcome')
+def welcome_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    conn = get_db()
+    cfg = conn.execute('SELECT * FROM welcome_farewell WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    conn.close()
+
+    channels = get_server_channels(guild_id)
+    if channels is None: return redirect('/servers')
+
+    def get_selected_channel_options(selected_id):
+        opts = '<option value="">None</option>'
+        for ch in channels:
+            sel = 'selected' if str(ch['id']) == str(selected_id) else ''
+            opts += f'<option value="{ch["id"]}" {sel}>#{ch["name"]}</option>'
+        return opts
+
+    welcome_msg = (cfg['welcome_message'] if cfg and cfg['welcome_message'] else 'Welcome {user} to {server}!')
+    farewell_msg = (cfg['farewell_message'] if cfg and cfg['farewell_message'] else '{user} just left the server.')
+    welcome_json = (cfg['welcome_embed_json'] if cfg and cfg['welcome_embed_json'] else '{ "title": "👋 Welcome {username}", "description": "Glad to have you in {server}!", "color": 11849216 }')
+    farewell_json = (cfg['farewell_embed_json'] if cfg and cfg['farewell_embed_json'] else '{ "title": "📤 Goodbye {username}", "description": "We hope to see you again in {server}.", "color": 15158332 }')
+
+    return f"""
+    <html>
+        <head><title>Welcome & Farewell | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item active"><span class="menu-label">👋 Welcome</span></a>
+                    <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">👋 Welcome & Farewell</h1>
+                    <p class="page-desc">Customize your server's onboarding and farewell experience with powerful placeholders and embeds.</p>
+                    <form action="/save-welcome/{guild_id}" method="post">
+                        <div class="card">
+                            <h2 class="card-title">Welcome Settings</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Welcome Channel</label>
+                                    <select name="welcome_channel">{get_selected_channel_options(cfg['welcome_channel'] if cfg else '')}</select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Welcome Message</label>
+                                    <textarea name="welcome_message" rows="3">{welcome_msg}</textarea>
+                                    <div class="hint">Placeholders: {{user}}, {{username}}, {{server}}, {{member_count}}</div>
+                                </div>
+                                <div class="form-group">
+                                    <label>Welcome Embed (JSON)</label>
+                                    <textarea name="welcome_embed_json" rows="6">{welcome_json}</textarea>
+                                    <div class="hint">Optional. Supports any Discord embed JSON fields with placeholders. Leave empty to send only text.</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h2 class="card-title">Farewell Settings</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Farewell Channel</label>
+                                    <select name="farewell_channel">{get_selected_channel_options(cfg['farewell_channel'] if cfg else '')}</select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Farewell Message</label>
+                                    <textarea name="farewell_message" rows="3">{farewell_msg}</textarea>
+                                    <div class="hint">Placeholders: {{user}}, {{username}}, {{server}}</div>
+                                </div>
+                                <div class="form-group">
+                                    <label>Farewell Embed (JSON)</label>
+                                    <textarea name="farewell_embed_json" rows="6">{farewell_json}</textarea>
+                                    <div class="hint">Optional. Supports Discord embed JSON. Leave empty to send only text.</div>
+                                </div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn">Save Welcome/Farewell</button>
+                    </form>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/save-welcome/<int:guild_id>', methods=['POST'])
+def save_welcome(guild_id):
+    welcome_channel = request.form.get('welcome_channel')
+    welcome_message = request.form.get('welcome_message')
+    welcome_embed_json = request.form.get('welcome_embed_json', '')
+    farewell_channel = request.form.get('farewell_channel')
+    farewell_message = request.form.get('farewell_message')
+    farewell_embed_json = request.form.get('farewell_embed_json', '')
+
+    # Validate JSON if provided
+    try:
+        if welcome_embed_json:
+            json.loads(welcome_embed_json)
+        if farewell_embed_json:
+            json.loads(farewell_embed_json)
+    except Exception:
+        return "Invalid JSON in embed fields. Please fix and try again.", 400
+
+    conn = get_db()
+    conn.execute('''
+        INSERT INTO welcome_farewell (guild_id, welcome_channel, welcome_message, farewell_channel, farewell_message, welcome_embed_json, farewell_embed_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            welcome_channel = excluded.welcome_channel,
+            welcome_message = excluded.welcome_message,
+            farewell_channel = excluded.farewell_channel,
+            farewell_message = excluded.farewell_message,
+            welcome_embed_json = excluded.welcome_embed_json,
+            farewell_embed_json = excluded.farewell_embed_json
+    ''', (int(guild_id), welcome_channel, welcome_message, farewell_channel, farewell_message, welcome_embed_json, farewell_embed_json))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/welcome?success=1')
 
 @app.route('/dashboard/<int:guild_id>/logging')
 def logging_dashboard(guild_id):
@@ -1071,6 +1183,9 @@ def logging_dashboard(guild_id):
                             </div>
                         </div>
                         <button type="submit" class="btn">Save Logging</button>
+                    </form>
+                    <form action="/setup-logging/{guild_id}" method="post" style="display:inline-block; margin-top: 15px;">
+                        <button type="submit" class="btn">Setup Private Log Channels</button>
                     </form>
                 </div>
             </div>
@@ -1212,6 +1327,83 @@ def save_logging(guild_id):
     conn.close()
     return redirect(f'/dashboard/{guild_id}/logging?success=1')
 
+@app.route('/setup-logging/<int:guild_id>', methods=['POST'])
+def setup_logging(guild_id):
+    if not DISCORD_TOKEN:
+        return "Missing bot token", 500
+    headers = {'Authorization': f"Bot {DISCORD_TOKEN}", 'Content-Type': 'application/json'}
+    bot_id = get_bot_user_id()
+    if bot_id is None:
+        return "Unable to fetch bot user", 500
+    try:
+        r = http_session.get(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/channels", headers=headers, timeout=10)
+        r.raise_for_status()
+        all_channels = r.json()
+    except Exception as e:
+        return f"Failed to fetch channels: {str(e)}", 500
+    category = None
+    for c in all_channels:
+        if str(c.get('type')) == '4' and str(c.get('name')).lower() in ['logs', 'empire-logs']:
+            category = c
+            break
+    if not category:
+        payload = {
+            "name": "empire-logs",
+            "type": 4,
+            "permission_overwrites": [
+                {"id": str(guild_id), "type": 0, "deny": str(1024)},
+                {"id": str(bot_id), "type": 1, "allow": str(3072)}
+            ]
+        }
+        cr = http_session.post(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/channels", headers=headers, json=payload, timeout=10)
+        if cr.status_code >= 400:
+            return f"Failed to create category: {cr.text}", 500
+        category = cr.json()
+    parent_id = str(category['id'])
+    desired = {
+        "message-logs": "message_log_channel",
+        "member-logs": "member_log_channel",
+        "mod-logs": "mod_log_channel",
+        "automod-logs": "automod_log_channel",
+        "server-logs": "server_log_channel",
+        "voice-logs": "voice_log_channel"
+    }
+    created_ids = {}
+    existing = {}
+    for c in all_channels:
+        if str(c.get('type')) == '0' and str(c.get('parent_id')) == parent_id:
+            existing[c.get('name')] = c
+    for name, col in desired.items():
+        ch = existing.get(name)
+        if not ch:
+            payload = {"name": name, "type": 0, "parent_id": parent_id}
+            pr = http_session.post(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/channels", headers=headers, json=payload, timeout=10)
+            if pr.status_code >= 400:
+                return f"Failed to create {name}: {pr.text}", 500
+            ch = pr.json()
+        created_ids[col] = str(ch['id'])
+    conn = get_db()
+    conn.execute('''
+        INSERT INTO logging_config (guild_id, message_log_channel, member_log_channel, mod_log_channel, automod_log_channel, server_log_channel, voice_log_channel)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            message_log_channel = excluded.message_log_channel,
+            member_log_channel = excluded.member_log_channel,
+            mod_log_channel = excluded.mod_log_channel,
+            automod_log_channel = excluded.automod_log_channel,
+            server_log_channel = excluded.server_log_channel,
+            voice_log_channel = excluded.voice_log_channel
+    ''', (int(guild_id),
+          created_ids.get('message_log_channel'),
+          created_ids.get('member_log_channel'),
+          created_ids.get('mod_log_channel'),
+          created_ids.get('automod_log_channel'),
+          created_ids.get('server_log_channel'),
+          created_ids.get('voice_log_channel')))
+    conn.commit()
+    conn.close()
+    CACHE.pop(f"channels_{guild_id}", None)
+    return redirect(f'/dashboard/{guild_id}/logging?setup=1')
 @app.route('/save-custom-command/<int:guild_id>', methods=['POST'])
 def save_custom_command(guild_id):
     name = request.form.get('name')
@@ -1388,5 +1580,6 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
