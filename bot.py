@@ -7,7 +7,6 @@ import time
 import aiosqlite
 import json
 import ssl
-import certifi
 import aiohttp
 import asyncio
 from dotenv import load_dotenv
@@ -2736,10 +2735,13 @@ async def blackjack(ctx: commands.Context, amount: str = None):
     async with aiosqlite.connect(DB_FILE) as db:
         if win_status == "win":
             server_multiplier = get_server_join_multiplier(ctx.author.id)
-            final_win = int(bet_amount * server_multiplier)
+            final_win = int(bet_amount * server_multiplier * bj_multiplier)
             await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (final_win, ctx.author.id, ctx.guild.id))
-            if server_multiplier > 1.0:
-                result += " (2x Boost!)"
+            if server_multiplier > 1.0 or bj_multiplier > 1.0:
+                mult_text = []
+                if server_multiplier > 1.0: mult_text.append(f"{server_multiplier}x Server")
+                if bj_multiplier > 1.0: mult_text.append(f"{bj_multiplier}x Job")
+                result += f" ({' + '.join(mult_text)} Boost!)"
         elif win_status == "loss":
             await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = ?', (bet_amount, ctx.author.id, ctx.guild.id))
         await db.commit()
@@ -3450,7 +3452,7 @@ async def add_money_admin(ctx: commands.Context, member: discord.Member, amount:
         return await ctx.send("Amount must be positive.")
     
     # Confirmation prompt
-    confirm_msg = await ctx.send(f"⚠️ Are you sure you want to add **{amount:,} coins** to {member.mention}? (Type `confirm` to proceed)")
+    await ctx.send(f"⚠️ Are you sure you want to add **{amount:,} coins** to {member.mention}? (Type `confirm` to proceed)")
     
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == "confirm"
@@ -3473,7 +3475,7 @@ async def add_xp_admin(ctx: commands.Context, member: discord.Member, amount: in
         return await ctx.send("Amount must be positive.")
     
     # Confirmation prompt
-    confirm_msg = await ctx.send(f"⚠️ Are you sure you want to add **{amount:,} XP** to {member.mention}? (Type `confirm` to proceed)")
+    await ctx.send(f"⚠️ Are you sure you want to add **{amount:,} XP** to {member.mention}? (Type `confirm` to proceed)")
     
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == "confirm"
@@ -3495,7 +3497,7 @@ async def add_xp_admin(ctx: commands.Context, member: discord.Member, amount: in
 @is_authorized_owner()
 async def add_title_admin(ctx: commands.Context, member: discord.Member, title: str):
     # Confirmation prompt
-    confirm_msg = await ctx.send(f"⚠️ Are you sure you want to add the title '**{title}**' to {member.mention}? (Type `confirm` to proceed)")
+    await ctx.send(f"⚠️ Are you sure you want to add the title '**{title}**' to {member.mention}? (Type `confirm` to proceed)")
     
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == "confirm"
@@ -3531,5 +3533,8 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
+
+
 
 
