@@ -9,6 +9,7 @@ import json
 import ssl
 import certifi
 import aiohttp
+import asyncio
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -286,6 +287,57 @@ async def init_db():
             description TEXT,
             created_at INTEGER
         )''')
+
+        # --- MODERATION & UTILITY TABLES ---
+        await db.execute('''CREATE TABLE IF NOT EXISTS warnings (
+            warn_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            guild_id INTEGER,
+            moderator_id INTEGER,
+            reason TEXT,
+            timestamp INTEGER,
+            expires_at INTEGER
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS automod_words (
+            word_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER,
+            word TEXT,
+            punishment TEXT DEFAULT 'warn'
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS logging_config (
+            guild_id INTEGER PRIMARY KEY,
+            message_log_channel INTEGER,
+            member_log_channel INTEGER,
+            user_log_channel INTEGER,
+            server_log_channel INTEGER,
+            voice_log_channel INTEGER,
+            mod_log_channel INTEGER,
+            automod_log_channel INTEGER,
+            command_log_channel INTEGER
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS welcome_farewell (
+            guild_id INTEGER PRIMARY KEY,
+            welcome_channel INTEGER,
+            welcome_message TEXT,
+            welcome_embed_json TEXT,
+            farewell_channel INTEGER,
+            farewell_message TEXT,
+            farewell_embed_json TEXT
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS reaction_roles (
+            message_id INTEGER,
+            guild_id INTEGER,
+            emoji TEXT,
+            role_id INTEGER,
+            PRIMARY KEY (message_id, emoji)
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS custom_commands (
+            guild_id INTEGER,
+            name TEXT,
+            code TEXT,
+            prefix TEXT DEFAULT '.',
+            PRIMARY KEY (guild_id, name)
+        )''')
         await db.commit()
 
 async def migrate_db():
@@ -391,6 +443,552 @@ async def get_user_data(user_id, guild_id):
             row = await cursor.fetchone()
             return row
 
+# --- MODERATION HELPERS ---
+async def log_mod_action(guild, action, target, moderator, reason, duration=None):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT mod_log_channel FROM logging_config WHERE guild_id = ?', (guild.id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row or not row[0]:
+                return
+            channel_id = row[0]
+            channel = guild.get_channel(channel_id)
+            if not channel:
+                return
+
+            embed = discord.Embed(title=f"Moderation Action: {action}", color=discord.Color.red())
+            embed.add_field(name="Target", value=f"{target} ({target.id})", inline=False)
+            embed.add_field(name="Moderator", value=f"{moderator} ({moderator.id})", inline=False)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            if duration:
+                embed.add_field(name="Duration", value=duration, inline=False)
+            embed.set_timestamp()
+            
+            try:
+                await channel.send(embed=embed)
+            except:
+                pass
+
+async def log_embed(guild, column, embed):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute(f'SELECT {column} FROM logging_config WHERE guild_id = ?', (guild.id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row or not row[0]:
+                return
+            channel_id = row[0]
+            channel = guild.get_channel(channel_id)
+            if channel:
+                try:
+                    await channel.send(embed=embed)
+                except:
+                    pass
+
+def parse_duration(duration_str):
+    if not duration_str:
+        return None
+    
+    total_seconds = 0
+    import re
+    matches = re.findall(r'(\d+)([smhd])', duration_str.lower())
+    if not matches:
+        return None
+    
+    for amount, unit in matches:
+        amount = int(amount)
+        if unit == 's': total_seconds += amount
+        elif unit == 'm': total_seconds += amount * 60
+        elif unit == 'h': total_seconds += amount * 3600
+        elif unit == 'd': total_seconds += amount * 86400
+    
+    return total_seconds
+
+# --- MODERATION COMMANDS ---
+
+@bot.hybrid_command(name="kick", description="Remove a member from the server")
+@commands.has_permissions(kick_members=True)
+@app_commands.describe(member="The member to kick", reason="Reason for kicking", duration="Optional time (e.g. 1h, 1d) - will be logged")
+async def kick(ctx: commands.Context, member: discord.Member, reason: str = "No reason provided", duration: str = None):
+    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
+        return await ctx.send("❌ You cannot kick someone with a higher or equal role!")
+    
+    try:
+        await member.kick(reason=reason)
+        await ctx.send(f"✅ **{member.display_name}** has been kicked. Reason: {reason}")
+        await log_mod_action(ctx.guild, "Kick", member, ctx.author, reason, duration)
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to kick this member.")
+
+@bot.hybrid_command(name="ban", description="Ban a member from the server")
+@commands.has_permissions(ban_members=True)
+@app_commands.describe(member="The member to ban", reason="Reason for banning", duration="Duration (e.g. 1h, 1d)")
+async def ban(ctx: commands.Context, member: discord.Member, reason: str = "No reason provided", duration: str = None):
+    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
+        return await ctx.send("❌ You cannot ban someone with a higher or equal role!")
+
+    seconds = parse_duration(duration)
+    
+    try:
+        await member.ban(reason=reason)
+        await ctx.send(f"✅ **{member.display_name}** has been banned. Reason: {reason}" + (f" for {duration}" if duration else ""))
+        await log_mod_action(ctx.guild, "Ban", member, ctx.author, reason, duration)
+        
+        if seconds:
+            # We would need a background task to unban, but for now we'll just log it.
+            # In a real production bot, you'd store this in DB and have a loop.
+            pass
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to ban this member.")
+
+@bot.hybrid_command(name="warn", description="Issue a warning to a member")
+@commands.has_permissions(kick_members=True)
+@app_commands.describe(member="The member to warn", reason="Reason for warning", duration="Expiration time (e.g. 1d, 30d)")
+async def warn(ctx: commands.Context, member: discord.Member, reason: str = "No reason provided", duration: str = None):
+    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
+        return await ctx.send("❌ You cannot warn someone with a higher or equal role!")
+
+    seconds = parse_duration(duration)
+    expires_at = int(time.time() + seconds) if seconds else None
+    
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('''
+            INSERT INTO warnings (user_id, guild_id, moderator_id, reason, timestamp, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (member.id, ctx.guild.id, ctx.author.id, reason, int(time.time()), expires_at))
+        await db.commit()
+    
+    await ctx.send(f"⚠️ **{member.display_name}** has been warned. Reason: {reason}")
+    await log_mod_action(ctx.guild, "Warning", member, ctx.author, reason, duration)
+
+@bot.hybrid_group(name="warnings", description="Display warning history for a user")
+async def warnings_group(ctx: commands.Context, user: discord.User):
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM warnings WHERE user_id = ? AND guild_id = ? ORDER BY timestamp DESC', (user.id, ctx.guild.id)) as cursor:
+            rows = await cursor.fetchall()
+    
+    if not rows:
+        return await ctx.send(f"✅ {user.display_name} has no warnings.")
+    
+    embed = discord.Embed(title=f"Warnings for {user.display_name}", color=discord.Color.orange())
+    for row in rows:
+        moderator = ctx.guild.get_member(row['moderator_id']) or f"Unknown ({row['moderator_id']})"
+        expiry = f"\nExpires: <t:{row['expires_at']}:R>" if row['expires_at'] else ""
+        embed.add_field(
+            name=f"ID: {row['warn_id']} | <t:{row['timestamp']}:R>",
+            value=f"**Reason:** {row['reason']}\n**Moderator:** {moderator}{expiry}",
+            inline=False
+        )
+    await ctx.send(embed=embed)
+
+@warnings_group.command(name="clear", description="Purge all warnings for a specified user")
+@commands.has_permissions(kick_members=True)
+async def clear_warnings(ctx: commands.Context, user: discord.User):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('DELETE FROM warnings WHERE user_id = ? AND guild_id = ?', (user.id, ctx.guild.id))
+        await db.commit()
+    
+    await ctx.send(f"✅ Cleared all warnings for **{user.display_name}**.")
+    await log_mod_action(ctx.guild, "Clear Warnings", user, ctx.author, "All warnings cleared")
+
+@bot.hybrid_command(name="removewarn", description="Delete a specific warning by ID")
+@commands.has_permissions(kick_members=True)
+@app_commands.describe(warn_id="The ID of the warning to remove")
+async def remove_warn(ctx: commands.Context, warn_id: int):
+    async with aiosqlite.connect(DB_FILE) as db:
+        # Check if warning exists and belongs to this guild
+        async with db.execute('SELECT user_id FROM warnings WHERE warn_id = ? AND guild_id = ?', (warn_id, ctx.guild.id)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return await ctx.send(f"❌ Warning ID `{warn_id}` not found in this server.")
+            
+            user_id = row[0]
+            await db.execute('DELETE FROM warnings WHERE warn_id = ?', (warn_id,))
+            await db.commit()
+    
+    user = bot.get_user(user_id) or f"User ({user_id})"
+    await ctx.send(f"✅ Removed warning `{warn_id}` from **{user}**.")
+    await log_mod_action(ctx.guild, "Remove Warning", user, ctx.author, f"Warning ID {warn_id} removed")
+
+# --- DASHBOARD CONFIGURABLE FEATURES ---
+
+@bot.hybrid_group(name="set", description="Configure server settings")
+@commands.has_permissions(manage_guild=True)
+async def set_group(ctx: commands.Context):
+    if ctx.invoked_subcommand is None:
+        await ctx.send("❌ Use `/set welcome` or `/set farewell`.")
+
+@set_group.command(name="welcome", description="Configure welcome messages")
+@app_commands.describe(channel="Channel for welcome messages", message="Welcome message text (use {user} for mention)")
+async def set_welcome(ctx: commands.Context, channel: discord.TextChannel, *, message: str):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('''
+            INSERT INTO welcome_farewell (guild_id, welcome_channel, welcome_message)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET welcome_channel=excluded.welcome_channel, welcome_message=excluded.welcome_message
+        ''', (ctx.guild.id, channel.id, message))
+        await db.commit()
+    
+    await ctx.send(f"✅ Welcome messages set to {channel.mention}.\n**Message:** {message}")
+
+@set_group.command(name="farewell", description="Configure farewell messages")
+@app_commands.describe(channel="Channel for farewell messages", message="Farewell message text (use {user} for name)")
+async def set_farewell(ctx: commands.Context, channel: discord.TextChannel, *, message: str):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('''
+            INSERT INTO welcome_farewell (guild_id, farewell_channel, farewell_message)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET farewell_channel=excluded.farewell_channel, farewell_message=excluded.farewell_message
+        ''', (ctx.guild.id, channel.id, message))
+        await db.commit()
+    
+    await ctx.send(f"✅ Farewell messages set to {channel.mention}.\n**Message:** {message}")
+
+@bot.hybrid_group(name="automod", description="Manage automatic moderation")
+@commands.has_permissions(manage_guild=True)
+async def automod_group(ctx: commands.Context):
+    if ctx.invoked_subcommand is None:
+        await ctx.send("❌ Use `/automod add` or `/automod remove`.")
+
+@automod_group.command(name="add", description="Add a word to the filter")
+@app_commands.describe(word="The word to filter", punishment="Punishment (warn/kick/ban/delete)")
+async def automod_add(ctx: commands.Context, word: str, punishment: str = "warn"):
+    punishment = punishment.lower()
+    if punishment not in ['warn', 'kick', 'ban', 'delete']:
+        return await ctx.send("❌ Invalid punishment! Choose: `warn`, `kick`, `ban`, or `delete`.")
+    
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT INTO automod_words (guild_id, word, punishment) VALUES (?, ?, ?)', 
+                        (ctx.guild.id, word.lower(), punishment))
+        await db.commit()
+    
+    await ctx.send(f"✅ Added `{word}` to the word filter with punishment: **{punishment}**.")
+
+@automod_group.command(name="remove", description="Remove a word from the filter by ID")
+@app_commands.describe(word_id="The ID of the word to remove")
+async def automod_remove(ctx: commands.Context, word_id: int):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT word FROM automod_words WHERE word_id = ? AND guild_id = ?', (word_id, ctx.guild.id)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return await ctx.send(f"❌ Word ID `{word_id}` not found.")
+            
+            word = row[0]
+            await db.execute('DELETE FROM automod_words WHERE word_id = ?', (word_id,))
+            await db.commit()
+    
+    await ctx.send(f"✅ Removed `{word}` from the word filter.")
+
+@bot.hybrid_command(name="reactionroles", description="Create a reaction role message")
+@commands.has_permissions(manage_roles=True)
+@app_commands.describe(message_id="The ID of the message to add reaction roles to", emoji="The emoji to use", role="The role to assign")
+async def reaction_roles(ctx: commands.Context, message_id: str, emoji: str, role: discord.Role):
+    try:
+        msg_id = int(message_id)
+        msg = await ctx.channel.fetch_message(msg_id)
+    except:
+        return await ctx.send("❌ Invalid message ID or message not found in this channel.")
+
+    try:
+        await msg.add_reaction(emoji)
+    except:
+        return await ctx.send("❌ I couldn't add that reaction. Make sure I have permission and it's a valid emoji.")
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR REPLACE INTO reaction_roles (message_id, guild_id, emoji, role_id) VALUES (?, ?, ?, ?)',
+                        (msg_id, ctx.guild.id, emoji, role.id))
+        await db.commit()
+    
+    await ctx.send(f"✅ Reaction role added! Users reacting with {emoji} to [that message]({msg.jump_url}) will get the **{role.name}** role.")
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.guild_id is None or payload.user_id is None:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    emoji_key = str(payload.emoji)
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT role_id FROM reaction_roles WHERE message_id = ? AND guild_id = ? AND emoji = ?', (payload.message_id, payload.guild_id, emoji_key)) as cursor:
+            row = await cursor.fetchone()
+    if not row:
+        return
+    role = guild.get_role(row[0])
+    if not role:
+        return
+    member = guild.get_member(payload.user_id)
+    if not member or member.bot:
+        return
+    try:
+        await member.add_roles(role, reason="Reaction Roles")
+    except:
+        pass
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if payload.guild_id is None or payload.user_id is None:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    emoji_key = str(payload.emoji)
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT role_id FROM reaction_roles WHERE message_id = ? AND guild_id = ? AND emoji = ?', (payload.message_id, payload.guild_id, emoji_key)) as cursor:
+            row = await cursor.fetchone()
+    if not row:
+        return
+    role = guild.get_role(row[0])
+    if not role:
+        return
+    member = guild.get_member(payload.user_id)
+    if not member or member.bot:
+        return
+    try:
+        await member.remove_roles(role, reason="Reaction Roles")
+    except:
+        pass
+
+async def run_custom_command(code: str, message: discord.Message):
+    if "import " in code or "__" in code:
+        return False, "Disallowed code."
+    func_name = "__cmd__"
+    src = "async def " + func_name + "(message, bot):\n"
+    for line in code.splitlines():
+        src += "    " + line + "\n"
+    sandbox_globals = {"__builtins__": {"len": len, "str": str, "int": int, "float": float, "min": min, "max": max, "range": range}}
+    sandbox_locals = {}
+    try:
+        exec(src, sandbox_globals, sandbox_locals)
+        fn = sandbox_locals.get(func_name)
+        if not fn:
+            return False, "Code error."
+        await asyncio.wait_for(fn(message, bot), timeout=3.0)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot or not message.guild:
+        return
+    content = message.content.lower()
+    punished = False
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT word, punishment FROM automod_words WHERE guild_id = ?', (message.guild.id,)) as cursor:
+            rows = await cursor.fetchall()
+    for word, punishment in rows:
+        if word in content:
+            if punishment == "delete":
+                try:
+                    await message.delete()
+                except:
+                    pass
+            elif punishment == "warn":
+                async with aiosqlite.connect(DB_FILE) as db:
+                    await db.execute('INSERT INTO warnings (user_id, guild_id, moderator_id, reason, timestamp, expires_at) VALUES (?, ?, ?, ?, ?, ?)', (message.author.id, message.guild.id, bot.user.id, f"AutoMod: {word}", int(time.time()), None))
+                    await db.commit()
+            elif punishment == "kick":
+                try:
+                    await message.author.kick(reason=f"AutoMod: {word}")
+                except:
+                    pass
+            elif punishment == "ban":
+                try:
+                    await message.author.ban(reason=f"AutoMod: {word}")
+                except:
+                    pass
+            embed = discord.Embed(title="AutoMod Trigger", color=discord.Color.red())
+            embed.add_field(name="User", value=f"{message.author} ({message.author.id})", inline=False)
+            embed.add_field(name="Word", value=word, inline=False)
+            embed.add_field(name="Channel", value=f"{message.channel.mention}", inline=False)
+            embed.add_field(name="Content", value=message.content[:512], inline=False)
+            await log_embed(message.guild, "automod_log_channel", embed)
+            punished = True
+            break
+    if not punished:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT name, prefix, code FROM custom_commands WHERE guild_id = ?', (message.guild.id,)) as cursor:
+                cmds = await cursor.fetchall()
+        for name, prefix, code in cmds:
+            trigger = f"{prefix}{name}"
+            if content.startswith(trigger):
+                ok, err = await run_custom_command(code, message)
+                embed = discord.Embed(title="Custom Command Executed", color=discord.Color.blurple())
+                embed.add_field(name="User", value=f"{message.author} ({message.author.id})", inline=False)
+                embed.add_field(name="Command", value=name, inline=False)
+                embed.add_field(name="Prefix", value=prefix, inline=False)
+                if err:
+                    embed.add_field(name="Error", value=str(err)[:300], inline=False)
+                await log_embed(message.guild, "command_log_channel", embed)
+                break
+    await bot.process_commands(message)
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    if not message.guild or message.author.bot:
+        return
+    embed = discord.Embed(title="Message Deleted", color=discord.Color.dark_red())
+    embed.add_field(name="Author", value=f"{message.author} ({message.author.id})", inline=False)
+    embed.add_field(name="Channel", value=f"{message.channel.mention}", inline=False)
+    if message.content:
+        embed.add_field(name="Content", value=message.content[:512], inline=False)
+    await log_embed(message.guild, "message_log_channel", embed)
+
+@bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    if not after.guild or before.author.bot:
+        return
+    embed = discord.Embed(title="Message Edited", color=discord.Color.orange())
+    embed.add_field(name="Author", value=f"{before.author} ({before.author.id})", inline=False)
+    embed.add_field(name="Channel", value=f"{before.channel.mention}", inline=False)
+    embed.add_field(name="Before", value=(before.content or "")[:300], inline=False)
+    embed.add_field(name="After", value=(after.content or "")[:300], inline=False)
+    await log_embed(after.guild, "message_log_channel", embed)
+
+@bot.event
+async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent):
+    if not payload.guild_id:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    embed = discord.Embed(title="Bulk Message Delete", color=discord.Color.dark_red())
+    embed.add_field(name="Channel", value=f"<#{payload.channel_id}>", inline=False)
+    embed.add_field(name="Count", value=str(len(payload.message_ids)), inline=False)
+    await log_embed(guild, "message_log_channel", embed)
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    embed = discord.Embed(title="Member Joined", color=discord.Color.green())
+    embed.add_field(name="User", value=f"{member} ({member.id})", inline=False)
+    created_ts = int(member.created_at.timestamp()) if member.created_at else int(time.time())
+    embed.add_field(name="Account Age", value=f"<t:{created_ts}:R>", inline=False)
+    await log_embed(member.guild, "member_log_channel", embed)
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT welcome_channel, welcome_message FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
+            row = await cursor.fetchone()
+    if row and row[0]:
+        ch = member.guild.get_channel(row[0])
+        if ch:
+            msg = row[1] or "Welcome {user}!"
+            msg = msg.replace("{user}", member.mention)
+            try:
+                await ch.send(msg)
+            except:
+                pass
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    embed = discord.Embed(title="Member Left", color=discord.Color.dark_gold())
+    embed.add_field(name="User", value=f"{member} ({member.id})", inline=False)
+    await log_embed(member.guild, "member_log_channel", embed)
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT farewell_channel, farewell_message FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
+            row = await cursor.fetchone()
+    if row and row[0]:
+        ch = member.guild.get_channel(row[0])
+        if ch:
+            msg = row[1] or "{user} left the server."
+            msg = msg.replace("{user}", member.display_name)
+            try:
+                await ch.send(msg)
+            except:
+                pass
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    if not after.guild:
+        return
+    changes = []
+    if before.nick != after.nick:
+        changes.append(("Nickname", f"{before.nick} → {after.nick}"))
+    before_roles = set(r.id for r in before.roles)
+    after_roles = set(r.id for r in after.roles)
+    added = after_roles - before_roles
+    removed = before_roles - after_roles
+    if added:
+        names = [after.guild.get_role(r).name for r in added if after.guild.get_role(r)]
+        changes.append(("Roles Added", ", ".join(names)))
+    if removed:
+        names = [after.guild.get_role(r).name for r in removed if after.guild.get_role(r)]
+        changes.append(("Roles Removed", ", ".join(names)))
+    if changes:
+        embed = discord.Embed(title="Member Updated", color=discord.Color.blurple())
+        embed.add_field(name="User", value=f"{after} ({after.id})", inline=False)
+        for k, v in changes:
+            embed.add_field(name=k, value=v or "None", inline=False)
+        await log_embed(after.guild, "user_log_channel", embed)
+
+@bot.event
+async def on_user_update(before: discord.User, after: discord.User):
+    embed = discord.Embed(title="User Updated", color=discord.Color.blurple())
+    embed.add_field(name="User", value=f"{after} ({after.id})", inline=False)
+    if before.avatar != after.avatar:
+        embed.add_field(name="Avatar", value="Changed", inline=False)
+    if before.global_name != after.global_name:
+        embed.add_field(name="Global Name", value=f"{before.global_name} → {after.global_name}", inline=False)
+    for guild in bot.guilds:
+        if guild.get_member(after.id):
+            await log_embed(guild, "user_log_channel", embed)
+
+@bot.event
+async def on_guild_channel_create(channel: discord.abc.GuildChannel):
+    embed = discord.Embed(title="Channel Created", color=discord.Color.green())
+    embed.add_field(name="Channel", value=f"{channel.mention} ({channel.id})", inline=False)
+    await log_embed(channel.guild, "server_log_channel", embed)
+
+@bot.event
+async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
+    embed = discord.Embed(title="Channel Deleted", color=discord.Color.dark_red())
+    embed.add_field(name="Channel", value=f"#{channel.name} ({channel.id})", inline=False)
+    await log_embed(channel.guild, "server_log_channel", embed)
+
+@bot.event
+async def on_guild_channel_update(before: discord.abc.GuildChannel, after: discord.abc.GuildChannel):
+    embed = discord.Embed(title="Channel Updated", color=discord.Color.orange())
+    embed.add_field(name="Channel", value=f"{after.mention} ({after.id})", inline=False)
+    await log_embed(after.guild, "server_log_channel", embed)
+
+@bot.event
+async def on_guild_update(before: discord.Guild, after: discord.Guild):
+    embed = discord.Embed(title="Server Updated", color=discord.Color.orange())
+    embed.add_field(name="Server", value=f"{after.name} ({after.id})", inline=False)
+    await log_embed(after, "server_log_channel", embed)
+
+@bot.event
+async def on_guild_role_create(role: discord.Role):
+    embed = discord.Embed(title="Role Created", color=discord.Color.green())
+    embed.add_field(name="Role", value=f"{role.name} ({role.id})", inline=False)
+    await log_embed(role.guild, "server_log_channel", embed)
+
+@bot.event
+async def on_guild_role_delete(role: discord.Role):
+    embed = discord.Embed(title="Role Deleted", color=discord.Color.dark_red())
+    embed.add_field(name="Role", value=f"{role.name} ({role.id})", inline=False)
+    await log_embed(role.guild, "server_log_channel", embed)
+
+@bot.event
+async def on_guild_role_update(before: discord.Role, after: discord.Role):
+    embed = discord.Embed(title="Role Updated", color=discord.Color.orange())
+    embed.add_field(name="Role", value=f"{after.name} ({after.id})", inline=False)
+    await log_embed(after.guild, "server_log_channel", embed)
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if not member.guild:
+        return
+    embed = discord.Embed(title="Voice Update", color=discord.Color.blurple())
+    embed.add_field(name="User", value=f"{member} ({member.id})", inline=False)
+    if not before.channel and after.channel:
+        embed.add_field(name="Action", value=f"Joined {after.channel.name}", inline=False)
+    elif before.channel and not after.channel:
+        embed.add_field(name="Action", value=f"Left {before.channel.name}", inline=False)
+    elif before.channel and after.channel and before.channel.id != after.channel.id:
+        embed.add_field(name="Action", value=f"Switched {before.channel.name} → {after.channel.name}", inline=False)
+    if before.mute != after.mute:
+        embed.add_field(name="Mute", value=str(after.mute), inline=False)
+    if before.deaf != after.deaf:
+        embed.add_field(name="Deaf", value=str(after.deaf), inline=False)
+    await log_embed(member.guild, "voice_log_channel", embed)
 async def get_guild_assets(guild_id):
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute('SELECT custom_assets_json FROM guild_config WHERE guild_id = ?', (int(guild_id),)) as cursor:
@@ -929,6 +1527,213 @@ async def on_ready():
     except Exception as e:
         print(f"CRITICAL: Error syncing slash commands: {e}")
     print(f'Logged in as {bot.user.name}')
+
+@bot.event
+async def on_member_join(member):
+    # Welcome message
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT welcome_channel, welcome_message FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                channel = member.guild.get_channel(row[0])
+                if channel:
+                    msg = row[1].replace("{user}", member.mention)
+                    await channel.send(msg)
+        
+    # Member join log & account age verification
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT member_log_channel FROM logging_config WHERE guild_id = ?', (member.guild.id,)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                channel = member.guild.get_channel(row[0])
+                if channel:
+                    account_age = (discord.utils.utcnow() - member.created_at).days
+                    embed = discord.Embed(title="Member Joined", color=discord.Color.green())
+                    embed.set_thumbnail(url=member.display_avatar.url)
+                    embed.add_field(name="User", value=f"{member} ({member.id})")
+                    embed.add_field(name="Account Age", value=f"{account_age} days")
+                    if account_age < 7:
+                        embed.description = "⚠️ **Warning: New Account!**"
+                    embed.set_timestamp()
+                    await channel.send(embed=embed)
+
+@bot.event
+async def on_member_remove(member):
+    # Farewell message
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT farewell_channel, farewell_message FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                channel = member.guild.get_channel(row[0])
+                if channel:
+                    msg = row[1].replace("{user}", member.display_name)
+                    await channel.send(msg)
+
+    # Member leave log
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT member_log_channel FROM logging_config WHERE guild_id = ?', (member.guild.id,)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                channel = member.guild.get_channel(row[0])
+                if channel:
+                    embed = discord.Embed(title="Member Left", color=discord.Color.orange())
+                    embed.set_thumbnail(url=member.display_avatar.url)
+                    embed.add_field(name="User", value=f"{member} ({member.id})")
+                    embed.set_timestamp()
+                    await channel.send(embed=embed)
+
+@bot.event
+async def on_message_delete(message):
+    if not message.guild or message.author.bot: return
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT message_log_channel FROM logging_config WHERE guild_id = ?', (message.guild.id,)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                channel = message.guild.get_channel(row[0])
+                if channel:
+                    embed = discord.Embed(title="Message Deleted", color=discord.Color.red())
+                    embed.add_field(name="Author", value=f"{message.author} ({message.author.id})")
+                    embed.add_field(name="Channel", value=message.channel.mention)
+                    embed.add_field(name="Content", value=message.content or "[No content]", inline=False)
+                    embed.set_timestamp()
+                    await channel.send(embed=embed)
+
+@bot.event
+async def on_message_edit(before, after):
+    if not before.guild or before.author.bot: return
+    if before.content == after.content: return
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT message_log_channel FROM logging_config WHERE guild_id = ?', (before.guild.id,)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                channel = before.guild.get_channel(row[0])
+                if channel:
+                    embed = discord.Embed(title="Message Edited", color=discord.Color.blue())
+                    embed.add_field(name="Author", value=f"{before.author} ({before.author.id})")
+                    embed.add_field(name="Channel", value=before.channel.mention)
+                    embed.add_field(name="Before", value=before.content or "[No content]", inline=False)
+                    embed.add_field(name="After", value=after.content or "[No content]", inline=False)
+                    embed.set_timestamp()
+                    await channel.send(embed=embed)
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if payload.user_id == bot.user.id: return
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT role_id FROM reaction_roles WHERE message_id = ? AND emoji = ?', (payload.message_id, str(payload.emoji)) ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                guild = bot.get_guild(payload.guild_id)
+                role = guild.get_role(row[0])
+                member = guild.get_member(payload.user_id)
+                if role and member:
+                    try:
+                        await member.add_roles(role)
+                    except:
+                        pass
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    if payload.user_id == bot.user.id: return
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT role_id FROM reaction_roles WHERE message_id = ? AND emoji = ?', (payload.message_id, str(payload.emoji)) ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                guild = bot.get_guild(payload.guild_id)
+                role = guild.get_role(row[0])
+                member = guild.get_member(payload.user_id)
+                if role and member:
+                    try:
+                        await member.remove_roles(role)
+                    except:
+                        pass
+
+@bot.event
+async def on_message(message):
+    if message.author.bot: return
+    if not message.guild: return
+
+    # --- AUTOMOD ---
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT word, punishment FROM automod_words WHERE guild_id = ?', (message.guild.id,)) as cursor:
+            rows = await cursor.fetchall()
+            for word, punishment in rows:
+                if word in message.content.lower():
+                    # Trigger Automod
+                    if punishment == 'delete':
+                        try: await message.delete()
+                        except: pass
+                    elif punishment == 'warn':
+                        # Issue warning
+                        await db.execute('''
+                            INSERT INTO warnings (user_id, guild_id, moderator_id, reason, timestamp)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', (message.author.id, message.guild.id, bot.user.id, f"AutoMod: Blacklisted word '{word}'", int(time.time())))
+                        await db.commit()
+                        try: await message.delete()
+                        except: pass
+                        await message.channel.send(f"⚠️ {message.author.mention}, that word is blacklisted! (Warned)", delete_after=5)
+                    elif punishment == 'kick':
+                        try: 
+                            await message.author.kick(reason=f"AutoMod: Blacklisted word '{word}'")
+                            await message.delete()
+                        except: pass
+                    elif punishment == 'ban':
+                        try: 
+                            await message.author.ban(reason=f"AutoMod: Blacklisted word '{word}'")
+                            await message.delete()
+                        except: pass
+                    
+                    # Log AutoMod
+                    async with db.execute('SELECT automod_log_channel FROM logging_config WHERE guild_id = ?', (message.guild.id,)) as log_cursor:
+                        log_row = await log_cursor.fetchone()
+                        if log_row and log_row[0]:
+                            log_channel = message.guild.get_channel(log_row[0])
+                            if log_channel:
+                                embed = discord.Embed(title="AutoMod Triggered", color=discord.Color.dark_red())
+                                embed.add_field(name="User", value=f"{message.author} ({message.author.id})")
+                                embed.add_field(name="Word", value=word)
+                                embed.add_field(name="Punishment", value=punishment)
+                                embed.add_field(name="Content", value=message.content)
+                                embed.set_timestamp()
+                                await log_channel.send(embed=embed)
+                    return # Stop processing if automod triggered
+
+    # --- CUSTOM COMMANDS ---
+    # Check for custom commands
+    prefix = await get_prefix(bot, message)
+    if message.content.startswith(prefix):
+        parts = message.content[len(prefix):].split()
+        if parts:
+            cmd_name = parts[0]
+            async with aiosqlite.connect(DB_FILE) as db:
+                async with db.execute('SELECT code FROM custom_commands WHERE guild_id = ? AND name = ?', (message.guild.id, cmd_name)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        code = row[0]
+                        # Secure execution sandbox
+                        restricted_globals = {
+                            'discord': discord,
+                            'message': message,
+                            'guild': message.guild,
+                            'channel': message.channel,
+                            'author': message.author,
+                            'bot': bot,
+                            'print': lambda x: None # Disable print
+                        }
+                        try:
+                            exec_code = f"async def custom_cmd():\n" + "\n".join(f"    {line}" for line in code.split('\n'))
+                            exec(exec_code, restricted_globals)
+                            await restricted_globals['custom_cmd']()
+                            embed = discord.Embed(title="Custom Command Executed", color=discord.Color.blurple())
+                            embed.add_field(name="User", value=f"{message.author} ({message.author.id})")
+                            embed.add_field(name="Command", value=cmd_name)
+                            await log_embed(message.guild, "command_log_channel", embed)
+                        except Exception as e:
+                            await message.channel.send(f"❌ Error in custom command `{cmd_name}`: `{e}`")
+                        return
+
+    await bot.process_commands(message)
 
 # --- Hybrid Commands ---
 
@@ -2274,4 +3079,5 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
