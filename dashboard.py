@@ -261,7 +261,10 @@ def servers():
         print(f"DEBUG: Servers error: {str(e)}")
         return f"Failed to fetch servers: {str(e)}", 500
     
-    manageable = [g for g in guilds if (int(g['permissions']) & 0x20) == 0x20]
+    manageable = [
+        g for g in guilds 
+        if ((int(g['permissions']) & 0x20) == 0x20) or ((int(g['permissions']) & 0x8) == 0x8)
+    ]
     
     server_cards = ""
     for g in manageable:
@@ -480,7 +483,10 @@ def dashboard(guild_id):
                 </div>
                 <div class="sidebar-menu">
                     <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
-                    <a href="#" class="menu-item active"><span class="menu-label">⚙️ General Settings</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item {'active' if request.path == f'/dashboard/{guild_id}' else ''}"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/moderation" class="menu-item {'active' if '/moderation' in request.path else ''}"><span class="menu-label">🛡️ Moderation</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item {'active' if '/logging' in request.path else ''}"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item {'active' if '/custom-commands' in request.path else ''}"><span class="menu-label">💻 Custom Commands</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions=2416299008&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
                     <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
                     <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
@@ -813,6 +819,314 @@ def save(guild_id):
     conn.close()
     return redirect(f'/dashboard/{guild_id}?success=1')
 
+@app.route('/dashboard/<int:guild_id>/moderation')
+def moderation_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    conn = get_db()
+    mod_config = conn.execute('SELECT * FROM welcome_farewell WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    automod_words = conn.execute('SELECT * FROM automod_words WHERE guild_id = ?', (int(guild_id),)).fetchall()
+    conn.close()
+
+    roles = get_server_roles(guild_id)
+    if roles is None: return redirect('/servers')
+
+    automod_html = ""
+    for word_row in automod_words:
+        automod_html += f"""
+        <div class="list-item">
+            <div class="list-item-info">
+                <div class="list-item-name">{word_row['word']}</div>
+                <div class="list-item-price">Punishment: {word_row['punishment']}</div>
+            </div>
+            <button onclick="location.href='/delete-automod/{guild_id}/{word_row['word_id']}'" class="btn-delete">×</button>
+        </div>
+        """
+
+    return f"""
+    <html>
+        <head><title>Moderation | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/moderation" class="menu-item active"><span class="menu-label">🛡️ Moderation</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">🛡️ Moderation Settings</h1>
+                    <form action="/save-moderation/{guild_id}" method="post">
+                        <div class="card">
+                            <h2 class="card-title">Welcome & Farewell</h2>
+                            <div class="form-group">
+                                <label>Welcome Channel ID</label>
+                                <input type="text" name="welcome_channel" value="{mod_config['welcome_channel'] if mod_config else ''}" placeholder="Channel ID">
+                            </div>
+                            <div class="form-group">
+                                <label>Welcome Message</label>
+                                <textarea name="welcome_message" rows="3">{mod_config['welcome_message'] if mod_config else 'Welcome {user} to the server!'}</textarea>
+                            </div>
+                            <div class="form-group">
+                                <label>Farewell Channel ID</label>
+                                <input type="text" name="farewell_channel" value="{mod_config['farewell_channel'] if mod_config else ''}" placeholder="Channel ID">
+                            </div>
+                            <div class="form-group">
+                                <label>Farewell Message</label>
+                                <textarea name="farewell_message" rows="3">{mod_config['farewell_message'] if mod_config else '{user} just left the server.'}</textarea>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn">Save Moderation</button>
+                    </form>
+
+                    <div class="card" style="margin-top: 30px;">
+                        <h2 class="card-title">AutoMod (Word Filter)</h2>
+                        <form action="/add-automod/{guild_id}" method="post" style="display: flex; gap: 10px; margin-bottom: 20px;">
+                            <input type="text" name="word" placeholder="Word to filter" required style="flex: 2;">
+                            <select name="punishment" style="flex: 1;">
+                                <option value="warn">Warn</option>
+                                <option value="delete">Delete Only</option>
+                                <option value="kick">Kick</option>
+                                <option value="ban">Ban</option>
+                            </select>
+                            <button type="submit" class="btn">Add</button>
+                        </form>
+                        {automod_html}
+                    </div>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/dashboard/<int:guild_id>/logging')
+def logging_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    conn = get_db()
+    log_config = conn.execute('SELECT * FROM logging_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    conn.close()
+
+    return f"""
+    <html>
+        <head><title>Logging | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item active"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">📝 Logging Configuration</h1>
+                    <p class="page-desc">Configure granular logging channels for various server events.</p>
+                    <form action="/save-logging/{guild_id}" method="post">
+                        <div class="card">
+                            <h2 class="card-title">Log Channels (Enter Channel IDs)</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Message Logs</label>
+                                    <input type="text" name="message_log" value="{log_config['message_log_channel'] if log_config else ''}" placeholder="Channel ID">
+                                </div>
+                                <div class="form-group">
+                                    <label>Member Logs</label>
+                                    <input type="text" name="member_log" value="{log_config['member_log_channel'] if log_config else ''}" placeholder="Channel ID">
+                                </div>
+                                <div class="form-group">
+                                    <label>Mod Logs</label>
+                                    <input type="text" name="mod_log" value="{log_config['mod_log_channel'] if log_config else ''}" placeholder="Channel ID">
+                                </div>
+                                <div class="form-group">
+                                    <label>AutoMod Logs</label>
+                                    <input type="text" name="automod_log" value="{log_config['automod_log_channel'] if log_config else ''}" placeholder="Channel ID">
+                                </div>
+                                <div class="form-group">
+                                    <label>Server Logs</label>
+                                    <input type="text" name="server_log" value="{log_config['server_log_channel'] if log_config else ''}" placeholder="Channel ID">
+                                </div>
+                                <div class="form-group">
+                                    <label>Voice Logs</label>
+                                    <input type="text" name="voice_log" value="{log_config['voice_log_channel'] if log_config else ''}" placeholder="Channel ID">
+                                </div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn">Save Logging</button>
+                    </form>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/dashboard/<int:guild_id>/custom-commands')
+def custom_commands_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    conn = get_db()
+    custom_cmds = conn.execute('SELECT * FROM custom_commands WHERE guild_id = ?', (int(guild_id),)).fetchall()
+    conn.close()
+
+    cmds_html = ""
+    for cmd in custom_cmds:
+        cmds_html += f"""
+        <div class="list-item">
+            <div class="list-item-info">
+                <div class="list-item-name">{cmd['name']}</div>
+                <div class="list-item-price">Prefix: {cmd['prefix']}</div>
+            </div>
+            <button onclick="location.href='/delete-custom-command/{guild_id}/{cmd['name']}'" class="btn-delete">×</button>
+        </div>
+        """
+
+    return f"""
+    <html>
+        <head><title>Custom Commands | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item active"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">💻 Custom Commands</h1>
+                    <p class="page-desc">Create server-specific commands with restricted Python execution.</p>
+                    
+                    <div class="card">
+                        <h2 class="card-title">Create New Command</h2>
+                        <form action="/save-custom-command/{guild_id}" method="post">
+                            <div style="display: flex; gap: 15px; margin-bottom: 20px;">
+                                <div style="flex: 1;">
+                                    <label>Name</label>
+                                    <input type="text" name="name" placeholder="e.g. hello" required>
+                                </div>
+                                <div style="flex: 1;">
+                                    <label>Prefix (optional)</label>
+                                    <input type="text" name="prefix" placeholder="." value=".">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>Python Code (Sandboxed)</label>
+                                <textarea name="code" rows="10" placeholder="await message.channel.send('Hello!')" required style="font-family: monospace;"></textarea>
+                            </div>
+                            <button type="submit" class="btn">Create Command</button>
+                        </form>
+                    </div>
+
+                    <div class="card" style="margin-top: 30px;">
+                        <h2 class="card-title">Existing Commands</h2>
+                        {cmds_html}
+                    </div>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/save-moderation/<int:guild_id>', methods=['POST'])
+def save_moderation(guild_id):
+    welcome_ch = request.form.get('welcome_channel')
+    welcome_msg = request.form.get('welcome_message')
+    farewell_ch = request.form.get('farewell_channel')
+    farewell_msg = request.form.get('farewell_message')
+    
+    conn = get_db()
+    conn.execute('''
+        INSERT INTO welcome_farewell (guild_id, welcome_channel, welcome_message, farewell_channel, farewell_message)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            welcome_channel = excluded.welcome_channel,
+            welcome_message = excluded.welcome_message,
+            farewell_channel = excluded.farewell_channel,
+            farewell_message = excluded.farewell_message
+    ''', (guild_id, welcome_ch, welcome_msg, farewell_ch, farewell_msg))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/moderation?success=1')
+
+@app.route('/add-automod/<int:guild_id>', methods=['POST'])
+def add_automod(guild_id):
+    word = request.form.get('word')
+    punishment = request.form.get('punishment')
+    conn = get_db()
+    conn.execute('INSERT INTO automod_words (guild_id, word, punishment) VALUES (?, ?, ?)', (guild_id, word, punishment))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/moderation')
+
+@app.route('/delete-automod/<int:guild_id>/<int:word_id>')
+def delete_automod(guild_id, word_id):
+    conn = get_db()
+    conn.execute('DELETE FROM automod_words WHERE word_id = ? AND guild_id = ?', (word_id, guild_id))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/moderation')
+
+@app.route('/save-logging/<int:guild_id>', methods=['POST'])
+def save_logging(guild_id):
+    msg_ch = request.form.get('message_log')
+    mem_ch = request.form.get('member_log')
+    mod_ch = request.form.get('mod_log')
+    auto_ch = request.form.get('automod_log')
+    srv_ch = request.form.get('server_log')
+    v_ch = request.form.get('voice_log')
+
+    conn = get_db()
+    conn.execute('''
+        INSERT INTO logging_config (guild_id, message_log_channel, member_log_channel, mod_log_channel, automod_log_channel, server_log_channel, voice_log_channel)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            message_log_channel = excluded.message_log_channel,
+            member_log_channel = excluded.member_log_channel,
+            mod_log_channel = excluded.mod_log_channel,
+            automod_log_channel = excluded.automod_log_channel,
+            server_log_channel = excluded.server_log_channel,
+            voice_log_channel = excluded.voice_log_channel
+    ''', (guild_id, msg_ch, mem_ch, mod_ch, auto_ch, srv_ch, v_ch))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/logging?success=1')
+
+@app.route('/save-custom-command/<int:guild_id>', methods=['POST'])
+def save_custom_command(guild_id):
+    name = request.form.get('name')
+    prefix = request.form.get('prefix', '.')
+    code = request.form.get('code')
+
+    conn = get_db()
+    conn.execute('''
+        INSERT INTO custom_commands (guild_id, name, prefix, code)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id, name) DO UPDATE SET
+            prefix = excluded.prefix,
+            code = excluded.code
+    ''', (guild_id, name, prefix, code))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/custom-commands?success=1')
+
+@app.route('/delete-custom-command/<int:guild_id>/<name>')
+def delete_custom_command(guild_id, name):
+    conn = get_db()
+    conn.execute('DELETE FROM custom_commands WHERE guild_id = ? AND name = ?', (guild_id, name))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/custom-commands')
+
 @app.route('/logout')
 def logout():
     session.clear()
@@ -963,4 +1277,3 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
-
