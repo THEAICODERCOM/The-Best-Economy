@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify
+from flask import Flask, request, redirect, session
 import sqlite3
 import json
 import os
@@ -39,6 +39,48 @@ def get_db():
         boost_multiplier REAL DEFAULT 1.25,
         boost_until INTEGER DEFAULT 0
     )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_config (
+        guild_id INTEGER PRIMARY KEY,
+        prefix TEXT DEFAULT '.',
+        role_shop_json TEXT DEFAULT '{}',
+        custom_assets_json TEXT DEFAULT '{}',
+        bank_plans_json TEXT DEFAULT '{}'
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS welcome_farewell (
+        guild_id INTEGER PRIMARY KEY,
+        welcome_channel TEXT,
+        welcome_message TEXT,
+        farewell_channel TEXT,
+        farewell_message TEXT
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS automod_words (
+        word_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER,
+        word TEXT,
+        punishment TEXT
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS logging_config (
+        guild_id INTEGER PRIMARY KEY,
+        message_log_channel TEXT,
+        member_log_channel TEXT,
+        mod_log_channel TEXT,
+        automod_log_channel TEXT,
+        server_log_channel TEXT,
+        voice_log_channel TEXT
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS custom_commands (
+        guild_id INTEGER,
+        name TEXT,
+        prefix TEXT DEFAULT '!',
+        PRIMARY KEY (guild_id, name)
+    )''')
+    
+    # Ensure new columns exist
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN bank_plans_json TEXT DEFAULT '{}'")
+    except sqlite3.OperationalError:
+        pass # Already exists
+
     conn.commit()
     return conn
 
@@ -59,16 +101,6 @@ def join_support_server(access_token, user_id):
             print(f"DEBUG: Failed to join user {user_id} to support server: {r.status_code} {r.text}")
     except Exception as e:
         print(f"DEBUG: Error joining support server: {e}")
-
-def get_bot_guilds():
-    headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
-    try:
-        r = requests.get(f"{DISCORD_API_BASE_URL}/users/@me/guilds", headers=headers, verify=False)
-        r.raise_for_status()
-        return [g['id'] for g in r.json()]
-    except Exception as e:
-        print(f"DEBUG: Error fetching bot guilds: {e}")
-        return []
 
 # Modern Sidebar UI Styling (UnbelievaBoat Style)
 STYLE = """
@@ -1328,4 +1360,3 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
-
