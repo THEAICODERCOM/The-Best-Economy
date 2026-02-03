@@ -24,9 +24,41 @@ DISCORD_TOKEN = os.getenv('DISCORD_TOKEN') # Need bot token to fetch roles
 DISCORD_API_BASE_URL = 'https://discord.com/api/v10'
 SUPPORT_SERVER_ID = '1464655628474646611'
 
+# Performance optimization: Use a global session and simple caching
+http_session = requests.Session()
+http_session.verify = False # Maintain user's preference for disabling SSL verification
+CACHE = {}
+CACHE_TTL = 300 # 5 minutes
+
+def get_cached_api(url, headers, cache_key):
+    now = time.time()
+    if cache_key in CACHE:
+        data, expiry = CACHE[cache_key]
+        if now < expiry:
+            return data
+    
+    try:
+        r = http_session.get(url, headers=headers, timeout=10)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        data = r.json()
+        CACHE[cache_key] = (data, now + CACHE_TTL)
+        return data
+    except Exception as e:
+        print(f"DEBUG: API Error ({url}): {e}")
+        # Return stale data if available on error
+        if cache_key in CACHE:
+            return CACHE[cache_key][0]
+        return None
+
 def get_db():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
     # Ensure tables exist
     conn.execute('''CREATE TABLE IF NOT EXISTS global_votes (
         user_id INTEGER PRIMARY KEY, last_vote INTEGER DEFAULT 0
@@ -82,7 +114,10 @@ def get_db():
         pass # Already exists
 
     conn.commit()
-    return conn
+    conn.close()
+
+# Initialize DB on startup
+init_db()
 
 def join_support_server(access_token, user_id):
     """Automatically adds the user to the support server using OAuth2 guilds.join scope."""
@@ -169,39 +204,22 @@ STYLE = """
 
 def get_bot_guilds():
     headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
-    try:
-        r = requests.get(f"{DISCORD_API_BASE_URL}/users/@me/guilds", headers=headers, verify=False)
-        r.raise_for_status()
-        return [g['id'] for g in r.json()]
-    except Exception as e:
-        print(f"DEBUG: Error fetching bot guilds: {e}")
-        return []
+    guilds = get_cached_api(f"{DISCORD_API_BASE_URL}/users/@me/guilds", headers, "bot_guilds")
+    if guilds is None: return []
+    return [g['id'] for g in guilds]
 
 def get_server_roles(guild_id):
     headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
-    try:
-        r = requests.get(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/roles", headers=headers, verify=False)
-        if r.status_code == 404:
-            print(f"DEBUG: Bot not in guild {guild_id}")
-            return None # Indicate bot not in guild
-        r.raise_for_status()
-        return sorted(r.json(), key=lambda x: x['position'], reverse=True)
-    except Exception as e:
-        print(f"DEBUG: Error fetching roles for {guild_id}: {e}")
-        return []
+    roles = get_cached_api(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/roles", headers, f"roles_{guild_id}")
+    if roles is None: return None
+    return sorted(roles, key=lambda x: x['position'], reverse=True)
 
 def get_server_channels(guild_id):
     headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
-    try:
-        r = requests.get(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/channels", headers=headers, verify=False)
-        if r.status_code == 404:
-            return None
-        r.raise_for_status()
-        # Filter for text channels (type 0)
-        return [c for c in r.json() if c['type'] == 0]
-    except Exception as e:
-        print(f"DEBUG: Error fetching channels for {guild_id}: {e}")
-        return []
+    channels = get_cached_api(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/channels", headers, f"channels_{guild_id}")
+    if channels is None: return []
+    # Filter for text channels (type 0)
+    return [ch for ch in channels if ch['type'] == 0]
 
 @app.route('/favicon.ico')
 def favicon():
@@ -453,7 +471,7 @@ def dashboard(guild_id):
     # Pre-render Role Shop list
     role_items_html = ""
     for r_id, price in role_shop.items():
-        role_name = next((r['name'] for r in roles if r['id'] == r_id), f"Unknown Role ({r_id})")
+        role_name = next((r['name'] for r in roles if r['id'] == r_id), f"Unknown Role ({r_id})") if roles else f"Unknown Role ({r_id})"
         role_items_html += f"""
         <div class="list-item">
             <div class="list-item-info">
@@ -1360,3 +1378,4 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
