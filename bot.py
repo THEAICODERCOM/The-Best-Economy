@@ -698,7 +698,11 @@ async def log_embed(guild, column, embed):
             row = await cursor.fetchone()
             if not row or not row[0]:
                 return
-            channel_id = row[0]
+            try:
+                channel_id = int(row[0])
+            except Exception:
+                channel_id = row[0]
+
             channel = guild.get_channel(channel_id)
             if not channel:
                 try:
@@ -844,7 +848,7 @@ async def warnings_group(ctx: commands.Context, user: discord.User):
             value=f"**Reason:** {row['reason']}\n**Moderator:** {moderator}{expiry}",
             inline=False
         )
-    await ctx.send(embed=embed)
+    await ctx.send(embed=apply_theme(embed))
 
 @warnings_group.command(name="clear", description="Purge all warnings for a specified user")
 @commands.has_permissions(kick_members=True)
@@ -1877,7 +1881,7 @@ async def on_member_join(member):
         async with db.execute('SELECT welcome_channel, welcome_message FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
             row = await cursor.fetchone()
             if row and row[0]:
-                channel = member.guild.get_channel(row[0])
+                channel = await resolve_channel(member.guild, row[0])
                 if channel:
                     msg = row[1].replace("{user}", member.mention)
                     await channel.send(msg)
@@ -1887,7 +1891,7 @@ async def on_member_join(member):
         async with db.execute('SELECT member_log_channel FROM logging_config WHERE guild_id = ?', (member.guild.id,)) as cursor:
             row = await cursor.fetchone()
             if row and row[0]:
-                channel = member.guild.get_channel(row[0])
+                channel = await resolve_channel(member.guild, row[0])
                 if channel:
                     account_age = (discord.utils.utcnow() - member.created_at).days
                     embed = discord.Embed(title="Member Joined", color=discord.Color.green())
@@ -1906,7 +1910,7 @@ async def on_member_remove(member):
         async with db.execute('SELECT farewell_channel, farewell_message FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
             row = await cursor.fetchone()
             if row and row[0]:
-                channel = member.guild.get_channel(row[0])
+                channel = await resolve_channel(member.guild, row[0])
                 if channel:
                     msg = row[1].replace("{user}", member.display_name)
                     await channel.send(msg)
@@ -1916,7 +1920,7 @@ async def on_member_remove(member):
         async with db.execute('SELECT member_log_channel FROM logging_config WHERE guild_id = ?', (member.guild.id,)) as cursor:
             row = await cursor.fetchone()
             if row and row[0]:
-                channel = member.guild.get_channel(row[0])
+                channel = await resolve_channel(member.guild, row[0])
                 if channel:
                     embed = discord.Embed(title="Member Left", color=discord.Color.orange())
                     embed.set_thumbnail(url=member.display_avatar.url)
@@ -1931,7 +1935,7 @@ async def on_message_delete(message):
         async with db.execute('SELECT message_log_channel FROM logging_config WHERE guild_id = ?', (message.guild.id,)) as cursor:
             row = await cursor.fetchone()
             if row and row[0]:
-                channel = message.guild.get_channel(row[0])
+                channel = await resolve_channel(message.guild, row[0])
                 if channel:
                     embed = discord.Embed(title="Message Deleted", color=discord.Color.red())
                     embed.add_field(name="Author", value=f"{message.author} ({message.author.id})")
@@ -1948,7 +1952,7 @@ async def on_message_edit(before, after):
         async with db.execute('SELECT message_log_channel FROM logging_config WHERE guild_id = ?', (before.guild.id,)) as cursor:
             row = await cursor.fetchone()
             if row and row[0]:
-                channel = before.guild.get_channel(row[0])
+                channel = await resolve_channel(before.guild, row[0])
                 if channel:
                     embed = discord.Embed(title="Message Edited", color=discord.Color.blue())
                     embed.add_field(name="Author", value=f"{before.author} ({before.author.id})")
@@ -2024,7 +2028,11 @@ async def start_tutorial(ctx: commands.Context):
     )
     embed.set_thumbnail(url=bot.user.display_avatar.url)
     embed.set_footer(text="Your journey to greatness begins now.")
-    await ctx.send(embed=embed)
+    await ctx.send(embed=apply_theme(embed))
+
+def apply_theme(embed: discord.Embed) -> discord.Embed:
+    embed.set_footer(text="Empire Nexus")
+    return embed
 
 class HelpSelect(discord.ui.Select):
     def __init__(self, prefix):
@@ -2035,146 +2043,202 @@ class HelpSelect(discord.ui.Select):
             discord.SelectOption(label="Assets & Empire", description="Shop, inventory, and prestige", emoji="🏗️"),
             discord.SelectOption(label="Wonder & Server Progress", description="Server-wide projects and boosts", emoji="🏛️"),
             discord.SelectOption(label="Boosters & Rewards", description="Voting and support server bonuses", emoji="🚀"),
+            discord.SelectOption(label="Moderation", description="Kick, ban, warns, automod", emoji="🛡️"),
+            discord.SelectOption(label="Utility & Info", description="Ping, serverinfo, userinfo, avatar", emoji="🧭"),
+            discord.SelectOption(label="Welcome & Config", description="Welcome, farewell, setprefix, setlogs", emoji="📑"),
+            discord.SelectOption(label="Owner & Admin", description="Owner-only economy management", emoji="👑"),
             discord.SelectOption(label="Setup & Utility", description="Help, settings, and tutorial", emoji="⚙️")
         ]
         super().__init__(placeholder="Select a category to view its commands!", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        category_map = {
-            "Making Money": "making money",
-            "Banking": "banking",
-            "Assets & Empire": "assets",
-            "Wonder & Server Progress": "wonder",
-            "Boosters & Rewards": "boosters",
-            "Setup & Utility": "utility"
-        }
-        
-        selected_label = self.values[0]
-        key = category_map.get(selected_label)
-        prefix = self.prefix
-        
-        categories = {
-            "making money": {
-                "title": "💸 Making Money",
-                "commands": [
-                    f"`{prefix}work`, `/work` – Supervise mines for coins.",
-                    f"`{prefix}crime`, `/crime` – High risk, high reward heists.",
-                    f"`{prefix}blackjack`, `/blackjack` – Casino blackjack.",
-                    f"`{prefix}roulette`, `/roulette` – Spin the wheel.",
-                    f"`{prefix}riddle`, `/riddle` and `{prefix}answer` – Solve riddles.",
-                    f"`{prefix}jobs`, `/jobs` – View available jobs.",
-                    f"`{prefix}applyjob <id>`, `/applyjob` – Apply for a job.",
-                    f"`{prefix}dailyquests`, `/dailyquests` – Daily quest checklist.",
-                    f"`{prefix}weeklyquests`, `/weeklyquests` – Weekly quest checklist."
-                ],
-                "explain": (
-                    "Use **work**, **crime**, and the **casino** commands to generate coins. "
-                    "Pick a **job** with `jobs`/`applyjob` to boost income from your favourite activity. "
-                    "Daily and weekly quests reward you for using commands consistently, so if you grind "
-                    "work, crime, blackjack or roulette while quests are active you will complete multiple "
-                    "quests at once and snowball much faster."
-                )
-            },
-            "banking": {
-                "title": "🏦 Banking",
-                "commands": [
-                    f"`{prefix}deposit <amount>`, `/deposit` – Move coins into the bank.",
-                    f"`{prefix}withdraw <amount>`, `/withdraw` – Take coins out of the bank.",
-                    f"`{prefix}balance`, `/balance` – View wallet, bank and bank plan.",
-                    f"`{prefix}bank`, `/bank` – View and switch bank plans.",
-                    f"`{prefix}autodeposit`, `/autodeposit` – Auto‑deposit passive income (with vote).",
-                    f"`{prefix}vote`, `/vote` – Vote for Top.gg rewards.",
-                    f"`{prefix}leaderboard`, `/leaderboard` – Money or XP rankings."
-                ],
-                "explain": (
-                    "Make money first, then **secure** it in the bank with `deposit`. "
-                    "Choosing a better **bank plan** with `bank` increases your hourly interest, "
-                    "so long‑term savings grow faster than coins left in your wallet. "
-                    "If you enable `autodeposit` after voting, passive income goes straight to the bank, "
-                    "compounding with interest. Use `balance` to monitor your totals and `leaderboard` "
-                    "to see how your wealth compares to others."
-                )
-            },
-            "assets": {
-                "title": "🏗️ Assets & Empire",
-                "commands": [
-                    f"`{prefix}shop`, `/shop` – Browse passive income assets.",
-                    f"`{prefix}buy <id>`, `/buy` – Buy assets.",
-                    f"`{prefix}inventory`, `/inventory` – View your assets.",
-                    f"`{prefix}profile`, `/profile` – Full empire overview (shows Titles & Medals).",
-                    f"`{prefix}prestige`, `/prestige` – Reset for permanent multipliers.",
-                    f"`{prefix}buyrole`, `/buyrole` – Buy server roles with coins."
-                ],
-                "explain": (
-                    "Use `shop` and `buy` to invest your coins into **assets** that pay every 10 minutes. "
-                    "Check `inventory` and `profile` to see how much passive income your empire produces. "
-                    "Once you reach the requirements, `prestige` lets you reset progress in exchange for "
-                    "permanent income multipliers, making every future asset and income source stronger. "
-                    "If the server owner set up a role shop, `buyrole` lets you convert economic progress "
-                    "into cosmetic or utility roles."
-                )
-            },
-            "wonder": {
-                "title": "🏛️ Wonder & Server Progress",
-                "commands": [
-                    f"`{prefix}wonder`, `/wonder` – View server Wonder level and boost.",
-                    f"`{prefix}contribute <amount>`, `/contribute` – Fund the Wonder for global boosts."
-                ],
-                "explain": (
-                    "The Wonder is a **server‑wide project**. Everyone can contribute coins with "
-                    "`contribute` to level it up. Each level makes the Wonder more expensive but "
-                    "unlocks stronger passive income boosts for the entire server for a limited time. "
-                    "Use `wonder` regularly to see progress and coordinate contributions with your community."
-                )
-            },
-            "boosters": {
-                "title": "🚀 Boosters & Rewards",
-                "commands": [
-                    f"`{prefix}vote`, `/vote` – Vote for 25,000 coins & auto-deposit.",
-                    "**Join Support Server** – Get 2x Coin Multiplier.",
-                    "**Global Leaderboards** – Top 3 users get stackable multipliers (up to 2x)."
-                ],
-                "explain": (
-                    "**A) Voting Rewards:**\n"
-                    "Vote for the bot on Top.gg to receive **25,000 coins** instantly and unlock **Auto-Deposit** "
-                    "for 12 hours. Auto-deposit automatically moves your passive income to your bank.\n\n"
-                    "**B) Support Server Booster:**\n"
-                    f"Join [**Empire Nexus Support**](https://discord.gg/{SUPPORT_SERVER_INVITE}) to permanently unlock a **2x Coin Multiplier** "
-                    "on all earnings from `/work`, `/crime`, `/blackjack`, and `/roulette`.\n\n"
-                    "**C) Leaderboard Rewards:**\n"
-                    "The top 3 users in each `/leaderboard` category receive stackable coin multipliers (1st: 2x, 2nd: 1.5x, 3rd: 1.25x) "
-                    "and exclusive titles visible in your `/profile` for as long as they maintain their rank."
-                )
-            },
-            "utility": {
-                "title": "⚙️ Setup & Utility",
-                "commands": [
-                    f"`{prefix}help`, `/help` – Overview and category help.",
-                    f"`{prefix}rank`, `/rank` – View level and XP bar.",
-                    f"`{prefix}setup`, `/setup` – Dashboard link and setup info.",
-                    f"`{prefix}setprefix`, `/setprefix` – Change the bot prefix (admin).",
-                    f"`{prefix}start`, `/start` – Tutorial for new players."
-                ],
-                "explain": (
-                    "Use `start` to onboard new players and explain the basic gameplay loop. "
-                    "`help` and `help <category>` give quick references and explanations for all systems. "
-                    "Admins can run `setprefix` to change how commands are triggered, and `setup` to access "
-                    "the web dashboard for configuring banks, assets, and role shops. `rank` shows players "
-                    "their level progression and encourages long‑term engagement."
-                )
+        try:
+            category_map = {
+                "Making Money": "making money",
+                "Banking": "banking",
+                "Assets & Empire": "assets",
+                "Wonder & Server Progress": "wonder",
+                "Boosters & Rewards": "boosters",
+                "Moderation": "moderation",
+                "Utility & Info": "info",
+                "Welcome & Config": "welcome",
+                "Owner & Admin": "owner",
+                "Setup & Utility": "utility"
             }
-        }
-        
-        data = categories[key]
-        embed = discord.Embed(
-            title=f"{data['title']}",
-            description=data["explain"],
-            color=0x00d2ff
-        )
-        cmds_text = "\n".join(f"- {line}" for line in data["commands"])
-        embed.add_field(name="Commands", value=cmds_text, inline=False)
-        embed.set_footer(text=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
-        await interaction.response.edit_message(embed=embed)
+            selected_label = self.values[0]
+            key = category_map.get(selected_label)
+            prefix = self.prefix
+
+            categories = {
+                "making money": {
+                    "title": "💸 Making Money",
+                    "commands": [
+                        f"`{prefix}work`, `/work` – Supervise mines for coins.",
+                        f"`{prefix}crime`, `/crime` – High risk, high reward heists.",
+                        f"`{prefix}blackjack`, `/blackjack` – Casino blackjack.",
+                        f"`{prefix}roulette`, `/roulette` – Spin the wheel.",
+                        f"`{prefix}riddle`, `/riddle` and `{prefix}answer` – Solve riddles.",
+                        f"`{prefix}jobs`, `/jobs` – View available jobs.",
+                        f"`{prefix}applyjob <id>`, `/applyjob` – Apply for a job.",
+                        f"`{prefix}dailyquests`, `/dailyquests` – Daily quest checklist.",
+                        f"`{prefix}weeklyquests`, `/weeklyquests` – Weekly quest checklist."
+                    ],
+                    "explain": (
+                        "Use work, crime, and the casino commands to generate coins. "
+                        "Pick a job with jobs/applyjob to boost income from your favourite activity. "
+                        "Daily and weekly quests reward consistent play; stack activities while quests are active."
+                    )
+                },
+                "banking": {
+                    "title": "🏦 Banking",
+                    "commands": [
+                        f"`{prefix}deposit <amount>`, `/deposit` – Move coins into the bank.",
+                        f"`{prefix}withdraw <amount>`, `/withdraw` – Take coins out of the bank.",
+                        f"`{prefix}balance`, `/balance` – View wallet, bank and bank plan.",
+                        f"`{prefix}bank`, `/bank` – View and switch bank plans.",
+                        f"`{prefix}autodeposit`, `/autodeposit` – Auto‑deposit passive income (with vote).",
+                        f"`{prefix}vote`, `/vote` – Vote for Top.gg rewards.",
+                        f"`{prefix}leaderboard`, `/leaderboard` – Money or XP rankings."
+                    ],
+                    "explain": (
+                        "Secure earnings in the bank with deposit. Better bank plans increase hourly interest. "
+                        "Enable autodeposit after voting to automatically secure passive income."
+                    )
+                },
+                "assets": {
+                    "title": "🏗️ Assets & Empire",
+                    "commands": [
+                        f"`{prefix}shop`, `/shop` – Browse passive income assets.",
+                        f"`{prefix}buy <id>`, `/buy` – Buy assets.",
+                        f"`{prefix}inventory`, `/inventory` – View your assets.",
+                        f"`{prefix}profile`, `/profile` – Empire overview with Titles & Medals.",
+                        f"`{prefix}prestige`, `/prestige` – Reset for permanent multipliers.",
+                        f"`{prefix}buyrole`, `/buyrole` – Buy server roles with coins."
+                    ],
+                    "explain": (
+                        "Invest coins into assets that pay every 10 minutes. Prestige resets progress for permanent multipliers."
+                    )
+                },
+                "wonder": {
+                    "title": "🏛️ Wonder & Server Progress",
+                    "commands": [
+                        f"`{prefix}wonder`, `/wonder` – View Wonder status.",
+                        f"`{prefix}contribute <amount>`, `/contribute` – Fund the Wonder."
+                    ],
+                    "explain": (
+                        "Coordinate contributions to level the Wonder and unlock powerful server‑wide boosts."
+                    )
+                },
+                "boosters": {
+                    "title": "🚀 Boosters & Rewards",
+                    "commands": [
+                        f"`{prefix}vote`, `/vote` – Vote for rewards & auto‑deposit.",
+                        "**Join Support Server** – 2x Coin Multiplier.",
+                        "**Global Leaderboards** – Top ranks grant multipliers and titles."
+                    ],
+                    "explain": (
+                        "Boost earnings via voting, support server bonuses, and leaderboard rewards."
+                    )
+                },
+                "moderation": {
+                    "title": "🛡️ Moderation",
+                    "commands": [
+                        f"`{prefix}kick`, `/kick` – Kick a member.",
+                        f"`{prefix}ban`, `/ban` – Ban a member.",
+                        f"`{prefix}warn`, `/warn` – Issue a warning.",
+                        f"`{prefix}clearwarnings`, `/clearwarnings` – Clear all warns.",
+                        f"`{prefix}delwarn`, `/delwarn` – Delete a warn by ID.",
+                        f"`{prefix}removewarn`, `/removewarn` – Alias for delwarn.",
+                        f"`{prefix}automod add/remove`, `/automod` – Word filter management.",
+                        f"`{prefix}setlogs`, `/setlogs` – Configure log channels."
+                    ],
+                    "explain": (
+                        "Configure automod and use kick/ban/warns to keep the server safe. "
+                        "Set log channels to record actions in dedicated channels."
+                    )
+                },
+                "info": {
+                    "title": "🧭 Utility & Information",
+                    "commands": [
+                        f"`{prefix}ping`, `/ping` – Bot latency.",
+                        f"`{prefix}serverinfo`, `/serverinfo` – Server stats.",
+                        f"`{prefix}userinfo`, `/userinfo` – User stats.",
+                        f"`{prefix}avatar`, `/avatar` – User avatar.",
+                        f"`{prefix}membercount`, `/membercount` – Member stats.",
+                        f"`{prefix}leaderboard`, `/leaderboard` – Rankings."
+                    ],
+                    "explain": (
+                        "Quickly inspect server and user information."
+                    )
+                },
+                "welcome": {
+                    "title": "📑 Welcome & Configuration",
+                    "commands": [
+                        f"`{prefix}set welcome` – Configure welcome messages.",
+                        f"`{prefix}set farewell` – Configure farewell messages.",
+                        f"`{prefix}setlogs`, `/setlogs` – Logging channels.",
+                        f"`{prefix}setprefix`, `/setprefix` – Change prefix.",
+                        f"`{prefix}setup`, `/setup` – Dashboard link."
+                    ],
+                    "explain": (
+                        "Customize join/leave messages, logging, and prefix. Access the dashboard for advanced config."
+                    )
+                },
+                "owner": {
+                    "title": "👑 Owner & Admin",
+                    "commands": [
+                        f"`{prefix}addmoney`, `/addmoney` – Grant coins.",
+                        f"`{prefix}addxp`, `/addxp` – Grant XP.",
+                        f"`{prefix}addtitle`, `/addtitle` – Grant a title."
+                    ],
+                    "explain": (
+                        "Restricted commands for bot owners and administrators."
+                    )
+                },
+                "utility": {
+                    "title": "⚙️ Setup & Utility",
+                    "commands": [
+                        f"`{prefix}help`, `/help` – Overview and category help.",
+                        f"`{prefix}rank`, `/rank` – Level & XP bar.",
+                        f"`{prefix}setup`, `/setup` – Dashboard link.",
+                        f"`{prefix}setprefix`, `/setprefix` – Change prefix.",
+                        f"`{prefix}start`, `/start` – Tutorial."
+                    ],
+                    "explain": (
+                        "Use start to onboard new players and help to explore features."
+                    )
+                }
+            }
+
+            data = categories[key]
+            embed = discord.Embed(
+                title=f"{data['title']}",
+                description=data["explain"],
+                color=0x00d2ff
+            )
+            cmds_text = "\n".join(f"- {line}" for line in data["commands"])
+            embed.add_field(name="Commands", value=cmds_text, inline=False)
+            embed.set_footer(text=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+            await interaction.response.edit_message(embed=embed)
+        except Exception as e:
+            try:
+                await interaction.response.send_message("❌ Failed to update help. Try again.", ephemeral=True)
+            except:
+                await interaction.followup.send("❌ Failed to update help. Try again.", ephemeral=True)
+            print(f"HelpSelect error: {e}")
+
+async def resolve_channel(guild, raw_id):
+    try:
+        cid = int(raw_id)
+    except Exception:
+        cid = raw_id
+    ch = guild.get_channel(cid)
+    if ch is None:
+        try:
+            ch = await guild.fetch_channel(cid)
+        except:
+            return None
+    return ch
 
 class HelpView(discord.ui.View):
     def __init__(self, prefix):
@@ -2205,7 +2269,7 @@ async def prestige(ctx: commands.Context):
         return await ctx.send(f"❌ You aren't ready to prestige! You need **Level {needed_level}** and **{needed_bank:,} coins** in your bank.")
     
     embed = discord.Embed(title="✨ Ascend to Greatness?", description=f"Prestiging will reset your **Level, XP, Balance, and Bank** to zero.\n\n**In return, you get:**\n💎 Prestige Level {data['prestige'] + 1}\n🚀 Permanent **{(data['prestige'] + 1) * 50}%** income bonus\n\nType `confirm` to proceed.", color=0xffd700)
-    await ctx.send(embed=embed)
+    await ctx.send(embed=apply_theme(embed))
 
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == 'confirm'
@@ -2896,7 +2960,7 @@ async def dailyquests(ctx: commands.Context):
                 value=f"Reward: {reward:,} coins\nProgress: {min(done, target)} / {target} ({progress_pct}%)\n{bar}\nStatus: {status}",
                 inline=False
             )
-    await ctx.send(embed=embed)
+    await ctx.send(embed=apply_theme(embed))
 
 @bot.hybrid_command(name="weeklyquests", description="View your weekly quest progress")
 async def weeklyquests(ctx: commands.Context):
@@ -2927,7 +2991,7 @@ async def weeklyquests(ctx: commands.Context):
                 value=f"Reward: {reward:,} coins\nProgress: {min(done, target)} / {target} ({progress_pct}%)\n{bar}\nStatus: {status}",
                 inline=False
             )
-    await ctx.send(embed=embed)
+    await ctx.send(embed=apply_theme(embed))
 
 # --- Hybrid Commands (Prefix + Slash) ---
 
@@ -2951,7 +3015,7 @@ async def balance(ctx: commands.Context, member: discord.Member = None):
     embed.add_field(name="Bank", value=f"🏦 `{data['bank']:,}`", inline=True)
     embed.add_field(name="Bank Plan", value=f"{plan_name}\n{rate_str}", inline=False)
     embed.set_footer(text=f"Total: {data['balance'] + data['bank']:,} coins")
-    await ctx.send(embed=embed)
+    await ctx.send(embed=apply_theme(embed))
 
 @bot.hybrid_command(name="bank", description="View and switch bank plans")
 async def bank_cmd(ctx: commands.Context, plan_id: str = None):
@@ -2969,7 +3033,7 @@ async def bank_cmd(ctx: commands.Context, plan_id: str = None):
             desc += f"{marker} **{info.get('name', b_id)}** (`{b_id}`)\n{rate_min:.2f}%–{rate_max:.2f}%/h • Cost: {price:,} • Min Lvl: {min_level}\n\n"
         embed = discord.Embed(title="🏦 Bank Plans", description=desc or "No plans configured.", color=0x00d2ff)
         embed.set_footer(text="Use /bank <plan_id> to switch.")
-        await ctx.send(embed=embed)
+        await ctx.send(embed=apply_theme(embed))
         return
     plan_id = plan_id.lower()
     if plan_id not in banks:
@@ -3001,7 +3065,7 @@ async def work(ctx: commands.Context):
     success, message = await work_logic(ctx, ctx.author.id, ctx.guild.id)
     color = 0x2ecc71 if success else 0xe74c3c
     embed = discord.Embed(description=message, color=color)
-    await ctx.send(embed=embed)
+    await ctx.send(embed=apply_theme(embed))
 
 @bot.hybrid_command(name="rob", description="Try to rob someone")
 @app_commands.describe(target="The user you want to rob")
@@ -3023,14 +3087,14 @@ async def rob(ctx: commands.Context, target: discord.Member):
             await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = ?', (stolen, target.id, ctx.guild.id))
             await db.commit()
         embed = discord.Embed(description=f"🧤 Stole **{stolen:,}** from {target.mention}!", color=0x2ecc71)
-        await ctx.send(embed=embed)
+        await ctx.send(embed=apply_theme(embed))
     else:
         fine = random.randint(300, 600)
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute('UPDATE users SET balance = MAX(0, balance - ?), last_rob = ? WHERE user_id = ? AND guild_id = ?', (fine, now, ctx.author.id, ctx.guild.id))
             await db.commit()
         embed = discord.Embed(description=f"🚔 Caught! Fined {fine:,} coins.", color=0xe74c3c)
-        await ctx.send(embed=embed)
+        await ctx.send(embed=apply_theme(embed))
 
 @bot.hybrid_command(name="buyrole", description="Buy a role from the server shop")
 async def buyrole(ctx: commands.Context, role: discord.Role):
@@ -3346,7 +3410,9 @@ async def help_cmd_new(ctx: commands.Context, category: str = None):
             embed.add_field(name=f"🔹 {cat}", value=f"`{len(cmds)} commands`", inline=True)
             
         embed.set_footer(text="Join our support server for more help! /setup for the link.")
-        return await ctx.send(embed=embed)
+        prefix = await get_prefix(bot, ctx.message)
+        view = HelpView(prefix)
+        return await ctx.send(embed=embed, view=view)
 
     cat_name = category.capitalize()
     if cat_name not in categories:
@@ -3462,6 +3528,7 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
 
 
