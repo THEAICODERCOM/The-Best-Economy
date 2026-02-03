@@ -677,7 +677,7 @@ async def log_mod_action(guild, action, target, moderator, reason, duration=None
             embed.add_field(name="Reason", value=reason, inline=False)
             if duration:
                 embed.add_field(name="Duration", value=duration, inline=False)
-            embed.set_timestamp()
+            embed.timestamp = discord.utils.utcnow()
             
             # Retry mechanism
             for attempt in range(3):
@@ -1900,7 +1900,7 @@ async def on_member_join(member):
                     embed.add_field(name="Account Age", value=f"{account_age} days")
                     if account_age < 7:
                         embed.description = "⚠️ **Warning: New Account!**"
-                    embed.set_timestamp()
+                    embed.timestamp = discord.utils.utcnow()
                     await channel.send(embed=embed)
 
 @bot.event
@@ -1925,7 +1925,7 @@ async def on_member_remove(member):
                     embed = discord.Embed(title="Member Left", color=discord.Color.orange())
                     embed.set_thumbnail(url=member.display_avatar.url)
                     embed.add_field(name="User", value=f"{member} ({member.id})")
-                    embed.set_timestamp()
+                    embed.timestamp = discord.utils.utcnow()
                     await channel.send(embed=embed)
 
 @bot.event
@@ -1941,7 +1941,7 @@ async def on_message_delete(message):
                     embed.add_field(name="Author", value=f"{message.author} ({message.author.id})")
                     embed.add_field(name="Channel", value=message.channel.mention)
                     embed.add_field(name="Content", value=message.content or "[No content]", inline=False)
-                    embed.set_timestamp()
+                    embed.timestamp = discord.utils.utcnow()
                     await channel.send(embed=embed)
 
 @bot.event
@@ -1959,9 +1959,43 @@ async def on_message_edit(before, after):
                     embed.add_field(name="Channel", value=before.channel.mention)
                     embed.add_field(name="Before", value=before.content or "[No content]", inline=False)
                     embed.add_field(name="After", value=after.content or "[No content]", inline=False)
-                    embed.set_timestamp()
+                    embed.timestamp = discord.utils.utcnow()
                     await channel.send(embed=embed)
 
+@bot.event
+async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
+    if not payload.guild_id:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    # Build a minimal embed; content is unavailable for uncached deletes
+    embed = discord.Embed(title="Message Deleted (Uncached)", color=discord.Color.red())
+    embed.add_field(name="Channel ID", value=str(payload.channel_id), inline=True)
+    embed.add_field(name="Message ID", value=str(payload.message_id), inline=True)
+    if payload.cached_message:
+        author = payload.cached_message.author
+        embed.add_field(name="Author", value=f"{author} ({author.id})", inline=False)
+        embed.add_field(name="Content", value=payload.cached_message.content or "[No content]", inline=False)
+    embed.timestamp = discord.utils.utcnow()
+    await log_embed(guild, "message_log_channel", embed)
+
+@bot.event
+async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
+    if not payload.guild_id:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    # Raw edit may not have before-content; log basic details
+    embed = discord.Embed(title="Message Edited (Uncached)", color=discord.Color.blue())
+    embed.add_field(name="Channel ID", value=str(payload.channel_id), inline=True)
+    embed.add_field(name="Message ID", value=str(payload.message_id), inline=True)
+    content = payload.data.get("content")
+    if content is not None:
+        embed.add_field(name="New Content", value=content or "[No content]", inline=False)
+    embed.timestamp = discord.utils.utcnow()
+    await log_embed(guild, "message_log_channel", embed)
 @bot.event
 async def on_raw_reaction_add(payload):
     if payload.user_id == bot.user.id: return
@@ -3528,6 +3562,7 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
 
 
