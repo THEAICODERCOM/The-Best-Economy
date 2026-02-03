@@ -444,6 +444,146 @@ async def get_user_data(user_id, guild_id):
             return row
 
 # --- MODERATION HELPERS ---
+
+@bot.event
+async def on_message_delete(message):
+    if not message.guild or message.author.bot:
+        return
+    embed = discord.Embed(title="🗑️ Message Deleted", color=discord.Color.orange(), timestamp=message.created_at)
+    embed.add_field(name="Author", value=f"{message.author.mention} ({message.author.id})", inline=True)
+    embed.add_field(name="Channel", value=message.channel.mention, inline=True)
+    embed.add_field(name="Content", value=message.content[:1024] or "*No content*", inline=False)
+    await log_embed(message.guild, "message_log_channel", embed)
+
+@bot.event
+async def on_message_edit(before, after):
+    if not before.guild or before.author.bot or before.content == after.content:
+        return
+    embed = discord.Embed(title="📝 Message Edited", color=discord.Color.blue(), timestamp=after.edited_at or discord.utils.utcnow())
+    embed.add_field(name="Author", value=f"{before.author.mention} ({before.author.id})", inline=True)
+    embed.add_field(name="Channel", value=before.channel.mention, inline=True)
+    embed.add_field(name="Before", value=before.content[:1024] or "*No content*", inline=False)
+    embed.add_field(name="After", value=after.content[:1024] or "*No content*", inline=False)
+    await log_embed(before.guild, "message_log_channel", embed)
+
+@bot.event
+async def on_member_join(member):
+    # Log the event
+    embed_log = discord.Embed(title="📥 Member Joined", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+    embed_log.add_field(name="User", value=f"{member.mention} ({member.id})", inline=True)
+    embed_log.add_field(name="Account Created", value=member.created_at.strftime("%b %d, %Y"), inline=True)
+    embed_log.set_thumbnail(url=member.display_avatar.url)
+    await log_embed(member.guild, "member_log_channel", embed_log)
+
+    # Welcome system
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
+            config = await cursor.fetchone()
+    
+    if not config or not config['welcome_channel']:
+        return
+        
+    channel = member.guild.get_channel(config['welcome_channel'])
+    if not channel:
+        try: channel = await member.guild.fetch_channel(config['welcome_channel'])
+        except: return
+
+    message = config['welcome_message'] or "Welcome {user} to {server}!"
+    embed_json = config['welcome_embed_json']
+    
+    # Replace placeholders
+    placeholders = {
+        "{user}": member.mention,
+        "{username}": member.name,
+        "{server}": member.guild.name,
+        "{member_count}": str(member.guild.member_count),
+        "{avatar}": member.display_avatar.url,
+        "{join_date}": member.joined_at.strftime("%b %d, %Y")
+    }
+    
+    final_message = message
+    for key, val in placeholders.items():
+        final_message = final_message.replace(key, val)
+
+    embed = None
+    if embed_json:
+        try:
+            data = json.loads(embed_json)
+            # Placeholder replacement in embed data
+            def replace_in_dict(d):
+                if isinstance(d, str):
+                    for key, val in placeholders.items():
+                        d = d.replace(key, val)
+                    return d
+                if isinstance(d, dict):
+                    return {k: replace_in_dict(v) for k, v in d.items()}
+                if isinstance(d, list):
+                    return [replace_in_dict(i) for i in d]
+                return d
+            
+            data = replace_in_dict(data)
+            embed = discord.Embed.from_dict(data)
+        except:
+            pass
+
+    # Create Button View if needed (example: a button that shows server info or a welcome message)
+    class WelcomeView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
+            
+        @discord.ui.button(label="Server Info", style=discord.ButtonStyle.primary, custom_id="welcome_server_info")
+        async def server_info(self, interaction: discord.Interaction, button: discord.ui.Button):
+            guild = interaction.guild
+            embed = discord.Embed(title=f"🏰 {guild.name} Info", color=0x00d2ff)
+            embed.add_field(name="Members", value=str(guild.member_count))
+            embed.add_field(name="Owner", value=guild.owner.mention)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    await channel.send(content=final_message, embed=embed, view=WelcomeView())
+
+@bot.event
+async def on_member_remove(member):
+    # Log the event
+    embed_log = discord.Embed(title="📤 Member Left", color=discord.Color.red(), timestamp=discord.utils.utcnow())
+    embed_log.add_field(name="User", value=f"{member} ({member.id})", inline=True)
+    embed_log.set_thumbnail(url=member.display_avatar.url)
+    await log_embed(member.guild, "member_log_channel", embed_log)
+
+    # Farewell system
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
+            config = await cursor.fetchone()
+    
+    if not config or not config['farewell_channel']:
+        return
+        
+    channel = member.guild.get_channel(config['farewell_channel'])
+    if not channel:
+        try: channel = await member.guild.fetch_channel(config['farewell_channel'])
+        except: return
+
+    message = config['farewell_message'] or "{user} has left the server."
+    farewell_message = message.replace("{user}", str(member)).replace("{server}", member.guild.name)
+    
+    await channel.send(farewell_message)
+
+@bot.event
+async def on_guild_channel_create(channel):
+    embed = discord.Embed(title="📁 Channel Created", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+    embed.add_field(name="Name", value=channel.name, inline=True)
+    embed.add_field(name="Type", value=str(channel.type), inline=True)
+    embed.add_field(name="Category", value=channel.category.name if channel.category else "None", inline=True)
+    await log_embed(channel.guild, "server_log_channel", embed)
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    embed = discord.Embed(title="📁 Channel Deleted", color=discord.Color.red(), timestamp=discord.utils.utcnow())
+    embed.add_field(name="Name", value=channel.name, inline=True)
+    embed.add_field(name="Type", value=str(channel.type), inline=True)
+    await log_embed(channel.guild, "server_log_channel", embed)
+
 async def log_mod_action(guild, action, target, moderator, reason, duration=None):
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute('SELECT mod_log_channel FROM logging_config WHERE guild_id = ?', (guild.id,)) as cursor:
@@ -453,7 +593,11 @@ async def log_mod_action(guild, action, target, moderator, reason, duration=None
             channel_id = row[0]
             channel = guild.get_channel(channel_id)
             if not channel:
-                return
+                # Try to fetch if not in cache
+                try:
+                    channel = await guild.fetch_channel(channel_id)
+                except:
+                    return
 
             embed = discord.Embed(title=f"Moderation Action: {action}", color=discord.Color.red())
             embed.add_field(name="Target", value=f"{target} ({target.id})", inline=False)
@@ -463,10 +607,18 @@ async def log_mod_action(guild, action, target, moderator, reason, duration=None
                 embed.add_field(name="Duration", value=duration, inline=False)
             embed.set_timestamp()
             
-            try:
-                await channel.send(embed=embed)
-            except:
-                pass
+            # Retry mechanism
+            for attempt in range(3):
+                try:
+                    await channel.send(embed=embed)
+                    break
+                except discord.HTTPException as e:
+                    if attempt == 2:
+                        print(f"Failed to send mod log to {channel_id} after 3 attempts: {e}")
+                    await asyncio.sleep(1 * (attempt + 1))
+                except Exception as e:
+                    print(f"Error logging mod action: {e}")
+                    break
 
 async def log_embed(guild, column, embed):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -476,11 +628,25 @@ async def log_embed(guild, column, embed):
                 return
             channel_id = row[0]
             channel = guild.get_channel(channel_id)
-            if channel:
+            if not channel:
                 try:
-                    await channel.send(embed=embed)
+                    channel = await guild.fetch_channel(channel_id)
                 except:
-                    pass
+                    return
+
+            if channel:
+                # Retry mechanism
+                for attempt in range(3):
+                    try:
+                        await channel.send(embed=embed)
+                        break
+                    except discord.HTTPException as e:
+                        if attempt == 2:
+                            print(f"Failed to send log to {channel_id} ({column}) after 3 attempts: {e}")
+                        await asyncio.sleep(1 * (attempt + 1))
+                    except Exception as e:
+                        print(f"Error logging embed ({column}): {e}")
+                        break
 
 def parse_duration(duration_str):
     if not duration_str:
@@ -558,6 +724,35 @@ async def warn(ctx: commands.Context, member: discord.Member, reason: str = "No 
     await ctx.send(f"⚠️ **{member.display_name}** has been warned. Reason: {reason}")
     await log_mod_action(ctx.guild, "Warning", member, ctx.author, reason, duration)
 
+@bot.hybrid_command(name="clearwarnings", description="Clears all warnings of a user")
+@commands.has_permissions(kick_members=True)
+@app_commands.describe(user="The user to clear warnings for")
+async def clearwarnings_standalone(ctx: commands.Context, user: discord.User):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('DELETE FROM warnings WHERE user_id = ? AND guild_id = ?', (user.id, ctx.guild.id))
+        await db.commit()
+    
+    await ctx.send(f"✅ Cleared all warnings for **{user.display_name}**.")
+    await log_mod_action(ctx.guild, "Clear Warnings", user, ctx.author, "All warnings cleared")
+
+@bot.hybrid_command(name="delwarn", description="Delete a specific warning by ID")
+@commands.has_permissions(kick_members=True)
+@app_commands.describe(id="The ID of the warning to remove")
+async def delwarn_standalone(ctx: commands.Context, id: int):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT user_id FROM warnings WHERE warn_id = ? AND guild_id = ?', (id, ctx.guild.id)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return await ctx.send(f"❌ Warning ID `{id}` not found in this server.")
+            
+            user_id = row[0]
+            await db.execute('DELETE FROM warnings WHERE warn_id = ?', (id,))
+            await db.commit()
+    
+    user = bot.get_user(user_id) or f"User ({user_id})"
+    await ctx.send(f"✅ Removed warning `{id}` from **{user}**.")
+    await log_mod_action(ctx.guild, "Remove Warning", user, ctx.author, f"Warning ID {id} removed")
+
 @bot.hybrid_group(name="warnings", description="Display warning history for a user")
 async def warnings_group(ctx: commands.Context, user: discord.User):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -617,30 +812,161 @@ async def set_group(ctx: commands.Context):
         await ctx.send("❌ Use `/set welcome` or `/set farewell`.")
 
 @set_group.command(name="welcome", description="Configure welcome messages")
-@app_commands.describe(channel="Channel for welcome messages", message="Welcome message text (use {user} for mention)")
-async def set_welcome(ctx: commands.Context, channel: discord.TextChannel, *, message: str):
+@app_commands.describe(channel="Channel for welcome messages", message="Welcome message text (use {user} for mention)", embed_json="JSON for embed (optional)")
+async def set_welcome(ctx: commands.Context, channel: str, message: str, embed_json: str = None):
+    # Try to convert channel to int if it's an ID string from autocomplete
+    try:
+        if channel.isdigit():
+            channel_id = int(channel)
+        else:
+            channel_id = int(channel.replace("<#", "").replace(">", ""))
+        discord_channel = ctx.guild.get_channel(channel_id)
+    except:
+        return await ctx.send("❌ Invalid channel! Please select a channel from the autocomplete list or mention it.")
+
+    if not discord_channel:
+        return await ctx.send("❌ Channel not found!")
+
+    if embed_json:
+        try:
+            json.loads(embed_json)
+        except:
+            return await ctx.send("❌ Invalid JSON for embed! Please provide a valid JSON string.")
+
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('''
-            INSERT INTO welcome_farewell (guild_id, welcome_channel, welcome_message)
-            VALUES (?, ?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET welcome_channel=excluded.welcome_channel, welcome_message=excluded.welcome_message
-        ''', (ctx.guild.id, channel.id, message))
+            INSERT INTO welcome_farewell (guild_id, welcome_channel, welcome_message, welcome_embed_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET 
+                welcome_channel=excluded.welcome_channel, 
+                welcome_message=excluded.welcome_message,
+                welcome_embed_json=excluded.welcome_embed_json
+        ''', (ctx.guild.id, discord_channel.id, message, embed_json))
         await db.commit()
     
-    await ctx.send(f"✅ Welcome messages set to {channel.mention}.\n**Message:** {message}")
+    await ctx.send(f"✅ Welcome messages set to {discord_channel.mention}.\n**Message:** {message}" + ("\n**Embed:** Enabled" if embed_json else ""))
+
+@set_welcome.autocomplete("channel")
+async def welcome_channel_autocomplete(interaction: discord.Interaction, current: str):
+    channels = [c for c in interaction.guild.text_channels if current.lower() in c.name.lower()]
+    return [app_commands.Choice(name=c.name, value=str(c.id)) for c in channels[:25]]
+
+@set_group.command(name="welcome_preview", description="Preview your current welcome message configuration")
+async def welcome_preview(ctx: commands.Context):
+    # ... existing implementation ...
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM welcome_farewell WHERE guild_id = ?', (ctx.guild.id,)) as cursor:
+            config = await cursor.fetchone()
+    
+    if not config or not config['welcome_channel']:
+        return await ctx.send("❌ Welcome messages are not configured!")
+
+    member = ctx.author
+    message = config['welcome_message'] or "Welcome {user} to {server}!"
+    embed_json = config['welcome_embed_json']
+    
+    placeholders = {
+        "{user}": member.mention,
+        "{username}": member.name,
+        "{server}": ctx.guild.name,
+        "{member_count}": str(ctx.guild.member_count),
+        "{avatar}": member.display_avatar.url,
+        "{join_date}": member.joined_at.strftime("%b %d, %Y")
+    }
+    
+    final_message = message
+    for key, val in placeholders.items():
+        final_message = final_message.replace(key, val)
+
+    embed = None
+    if embed_json:
+        try:
+            data = json.loads(embed_json)
+            def replace_in_dict(d):
+                if isinstance(d, str):
+                    for key, val in placeholders.items():
+                        d = d.replace(key, val)
+                    return d
+                if isinstance(d, dict):
+                    return {k: replace_in_dict(v) for k, v in d.items()}
+                if isinstance(d, list):
+                    return [replace_in_dict(i) for i in d]
+                return d
+            data = replace_in_dict(data)
+            embed = discord.Embed.from_dict(data)
+        except Exception as e:
+            await ctx.send(f"⚠️ Error parsing embed JSON: {e}")
+
+    await ctx.send("👀 **Welcome Preview:**", content=final_message, embed=embed)
 
 @set_group.command(name="farewell", description="Configure farewell messages")
 @app_commands.describe(channel="Channel for farewell messages", message="Farewell message text (use {user} for name)")
-async def set_farewell(ctx: commands.Context, channel: discord.TextChannel, *, message: str):
+async def set_farewell(ctx: commands.Context, channel: str, *, message: str):
+    # Try to convert channel to int if it's an ID string from autocomplete
+    try:
+        if channel.isdigit():
+            channel_id = int(channel)
+        else:
+            channel_id = int(channel.replace("<#", "").replace(">", ""))
+        discord_channel = ctx.guild.get_channel(channel_id)
+    except:
+        return await ctx.send("❌ Invalid channel! Please select a channel from the autocomplete list or mention it.")
+
+    if not discord_channel:
+        return await ctx.send("❌ Channel not found!")
+
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('''
             INSERT INTO welcome_farewell (guild_id, farewell_channel, farewell_message)
             VALUES (?, ?, ?)
             ON CONFLICT(guild_id) DO UPDATE SET farewell_channel=excluded.farewell_channel, farewell_message=excluded.farewell_message
-        ''', (ctx.guild.id, channel.id, message))
+        ''', (ctx.guild.id, discord_channel.id, message))
         await db.commit()
     
-    await ctx.send(f"✅ Farewell messages set to {channel.mention}.\n**Message:** {message}")
+    await ctx.send(f"✅ Farewell messages set to {discord_channel.mention}.\n**Message:** {message}")
+
+@set_farewell.autocomplete("channel")
+async def farewell_channel_autocomplete(interaction: discord.Interaction, current: str):
+    channels = [c for c in interaction.guild.text_channels if current.lower() in c.name.lower()]
+    return [app_commands.Choice(name=c.name, value=str(c.id)) for c in channels[:25]]
+
+@bot.hybrid_command(name="setlogs", description="Configure logging channels")
+@commands.has_permissions(administrator=True)
+@app_commands.describe(category="Log category", channel="Channel to send logs to")
+@app_commands.choices(category=[
+    app_commands.Choice(name="Message Logs", value="message_log_channel"),
+    app_commands.Choice(name="Member Logs", value="member_log_channel"),
+    app_commands.Choice(name="Server Logs", value="server_log_channel"),
+    app_commands.Choice(name="Mod Logs", value="mod_log_channel"),
+    app_commands.Choice(name="Automod Logs", value="automod_log_channel")
+])
+async def set_logs(ctx: commands.Context, category: str, channel: str):
+    # Try to convert channel to int if it's an ID string from autocomplete
+    try:
+        if channel.isdigit():
+            channel_id = int(channel)
+        else:
+            channel_id = int(channel.replace("<#", "").replace(">", ""))
+        discord_channel = ctx.guild.get_channel(channel_id)
+    except:
+        return await ctx.send("❌ Invalid channel! Please select a channel from the autocomplete list or mention it.")
+
+    if not discord_channel:
+        return await ctx.send("❌ Channel not found!")
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute(f'''
+            INSERT INTO logging_config (guild_id, {category}) VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET {category} = excluded.{category}
+        ''', (ctx.guild.id, discord_channel.id))
+        await db.commit()
+    await ctx.send(f"✅ Logging for **{category.replace('_', ' ').title()}** set to {discord_channel.mention}")
+
+@set_logs.autocomplete("channel")
+async def logs_channel_autocomplete(interaction: discord.Interaction, current: str):
+    channels = [c for c in interaction.guild.text_channels if current.lower() in c.name.lower()]
+    return [app_commands.Choice(name=c.name, value=str(c.id)) for c in channels[:25]]
 
 @bot.hybrid_group(name="automod", description="Manage automatic moderation")
 @commands.has_permissions(manage_guild=True)
@@ -2981,6 +3307,132 @@ async def applyjob(ctx: commands.Context, job_id: str):
         await ctx.send(f"✅ Correct! You are now hired as **{info.get('name', job_id)}**.")
     else:
         await ctx.send(f"❌ Incorrect answer. You failed the application for **{info.get('name', job_id)}**.")
+
+# --- Utility Commands ---
+
+@bot.hybrid_command(name="ping", description="Check the bot's latency")
+async def ping(ctx: commands.Context):
+    latency = round(bot.latency * 1000)
+    embed = discord.Embed(title="🏓 Pong!", description=f"Latency: **{latency}ms**", color=0x00ff00)
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="membercount", description="Display server member statistics")
+async def membercount(ctx: commands.Context):
+    guild = ctx.guild
+    total = guild.member_count
+    bots = sum(1 for m in guild.members if m.bot)
+    humans = total - bots
+    online = sum(1 for m in guild.members if m.status != discord.Status.offline)
+
+    embed = discord.Embed(title=f"📈 {guild.name} Member Count", color=0x00d2ff)
+    embed.add_field(name="Total Members", value=f"👥 `{total}`", inline=True)
+    embed.add_field(name="Humans", value=f"👤 `{humans}`", inline=True)
+    embed.add_field(name="Bots", value=f"🤖 `{bots}`", inline=True)
+    embed.add_field(name="Online", value=f"🟢 `{online}`", inline=True)
+    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="serverinfo", description="Show detailed server information")
+async def serverinfo(ctx: commands.Context):
+    guild = ctx.guild
+    owner = guild.owner
+    created_at = guild.created_at.strftime("%b %d, %Y")
+    roles = len(guild.roles)
+    channels = len(guild.channels)
+    emojis = len(guild.emojis)
+    boosts = guild.premium_subscription_count
+    level = guild.premium_tier
+
+    embed = discord.Embed(title=f"🏰 {guild.name} Information", color=0x00d2ff)
+    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
+    
+    embed.add_field(name="Owner", value=f"👑 {owner.mention}", inline=True)
+    embed.add_field(name="Created On", value=f"📅 {created_at}", inline=True)
+    embed.add_field(name="Server ID", value=f"🆔 `{guild.id}`", inline=True)
+    
+    embed.add_field(name="Members", value=f"👥 `{guild.member_count}`", inline=True)
+    embed.add_field(name="Channels", value=f"📁 `{channels}`", inline=True)
+    embed.add_field(name="Roles", value=f"🎭 `{roles}`", inline=True)
+    
+    embed.add_field(name="Boosts", value=f"💎 `{boosts}` (Level {level})", inline=True)
+    embed.add_field(name="Emojis", value=f"😀 `{emojis}`", inline=True)
+    embed.add_field(name="Verification", value=f"🛡️ {guild.verification_level.name.title()}", inline=True)
+
+    if guild.banner:
+        embed.set_image(url=guild.banner.url)
+
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="userinfo", description="Show detailed information about a user")
+async def userinfo(ctx: commands.Context, member: discord.Member = None):
+    target = member or ctx.author
+    joined_at = target.joined_at.strftime("%b %d, %Y")
+    created_at = target.created_at.strftime("%b %d, %Y")
+    roles = [role.mention for role in target.roles[1:]] # Skip @everyone
+    
+    embed = discord.Embed(title=f"👤 User Information: {target.display_name}", color=target.color)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    
+    embed.add_field(name="Username", value=f"`{target.name}`", inline=True)
+    embed.add_field(name="ID", value=f"`{target.id}`", inline=True)
+    embed.add_field(name="Status", value=f"{target.status.name.title()}", inline=True)
+    
+    embed.add_field(name="Joined Server", value=f"📥 {joined_at}", inline=True)
+    embed.add_field(name="Joined Discord", value=f"📅 {created_at}", inline=True)
+    embed.add_field(name="Bot?", value=f"{'Yes' if target.bot else 'No'}", inline=True)
+    
+    if roles:
+        embed.add_field(name=f"Roles [{len(roles)}]", value=" ".join(roles[:10]) + ("..." if len(roles) > 10 else ""), inline=False)
+    
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="avatar", description="Display a user's avatar")
+async def avatar(ctx: commands.Context, member: discord.Member = None):
+    target = member or ctx.author
+    embed = discord.Embed(title=f"🖼️ Avatar of {target.display_name}", color=0x00d2ff)
+    embed.set_image(url=target.display_avatar.url)
+    await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="help", description="List all commands or get help for a specific category")
+async def help_cmd(ctx: commands.Context, category: str = None):
+    # Dynamic categories based on command tags/groups
+    categories = {
+        "Economy": ["balance", "deposit", "withdraw", "work", "crime", "rob", "shop", "buy", "profile", "leaderboard", "jobs", "applyjob", "autodeposit", "vote"],
+        "Moderation": ["kick", "ban", "warn", "warnings", "clearwarns", "automod"],
+        "Utility": ["ping", "membercount", "serverinfo", "userinfo", "avatar", "setup", "setprefix"],
+        "Welcome": ["set welcome", "set farewell"]
+    }
+
+    if not category:
+        embed = discord.Embed(
+            title="📚 Empire Nexus Help",
+            description="Welcome to the Empire! Use `/help <category>` for more details on a specific section.",
+            color=0x00d2ff
+        )
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+        
+        for cat, cmds in categories.items():
+            embed.add_field(name=f"🔹 {cat}", value=f"`{len(cmds)} commands`", inline=True)
+            
+        embed.set_footer(text="Join our support server for more help! /setup for the link.")
+        return await ctx.send(embed=embed)
+
+    cat_name = category.capitalize()
+    if cat_name not in categories:
+        return await ctx.send(f"❌ Category `{category}` not found! Use `/help` to see all categories.")
+
+    embed = discord.Embed(title=f"📖 {cat_name} Commands", color=0x00d2ff)
+    cmd_list = categories[cat_name]
+    
+    for cmd_name in cmd_list:
+        # Support both regular and group commands
+        cmd = bot.get_command(cmd_name)
+        if cmd:
+            desc = cmd.description or "No description provided."
+            usage = f"/{cmd.qualified_name} {cmd.signature}"
+            embed.add_field(name=f"/{cmd.qualified_name}", value=f"{desc}\n`Usage: {usage}`", inline=False)
+
+    await ctx.send(embed=embed)
 
 # --- Admin Commands ---
 
