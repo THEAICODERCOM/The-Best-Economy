@@ -137,68 +137,78 @@ def join_support_server(access_token, user_id):
     except Exception as e:
         print(f"DEBUG: Error joining support server: {e}")
 
-# Modern Sidebar UI Styling (UnbelievaBoat Style)
+# Enormous UI upgrade: refined theme, responsive layout, modern cards
 STYLE = """
 <style>
-    :root {
-        --bg-dark: #0f0f12;
-        --bg-sidebar: #15151a;
-        --bg-card: #1a1a22;
-        --accent: #00d2ff;
-        --accent-hover: #91eae4;
-        --text-main: #f0f0f0;
-        --text-muted: #888;
-        --border: #25252b;
+    :root{
+        --bg-dark:#0a0b10;
+        --bg-sidebar:#12131a;
+        --bg-card:#161826;
+        --bg-card-2:#1a1d2e;
+        --accent:#00d2ff;
+        --accent-2:#91eae4;
+        --text-main:#e9eef6;
+        --text-muted:#8a8fa3;
+        --border:#23273a;
+        --danger:#ff4757;
+        --success:#2ecc71;
+        --warning:#f1c40f;
+        --purple:#7d5fff;
     }
-    body { font-family: 'Inter', sans-serif; background: var(--bg-dark); color: var(--text-main); margin: 0; display: flex; height: 100vh; overflow: hidden; }
-    
-    /* Sidebar */
-    .sidebar { width: 260px; background: var(--bg-sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 20px 0; flex-shrink: 0; }
-    .sidebar-header { padding: 0 25px 30px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
-    .logo { font-size: 20px; font-weight: 900; color: var(--accent); text-transform: uppercase; letter-spacing: 2px; text-decoration: none; }
-    .sidebar-menu { flex-grow: 1; }
-    .menu-item { padding: 12px 25px; display: flex; align-items: center; color: var(--text-muted); text-decoration: none; font-weight: 600; transition: 0.2s; border-left: 3px solid transparent; }
-    .menu-item:hover { background: rgba(0, 210, 255, 0.05); color: var(--text-main); }
-    .menu-item.active { background: rgba(0, 210, 255, 0.1); color: var(--accent); border-left-color: var(--accent); }
-    .menu-label { margin-left: 12px; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }
+    *{box-sizing:border-box}
+    body{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:radial-gradient(1000px 500px at 10% -10%,rgba(14,19,39,.6),transparent),var(--bg-dark);color:var(--text-main);margin:0;display:flex;height:100vh;overflow:hidden}
+    .sidebar{width:280px;background:linear-gradient(180deg,var(--bg-sidebar),#0d0e14);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:20px 0;flex-shrink:0;backdrop-filter:saturate(140%) blur(8px)}
+    .sidebar-header{padding:0 25px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+    .logo{font-size:20px;font-weight:900;background:linear-gradient(90deg,var(--accent),var(--accent-2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-decoration:none;letter-spacing:2px;text-transform:uppercase}
+    .sidebar-menu{flex-grow:1}
+    .menu-item{padding:12px 25px;display:flex;align-items:center;color:var(--text-muted);text-decoration:none;font-weight:700;transition:.2s;border-left:3px solid transparent}
+    .menu-item:hover{background:rgba(0,210,255,.06);color:#fff}
+    .menu-item.active{background:linear-gradient(90deg,rgba(0,210,255,.12),rgba(145,234,228,.08));color:var(--accent);border-left-color:var(--accent)}
+    .menu-label{margin-left:12px;font-size:14px;text-transform:uppercase;letter-spacing:1px}
 
-    /* Main Content */
-    .main-content { flex-grow: 1; overflow-y: auto; padding: 40px; }
-    .container { max-width: 900px; margin: 0 auto; }
-    .page-title { font-size: 28px; font-weight: 800; margin-bottom: 10px; }
-    .page-desc { color: var(--text-muted); margin-bottom: 40px; font-size: 16px; }
+    .main-content{flex-grow:1;overflow-y:auto;padding:40px}
+    .container{max-width:1200px;margin:0 auto}
+    .page-title{font-size:30px;font-weight:900;margin-bottom:10px;letter-spacing:1px}
+    .page-desc{color:var(--text-muted);margin-bottom:24px}
 
-    /* Cards & Forms */
-    .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 30px; margin-bottom: 30px; }
-    .card-title { font-size: 18px; font-weight: 700; color: var(--accent); margin-top: 0; margin-bottom: 20px; text-transform: uppercase; letter-spacing: 1px; }
-    .form-group { margin-bottom: 25px; }
-    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 20px; }
-    .stat-item { background: var(--bg-dark); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
-    .stat-label { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; }
-    .stat-value { font-size: 18px; font-weight: 800; color: var(--text-main); }
-    .progress-track { width: 100%; height: 12px; background: #0b0b10; border-radius: 999px; border: 1px solid var(--border); overflow: hidden; }
-    .progress-fill { height: 100%; background: linear-gradient(90deg, #00d2ff, #91eae4); }
-    .badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 999px; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; font-weight: 800; background: rgba(0, 210, 255, 0.12); color: var(--accent); border: 1px solid rgba(0, 210, 255, 0.3); }
-    .hint { color: var(--text-muted); font-size: 13px; margin-top: 14px; }
-    label { display: block; font-weight: 700; color: var(--text-muted); text-transform: uppercase; font-size: 12px; margin-bottom: 10px; }
-    input, select, textarea { width: 100%; padding: 14px; background: var(--bg-dark); border: 1px solid var(--border); border-radius: 8px; color: #fff; box-sizing: border-box; font-family: inherit; font-size: 14px; }
-    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 10px rgba(0, 210, 255, 0.1); }
-    
-    .btn { background: var(--accent); color: #000; padding: 14px 28px; border-radius: 8px; border: none; font-weight: 800; cursor: pointer; text-decoration: none; display: inline-block; transition: 0.3s; text-transform: uppercase; font-size: 14px; letter-spacing: 1px; }
-    .btn:hover { background: var(--accent-hover); transform: translateY(-2px); box-shadow: 0 4px 15px rgba(0, 210, 255, 0.3); }
-    
-    /* List Items (Role Shop/Assets) */
-    .list-item { display: flex; align-items: center; justify-content: space-between; background: var(--bg-dark); padding: 15px 20px; border-radius: 8px; border: 1px solid var(--border); margin-bottom: 10px; }
-    .list-item-info { flex-grow: 1; }
-    .list-item-name { font-weight: 700; font-size: 15px; }
-    .list-item-price { color: var(--accent); font-size: 13px; font-weight: 600; }
-    .btn-delete { color: #ff4757; background: transparent; border: none; cursor: pointer; font-size: 18px; padding: 5px; }
-    .btn-delete:hover { color: #ff6b81; }
+    .card{background:linear-gradient(180deg,var(--bg-card),var(--bg-card-2));border:1px solid var(--border);border-radius:14px;padding:24px;margin-bottom:24px;box-shadow:0 18px 40px rgba(8,10,20,.35)}
+    .card-title{font-size:18px;font-weight:900;margin:0 0 14px 0;color:var(--accent);text-transform:uppercase;letter-spacing:1px}
 
-    /* Modals */
-    .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); backdrop-filter: blur(5px); z-index: 1000; align-items: center; justify-content: center; }
-    .modal-content { background: var(--bg-card); width: 450px; padding: 30px; border-radius: 16px; border: 1px solid var(--border); }
-    .modal-actions { display: flex; gap: 10px; margin-top: 25px; }
+    .stat-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:16px}
+    .stat-item{background:#0e111b;border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+    .stat-label{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px}
+    .stat-value{font-size:18px;font-weight:800;color:var(--text-main)}
+    .progress-track{width:100%;height:12px;background:#0b0b10;border-radius:999px;border:1px solid var(--border);overflow:hidden}
+    .progress-fill{height:100%;background:linear-gradient(90deg,#00d2ff,#91eae4)}
+
+    .form-group{margin-bottom:18px}
+    label{display:block;font-weight:700;color:var(--text-muted);text-transform:uppercase;font-size:12px;margin-bottom:8px}
+    input,select,textarea{width:100%;padding:12px;background:#0e111b;border:1px solid var(--border);border-radius:10px;color:#e9eef6;font-family:inherit;font-size:14px}
+    input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 10px rgba(0,210,255,.12)}
+    textarea{min-height:110px}
+
+    .btn{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#091015;padding:12px 18px;border-radius:12px;border:none;font-weight:900;cursor:pointer;text-decoration:none;display:inline-block;transition:.25s;text-transform:uppercase;font-size:14px;letter-spacing:1px;box-shadow:0 6px 20px rgba(0,210,255,.18)}
+    .btn:hover{filter:brightness(1.06);transform:translateY(-1px)}
+
+    .list-item{display:flex;align-items:center;justify-content:space-between;background:#121523;padding:15px 18px;border-radius:12px;border:1px solid var(--border);margin-bottom:10px}
+    .list-item-info{flex-grow:1}
+    .list-item-name{font-weight:800;font-size:15px}
+    .list-item-price{color:var(--accent);font-size:13px;font-weight:700}
+    .btn-delete{color:#fff;background:#252a3b;border:none;cursor:pointer;font-size:14px;padding:8px 12px;border-radius:10px}
+    .btn-delete:hover{background:#ff4757}
+
+    .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.75);backdrop-filter:blur(6px);z-index:1000;align-items:center;justify-content:center}
+    .modal-content{background:linear-gradient(180deg,var(--bg-card),var(--bg-card-2));width:520px;padding:24px;border-radius:16px;border:1px solid var(--border)}
+    .modal-actions{display:flex;gap:10px;margin-top:18px}
+
+    .navbar{position:fixed;top:0;left:0;right:0;height:60px;background:rgba(0,0,0,.4);border-bottom:1px solid var(--border);backdrop-filter:blur(6px);display:flex;align-items:center;padding:0 25px}
+    .badge{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;font-size:11px;text-transform:uppercase;letter-spacing:.6px;font-weight:800;background:rgba(0,210,255,.12);color:var(--accent);border:1px solid rgba(0,210,255,.3)}
+    .toast{background:#1f2335;color:#fff;padding:14px;border-radius:10px;border:1px solid var(--border);box-shadow:0 10px 30px rgba(0,0,0,.35);animation:slideIn .5s}
+
+    @keyframes slideIn{from{transform:translateY(-6px);opacity:0}to{transform:translateY(0);opacity:1}}
+
+    ::-webkit-scrollbar{width:10px}
+    ::-webkit-scrollbar-thumb{background:#23273a;border-radius:10px}
 </style>
 """
 
@@ -1378,4 +1388,5 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
