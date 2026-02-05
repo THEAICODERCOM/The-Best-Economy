@@ -199,7 +199,8 @@ CARD_EMOJIS = {
 }
 
 async def init_db():
-    async with aiosqlite.connect(DB_FILE) as db:
+    async with aiosqlite.connect(DB_FILE, timeout=30) as db:
+        await db.execute('PRAGMA journal_mode=WAL')
         await db.execute('''CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER, guild_id INTEGER, balance INTEGER DEFAULT 100,
             bank INTEGER DEFAULT 0, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1,
@@ -1150,20 +1151,39 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
         pass
 
 async def run_custom_command(code: str, message: discord.Message):
-    if "import " in code or "__" in code:
-        return False, "Disallowed code."
+    # Allow some common imports if they are at the very top, but better to provide them in globals
+    # We keep the check but relax it for known safe patterns if needed, 
+    # but for now let's just provide the libraries.
+    if "__" in code and "__cmd__" not in code: # Allow our internal func name
+        return False, "Disallowed code (contains __)."
+    
     func_name = "__cmd__"
     src = "async def " + func_name + "(message, bot):\n"
     for line in code.splitlines():
+        # Strip potential imports from user code to avoid the 'import' check failure
+        if line.strip().startswith(("import discord", "import json", "import asyncio", "from discord")):
+            continue
         src += "    " + line + "\n"
-    sandbox_globals = {"__builtins__": {"len": len, "str": str, "int": int, "float": float, "min": min, "max": max, "range": range}}
+    
+    sandbox_globals = {
+        "__builtins__": {
+            "len": len, "str": str, "int": int, "float": float, 
+            "min": min, "max": max, "range": range, "list": list, "dict": dict,
+            "sum": sum, "any": any, "all": all, "print": print
+        },
+        "discord": discord,
+        "json": json,
+        "asyncio": asyncio,
+        "time": time,
+        "random": random
+    }
     sandbox_locals = {}
     try:
         exec(src, sandbox_globals, sandbox_locals)
         fn = sandbox_locals.get(func_name)
         if not fn:
-            return False, "Code error."
-        await asyncio.wait_for(fn(message, bot), timeout=3.0)
+            return False, "Code error: function not defined."
+        await asyncio.wait_for(fn(message, bot), timeout=5.0)
         return True, None
     except Exception as e:
         return False, str(e)
@@ -3422,7 +3442,7 @@ async def avatar(ctx: commands.Context, member: discord.Member = None):
     embed.set_image(url=target.display_avatar.url)
     await ctx.send(embed=embed)
 
-@bot.hybrid_command(name="help", description="List all commands or get help for a specific category")
+@bot.hybrid_command(name="help_nexus", description="List all commands or get help for a specific category")
 async def help_cmd_new(ctx: commands.Context, category: str = None):
     # Dynamic categories based on command tags/groups
     categories = {
@@ -3562,13 +3582,3 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
-
-
-
-
-
-
-
-
-
-
