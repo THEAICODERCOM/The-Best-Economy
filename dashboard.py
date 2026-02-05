@@ -53,8 +53,10 @@ def get_cached_api(url, headers, cache_key):
         return None
 
 def get_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
     conn.row_factory = sqlite3.Row
+    # Ensure WAL mode is active for this connection
+    conn.execute('PRAGMA journal_mode=WAL')
     return conn
 
 def init_db():
@@ -959,21 +961,35 @@ def moderation_dashboard(guild_id):
             </div>
             <div class="main-content">
                 <div class="container">
-                    <h1 class="page-title">🛡️ Moderation Settings</h1>
-
-                    <div class="card" style="margin-top: 30px;">
-                        <h2 class="card-title">AutoMod (Word Filter)</h2>
-                        <form action="/add-automod/{guild_id}" method="post" style="display: flex; gap: 10px; margin-bottom: 20px;">
-                            <input type="text" name="word" placeholder="Word to filter" required style="flex: 2;">
-                            <select name="punishment" style="flex: 1;">
-                                <option value="warn">Warn</option>
-                                <option value="delete">Delete Only</option>
-                                <option value="kick">Kick</option>
-                                <option value="ban">Ban</option>
-                            </select>
-                            <button type="submit" class="btn">Add</button>
+                    <h1 class="page-title">🛡️ Moderation & AutoMod</h1>
+                    <p class="page-desc">Protect your kingdom with automated filters and moderation tools.</p>
+                    
+                    <div class="card">
+                        <h2 class="card-title">AutoMod Filter</h2>
+                        <form action="/add-automod/{guild_id}" method="post">
+                            <div style="display: flex; gap: 15px;">
+                                <div style="flex: 2;">
+                                    <label>Forbidden Word/Phrase</label>
+                                    <input type="text" name="word" placeholder="e.g. badword" required>
+                                </div>
+                                <div style="flex: 1;">
+                                    <label>Punishment</label>
+                                    <select name="punishment">
+                                        <option value="delete">Delete Only</option>
+                                        <option value="warn">Warn & Delete</option>
+                                        <option value="kick">Kick User</option>
+                                        <option value="ban">Ban User</option>
+                                    </select>
+                                </div>
+                                <div style="display: flex; align-items: flex-end;">
+                                    <button type="submit" class="btn">Add Rule</button>
+                                </div>
+                            </div>
                         </form>
-                        {automod_html}
+                        <div style="margin-top: 25px;">
+                            <h3 style="font-size: 14px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 15px;">Active Rules</h3>
+                            {automod_html}
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1130,6 +1146,7 @@ def logging_dashboard(guild_id):
                 <div class="sidebar-menu">
                     <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
                     <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item active"><span class="menu-label">📝 Logging</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
@@ -1221,6 +1238,7 @@ def custom_commands_dashboard(guild_id):
                 <div class="sidebar-menu">
                     <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
                     <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item active"><span class="menu-label">💻 Custom Commands</span></a>
@@ -1512,7 +1530,10 @@ def topgg_webhook():
         
         if auth_header != webhook_secret:
             print(f"DEBUG: ❌ Webhook Unauthorized - Expected '{webhook_secret}', got '{auth_header}'")
-            return "Unauthorized", 401
+            # Log the first few chars of the expected secret for debugging without leaking it all
+            expected_preview = (webhook_secret[:3] + "...") if webhook_secret else "None"
+            got_preview = (auth_header[:3] + "...") if auth_header else "None"
+            return f"Unauthorized - Secret mismatch (Expected: {expected_preview}, Got: {got_preview})", 401
     
     print(f"DEBUG: ✅ Authorization passed")
     
@@ -1580,6 +1601,3 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
-
-
-
