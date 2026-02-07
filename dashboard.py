@@ -124,6 +124,14 @@ def init_db():
         conn.execute("ALTER TABLE welcome_farewell ADD COLUMN farewell_embed_json TEXT")
     except sqlite3.OperationalError:
         pass
+    try:
+        conn.execute("ALTER TABLE logging_config ADD COLUMN join_log_channel TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE logging_config ADD COLUMN leave_log_channel TEXT")
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
     conn.close()
@@ -1197,6 +1205,18 @@ def logging_dashboard(guild_id):
                                         {get_selected_channel_options(log_config['voice_log_channel'] if log_config else '')}
                                     </select>
                                 </div>
+                                <div class="form-group">
+                                    <label>Join Logs</label>
+                                    <select name="join_log">
+                                        {get_selected_channel_options(log_config['join_log_channel'] if log_config else '')}
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Leave Logs</label>
+                                    <select name="leave_log">
+                                        {get_selected_channel_options(log_config['leave_log_channel'] if log_config else '')}
+                                    </select>
+                                </div>
                             </div>
                         </div>
                         <button type="submit" class="btn">Save Logging</button>
@@ -1328,19 +1348,23 @@ def save_logging(guild_id):
     auto_ch = request.form.get('automod_log')
     srv_ch = request.form.get('server_log')
     v_ch = request.form.get('voice_log')
+    join_ch = request.form.get('join_log')
+    leave_ch = request.form.get('leave_log')
 
     conn = get_db()
     conn.execute('''
-        INSERT INTO logging_config (guild_id, message_log_channel, member_log_channel, mod_log_channel, automod_log_channel, server_log_channel, voice_log_channel)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO logging_config (guild_id, message_log_channel, member_log_channel, mod_log_channel, automod_log_channel, server_log_channel, voice_log_channel, join_log_channel, leave_log_channel)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(guild_id) DO UPDATE SET
             message_log_channel = excluded.message_log_channel,
             member_log_channel = excluded.member_log_channel,
             mod_log_channel = excluded.mod_log_channel,
             automod_log_channel = excluded.automod_log_channel,
             server_log_channel = excluded.server_log_channel,
-            voice_log_channel = excluded.voice_log_channel
-    ''', (guild_id, msg_ch, mem_ch, mod_ch, auto_ch, srv_ch, v_ch))
+            voice_log_channel = excluded.voice_log_channel,
+            join_log_channel = excluded.join_log_channel,
+            leave_log_channel = excluded.leave_log_channel
+    ''', (guild_id, msg_ch, mem_ch, mod_ch, auto_ch, srv_ch, v_ch, join_ch, leave_ch))
     conn.commit()
     conn.close()
     return redirect(f'/dashboard/{guild_id}/logging?success=1')
@@ -1384,7 +1408,9 @@ def setup_logging(guild_id):
         "mod-logs": "mod_log_channel",
         "automod-logs": "automod_log_channel",
         "server-logs": "server_log_channel",
-        "voice-logs": "voice_log_channel"
+        "voice-logs": "voice_log_channel",
+        "join-logs": "join_log_channel",
+        "leave-logs": "leave_log_channel"
     }
     created_ids = {}
     existing = {}
@@ -1402,22 +1428,26 @@ def setup_logging(guild_id):
         created_ids[col] = str(ch['id'])
     conn = get_db()
     conn.execute('''
-        INSERT INTO logging_config (guild_id, message_log_channel, member_log_channel, mod_log_channel, automod_log_channel, server_log_channel, voice_log_channel)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO logging_config (guild_id, message_log_channel, member_log_channel, mod_log_channel, automod_log_channel, server_log_channel, voice_log_channel, join_log_channel, leave_log_channel)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(guild_id) DO UPDATE SET
             message_log_channel = excluded.message_log_channel,
             member_log_channel = excluded.member_log_channel,
             mod_log_channel = excluded.mod_log_channel,
             automod_log_channel = excluded.automod_log_channel,
             server_log_channel = excluded.server_log_channel,
-            voice_log_channel = excluded.voice_log_channel
+            voice_log_channel = excluded.voice_log_channel,
+            join_log_channel = excluded.join_log_channel,
+            leave_log_channel = excluded.leave_log_channel
     ''', (int(guild_id),
           created_ids.get('message_log_channel'),
           created_ids.get('member_log_channel'),
           created_ids.get('mod_log_channel'),
           created_ids.get('automod_log_channel'),
           created_ids.get('server_log_channel'),
-          created_ids.get('voice_log_channel')))
+          created_ids.get('voice_log_channel'),
+          created_ids.get('join_log_channel'),
+          created_ids.get('leave_log_channel')))
     conn.commit()
     conn.close()
     CACHE.pop(f"channels_{guild_id}", None)
