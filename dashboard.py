@@ -1042,7 +1042,14 @@ def welcome_dashboard(guild_id):
     w_desc = wobj.get("description", "")
     w_color = wobj.get("color", 11849216)
     w_footer = (wobj.get("footer", {}) or {}).get("text", "")
-    w_image = (wobj.get("image", {}) or {}).get("url", "")
+    try:
+        fobj = json.loads(farewell_json)
+    except Exception:
+        fobj = {"title": "📤 Goodbye {username}", "description": "We hope to see you again in {server}.", "color": 15158332}
+    f_title = fobj.get("title", "")
+    f_desc = fobj.get("description", "")
+    f_color = fobj.get("color", 15158332)
+    f_footer = (fobj.get("footer", {}) or {}).get("text", "")
 
     return f"""
     <html>
@@ -1065,7 +1072,7 @@ def welcome_dashboard(guild_id):
             <div class="main-content">
                 <div class="container">
                     <h1 class="page-title">👋 Welcome & Farewell</h1>
-                    <p class="page-desc">Design a beautiful welcome embed. No JSON needed — simply fill the fields. Placeholders: {{user}}, {{username}}, {{server}}, {{member_count}}</p>
+                    <p class="page-desc">Configure messages with live preview. Template variables: {{user}}, {{username}}, {{server}}, {{member_count}}, {{join_date}}, {{avatar}}</p>
                     <form action="/save-welcome/{guild_id}" method="post">
                         <div class="card">
                             <h2 class="card-title">Welcome Settings</h2>
@@ -1091,10 +1098,13 @@ def welcome_dashboard(guild_id):
                                     <label>Footer Text</label>
                                     <input type="text" name="welcome_footer" value="{w_footer}" placeholder="e.g., Enjoy your stay!">
                                 </div>
-                                <div class="form-group">
-                                    <label>Image URL (optional)</label>
-                                    <input type="text" name="welcome_image" value="{w_image}" placeholder="https://...">
-                                </div>
+                            </div>
+                            <div id="welcomePreview" class="preview"></div>
+                            <div class="toolbar">
+                                <button type="button" class="btn" onclick="insertVar('welcome_description','{{user}}')">@user</button>
+                                <button type="button" class="btn" onclick="insertVar('welcome_description','{{server}}')">server</button>
+                                <button type="button" class="btn" onclick="wrapSelection('welcome_description','**')">Bold</button>
+                                <button type="button" class="btn" onclick="wrapSelection('welcome_description','*')">Italic</button>
                             </div>
                         </div>
                         <div class="card">
@@ -1105,19 +1115,85 @@ def welcome_dashboard(guild_id):
                                     <select name="farewell_channel">{get_selected_channel_options(cfg['farewell_channel'] if cfg else '')}</select>
                                 </div>
                                 <div class="form-group">
-                                    <label>Farewell Message</label>
+                                    <label>Farewell Message (text)</label>
                                     <textarea name="farewell_message" rows="3">{farewell_msg}</textarea>
                                     <div class="hint">Placeholders: {{user}}, {{username}}, {{server}}</div>
                                 </div>
                                 <div class="form-group">
-                                    <label>Farewell Embed (JSON)</label>
-                                    <textarea name="farewell_embed_json" rows="6">{farewell_json}</textarea>
-                                    <div class="hint">Optional. Supports Discord embed JSON. Leave empty to send only text.</div>
+                                    <label>Embed Title</label>
+                                    <input type="text" name="farewell_title" value="{f_title}" placeholder="📤 Goodbye {{username}}">
                                 </div>
+                                <div class="form-group">
+                                    <label>Embed Description</label>
+                                    <textarea name="farewell_description" rows="4">{f_desc}</textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label>Embed Color</label>
+                                    <input type="text" name="farewell_color" value="{('#%06x' % int(f_color))}" placeholder="#ff4757">
+                                </div>
+                                <div class="form-group">
+                                    <label>Footer Text</label>
+                                    <input type="text" name="farewell_footer" value="{f_footer}" placeholder="e.g., Safe travels!">
+                                </div>
+                            </div>
+                            <div id="farewellPreview" class="preview"></div>
+                            <div class="toolbar">
+                                <button type="button" class="btn" onclick="insertVar('farewell_description','{{user}}')">@user</button>
+                                <button type="button" class="btn" onclick="insertVar('farewell_description','{{server}}')">server</button>
+                                <button type="button" class="btn" onclick="wrapSelection('farewell_description','**')">Bold</button>
+                                <button type="button" class="btn" onclick="wrapSelection('farewell_description','*')">Italic</button>
                             </div>
                         </div>
                         <button type="submit" class="btn">Save Welcome/Farewell</button>
                     </form>
+                    <script>
+                        function hexToInt(hex) {{
+                            try {{ return parseInt(hex.replace('#',''), 16); }} catch(e) {{ return 0x00d2ff; }}
+                        }}
+                        function substitute(str) {{
+                            const sample = {{
+                                '{{user}}': '@ExampleUser',
+                                '{{username}}': 'ExampleUser',
+                                '{{server}}': 'ExampleServer',
+                                '{{member_count}}': '1234',
+                                '{{join_date}}': 'Jan 01, 2026',
+                                '{{avatar}}': 'https://cdn.example/avatar.png'
+                            }};
+                            for (const k in sample) str = str.replaceAll(k, sample[k]);
+                            return str;
+                        }}
+                        function renderPreview(prefix) {{
+                            const title = document.querySelector('input[name=\"' + prefix + '_title\"]').value;
+                            const desc = document.querySelector('textarea[name=\"' + prefix + '_description\"]').value;
+                            const color = document.querySelector('input[name=\"' + prefix + '_color\"]').value;
+                            const footer = document.querySelector('input[name=\"' + prefix + '_footer\"]').value;
+                            const html = '<div class=\"embed\" style=\"border-left:4px solid ' + color + ';\">' +
+                                         '<div class=\"embed-title\">' + substitute(title) + '</div>' +
+                                         '<div class=\"embed-desc\">' + substitute(desc) + '</div>' +
+                                         (footer ? '<div class=\"embed-footer\">' + substitute(footer) + '</div>' : '') +
+                                         '</div>';
+                            document.getElementById(prefix+'Preview').innerHTML = html;
+                        }}
+                        function insertVar(field, token) {{
+                            const el = document.querySelector('textarea[name=\"' + field + '\"]');
+                            const start = el.selectionStart, end = el.selectionEnd;
+                            el.value = el.value.slice(0,start) + token + el.value.slice(end);
+                            el.dispatchEvent(new Event('input'));
+                        }}
+                        function wrapSelection(field, marker) {{
+                            const el = document.querySelector('textarea[name=\"' + field + '\"]');
+                            const start = el.selectionStart, end = el.selectionEnd;
+                            const sel = el.value.slice(start,end);
+                            el.value = el.value.slice(0,start) + marker + sel + marker + el.value.slice(end);
+                            el.dispatchEvent(new Event('input'));
+                        }}
+                        ['welcome','farewell'].forEach(function(p) {{
+                            document.querySelectorAll('[name^=\"' + p + '_\"]').forEach(function(el) {{
+                                el.addEventListener('input', function() {{ renderPreview(p); }});
+                            }});
+                            renderPreview(p);
+                        }});
+                    </script>
                 </div>
             </div>
         </body>
@@ -1135,7 +1211,6 @@ def save_welcome(guild_id):
     except Exception:
         w_color_int = 0x00d2ff
     w_footer = request.form.get('welcome_footer', '')
-    w_image = request.form.get('welcome_image', '')
     welcome_embed = {
         "title": w_title,
         "description": w_desc,
@@ -1144,18 +1219,25 @@ def save_welcome(guild_id):
     }
     if w_footer:
         welcome_embed["footer"] = {"text": w_footer}
-    if w_image:
-        welcome_embed["image"] = {"url": w_image}
     welcome_embed_json = json.dumps(welcome_embed)
     farewell_channel = request.form.get('farewell_channel')
     farewell_message = request.form.get('farewell_message')
-    farewell_embed_json = request.form.get('farewell_embed_json', '')
-
+    f_title = request.form.get('farewell_title', '📤 Goodbye {username}')
+    f_desc = request.form.get('farewell_description', 'We hope to see you again in {server}.')
+    f_color_hex = request.form.get('farewell_color', '#ff4757').lstrip('#')
     try:
-        if farewell_embed_json:
-            json.loads(farewell_embed_json)
+        f_color_int = int(f_color_hex, 16)
     except Exception:
-        return "Invalid JSON in farewell embed field. Please fix and try again.", 400
+        f_color_int = 0xff4757
+    f_footer = request.form.get('farewell_footer', '')
+    farewell_embed = {
+        "title": f_title,
+        "description": f_desc,
+        "color": f_color_int
+    }
+    if f_footer:
+        farewell_embed["footer"] = {"text": f_footer}
+    farewell_embed_json = json.dumps(farewell_embed)
 
     conn = get_db()
     conn.execute('''
@@ -1680,6 +1762,10 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
+
+
+
 
 
 
