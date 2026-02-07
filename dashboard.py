@@ -1029,10 +1029,18 @@ def welcome_dashboard(guild_id):
             opts += f'<option value="{ch["id"]}" {sel}>#{ch["name"]}</option>'
         return opts
 
-    welcome_msg = (cfg['welcome_message'] if cfg and cfg['welcome_message'] else 'Welcome {user} to {server}!')
     farewell_msg = (cfg['farewell_message'] if cfg and cfg['farewell_message'] else '{user} just left the server.')
-    welcome_json = (cfg['welcome_embed_json'] if cfg and cfg['welcome_embed_json'] else '{ "title": "👋 Welcome {username}", "description": "Glad to have you in {server}!", "color": 11849216 }')
+    welcome_json = (cfg['welcome_embed_json'] if cfg and cfg['welcome_embed_json'] else '{ "title": "👋 Welcome {username}", "description": "Glad to have you in {server}!", "color": 11849216, "thumbnail": {"url": "{avatar}"} }')
     farewell_json = (cfg['farewell_embed_json'] if cfg and cfg['farewell_embed_json'] else '{ "title": "📤 Goodbye {username}", "description": "We hope to see you again in {server}.", "color": 15158332 }')
+    try:
+        wobj = json.loads(welcome_json)
+    except Exception:
+        wobj = {"title": "👋 Welcome {username}", "description": "Glad to have you in {server}!", "color": 11849216, "thumbnail": {"url": "{avatar}"}}
+    w_title = wobj.get("title", "")
+    w_desc = wobj.get("description", "")
+    w_color = wobj.get("color", 11849216)
+    w_footer = (wobj.get("footer", {}) or {}).get("text", "")
+    w_image = (wobj.get("image", {}) or {}).get("url", "")
 
     return f"""
     <html>
@@ -1053,7 +1061,7 @@ def welcome_dashboard(guild_id):
             <div class="main-content">
                 <div class="container">
                     <h1 class="page-title">👋 Welcome & Farewell</h1>
-                    <p class="page-desc">Customize your server's onboarding and farewell experience with powerful placeholders and embeds.</p>
+                    <p class="page-desc">Design a beautiful welcome embed. No JSON needed — simply fill the fields. Placeholders: {user}, {username}, {server}, {member_count}</p>
                     <form action="/save-welcome/{guild_id}" method="post">
                         <div class="card">
                             <h2 class="card-title">Welcome Settings</h2>
@@ -1063,14 +1071,25 @@ def welcome_dashboard(guild_id):
                                     <select name="welcome_channel">{get_selected_channel_options(cfg['welcome_channel'] if cfg else '')}</select>
                                 </div>
                                 <div class="form-group">
-                                    <label>Welcome Message</label>
-                                    <textarea name="welcome_message" rows="3">{welcome_msg}</textarea>
-                                    <div class="hint">Placeholders: {{user}}, {{username}}, {{server}}, {{member_count}}</div>
+                                    <label>Embed Title</label>
+                                    <input type="text" name="welcome_title" value="{w_title}" placeholder="e.g., 👋 Welcome {username}">
                                 </div>
                                 <div class="form-group">
-                                    <label>Welcome Embed (JSON)</label>
-                                    <textarea name="welcome_embed_json" rows="6">{welcome_json}</textarea>
-                                    <div class="hint">Optional. Supports any Discord embed JSON fields with placeholders. Leave empty to send only text.</div>
+                                    <label>Embed Description</label>
+                                    <textarea name="welcome_description" rows="4">{w_desc}</textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label>Embed Color</label>
+                                    <input type="text" name="welcome_color" value="{('#%06x' % int(w_color))}" placeholder="#00d2ff">
+                                    <div class="hint">Use hex (e.g. #00d2ff). Avatar thumbnail is shown automatically.</div>
+                                </div>
+                                <div class="form-group">
+                                    <label>Footer Text</label>
+                                    <input type="text" name="welcome_footer" value="{w_footer}" placeholder="e.g., Enjoy your stay!">
+                                </div>
+                                <div class="form-group">
+                                    <label>Image URL (optional)</label>
+                                    <input type="text" name="welcome_image" value="{w_image}" placeholder="https://...">
                                 </div>
                             </div>
                         </div>
@@ -1104,20 +1123,35 @@ def welcome_dashboard(guild_id):
 @app.route('/save-welcome/<int:guild_id>', methods=['POST'])
 def save_welcome(guild_id):
     welcome_channel = request.form.get('welcome_channel')
-    welcome_message = request.form.get('welcome_message')
-    welcome_embed_json = request.form.get('welcome_embed_json', '')
+    w_title = request.form.get('welcome_title', '👋 Welcome {username}')
+    w_desc = request.form.get('welcome_description', 'Glad to have you in {server}!')
+    w_color_hex = request.form.get('welcome_color', '#00d2ff').lstrip('#')
+    try:
+        w_color_int = int(w_color_hex, 16)
+    except Exception:
+        w_color_int = 0x00d2ff
+    w_footer = request.form.get('welcome_footer', '')
+    w_image = request.form.get('welcome_image', '')
+    welcome_embed = {
+        "title": w_title,
+        "description": w_desc,
+        "color": w_color_int,
+        "thumbnail": {"url": "{avatar}"},
+    }
+    if w_footer:
+        welcome_embed["footer"] = {"text": w_footer}
+    if w_image:
+        welcome_embed["image"] = {"url": w_image}
+    welcome_embed_json = json.dumps(welcome_embed)
     farewell_channel = request.form.get('farewell_channel')
     farewell_message = request.form.get('farewell_message')
     farewell_embed_json = request.form.get('farewell_embed_json', '')
 
-    # Validate JSON if provided
     try:
-        if welcome_embed_json:
-            json.loads(welcome_embed_json)
         if farewell_embed_json:
             json.loads(farewell_embed_json)
     except Exception:
-        return "Invalid JSON in embed fields. Please fix and try again.", 400
+        return "Invalid JSON in farewell embed field. Please fix and try again.", 400
 
     conn = get_db()
     conn.execute('''
@@ -1130,7 +1164,7 @@ def save_welcome(guild_id):
             farewell_message = excluded.farewell_message,
             welcome_embed_json = excluded.welcome_embed_json,
             farewell_embed_json = excluded.farewell_embed_json
-    ''', (int(guild_id), welcome_channel, welcome_message, farewell_channel, farewell_message, welcome_embed_json, farewell_embed_json))
+    ''', (int(guild_id), welcome_channel, "", farewell_channel, farewell_message, welcome_embed_json, farewell_embed_json))
     conn.commit()
     conn.close()
     return redirect(f'/dashboard/{guild_id}/welcome?success=1')
@@ -1638,5 +1672,6 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
