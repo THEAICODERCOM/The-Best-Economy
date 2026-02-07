@@ -2293,7 +2293,20 @@ async def start_tutorial(ctx: commands.Context):
     await ctx.send(embed=apply_theme(embed))
 
 def apply_theme(embed: discord.Embed) -> discord.Embed:
-    embed.set_footer(text="Empire Nexus")
+    try:
+        if embed.color is None or embed.color.value == 0:
+            embed.color = discord.Color(0x00d2ff)
+    except:
+        pass
+    try:
+        if not getattr(embed, "timestamp", None):
+            embed.timestamp = discord.utils.utcnow()
+    except:
+        pass
+    try:
+        embed.set_footer(text="Empire Nexus")
+    except:
+        pass
     return embed
 
 class HelpSelect(discord.ui.Select):
@@ -3489,7 +3502,7 @@ async def setup_cmd(ctx: commands.Context):
         title="⚙️ Empire Nexus Setup",
         description=(
             "Configure your kingdom, set up the role shop, and create custom assets via the web dashboard.\n\n"
-            "🔗 [**Nexus Dashboard**](https://thegoatchessbot.alwaysdata.net/)\n"
+            "🔗 [**Nexus Dashboard**](https://empirenexus.alwaysdata.net/)\n"
             "🛠️ [**Support Server**](https://discord.gg/zsqWFX2gBV)\n\n"
             "*Note: Only server administrators can deploy changes.*"
         ),
@@ -3778,4 +3791,5 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
