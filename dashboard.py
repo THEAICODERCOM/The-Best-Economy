@@ -1055,13 +1055,15 @@ def welcome_dashboard(guild_id):
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
                     <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
                 </div>
             </div>
             <div class="main-content">
                 <div class="container">
                     <h1 class="page-title">👋 Welcome & Farewell</h1>
-                    <p class="page-desc">Design a beautiful welcome embed. No JSON needed — simply fill the fields. Placeholders: {user}, {username}, {server}, {member_count}</p>
+                    <p class="page-desc">Design a beautiful welcome embed. No JSON needed — simply fill the fields. Placeholders: {{user}}, {{username}}, {{server}}, {{member_count}}</p>
                     <form action="/save-welcome/{guild_id}" method="post">
                         <div class="card">
                             <h2 class="card-title">Welcome Settings</h2>
@@ -1303,6 +1305,8 @@ def custom_commands_dashboard(guild_id):
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item active"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
                     <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
                 </div>
             </div>
@@ -1672,6 +1676,7 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
 
