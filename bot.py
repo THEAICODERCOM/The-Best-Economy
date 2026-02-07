@@ -2299,18 +2299,6 @@ class HelpView(discord.ui.View):
         super().__init__(timeout=120)
         self.add_item(HelpSelect(prefix))
 
-@bot.hybrid_command(name="help_nexus", description="Show all available commands (Enhanced)")
-async def help_nexus(ctx: commands.Context):
-    prefix = await get_prefix(bot, ctx.message)
-    view = HelpView(prefix)
-    embed = discord.Embed(
-        title="Help Menu",
-        description="Select a category from the dropdown menu below to view the commands.",
-        color=0x2f3136
-    )
-    embed.set_footer(text="Empire Nexus Help System")
-    await ctx.send(embed=embed, view=view)
-
 @bot.hybrid_command(name="prestige", description="Reset your balance and level for a permanent income multiplier")
 async def prestige(ctx: commands.Context):
     data = await get_user_data(ctx.author.id, ctx.guild.id)
