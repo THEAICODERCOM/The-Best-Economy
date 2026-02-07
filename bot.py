@@ -308,6 +308,8 @@ async def init_db():
             guild_id INTEGER PRIMARY KEY,
             message_log_channel INTEGER,
             member_log_channel INTEGER,
+            join_log_channel INTEGER,
+            leave_log_channel INTEGER,
             user_log_channel INTEGER,
             server_log_channel INTEGER,
             voice_log_channel INTEGER,
@@ -354,6 +356,14 @@ async def migrate_db():
                 await db.execute(f'ALTER TABLE users ADD COLUMN {col_name} {col_type}')
             except:
                 pass
+        try:
+            await db.execute('ALTER TABLE logging_config ADD COLUMN join_log_channel INTEGER')
+        except:
+            pass
+        try:
+            await db.execute('ALTER TABLE logging_config ADD COLUMN leave_log_channel INTEGER')
+        except:
+            pass
         await db.commit()
 
 # Bot setup
@@ -460,12 +470,32 @@ async def log_embed(guild, config_key, embed):
         async with db.execute(f'SELECT {config_key} FROM logging_config WHERE guild_id = ?', (guild.id,)) as cursor:
             row = await cursor.fetchone()
             if row and row[0]:
-                channel = guild.get_channel(row[0])
+                channel_id = row[0]
+                try:
+                    channel_id = int(channel_id)
+                except:
+                    pass
+                channel = guild.get_channel(channel_id)
                 if channel:
                     try:
                         await channel.send(embed=embed)
                     except:
                         pass
+
+async def _find_actor(guild: discord.Guild, action: discord.AuditLogAction, target_id: int):
+    user = None
+    reason = None
+    try:
+        await asyncio.sleep(1)
+        async for entry in guild.audit_logs(limit=6, action=action):
+            tgt = entry.target
+            if hasattr(tgt, "id") and tgt.id == target_id:
+                user = entry.user
+                reason = entry.reason
+                break
+    except:
+        pass
+    return user, reason
 
 @bot.event
 async def on_message_delete(message):
@@ -495,7 +525,7 @@ async def on_member_join(member):
     embed_log.add_field(name="User", value=f"{member.mention} ({member.id})", inline=True)
     embed_log.add_field(name="Account Created", value=member.created_at.strftime("%b %d, %Y"), inline=True)
     embed_log.set_thumbnail(url=member.display_avatar.url)
-    await log_embed(member.guild, "member_log_channel", embed_log)
+    await log_embed(member.guild, "join_log_channel", embed_log)
 
     # Welcome system
     async with aiosqlite.connect(DB_FILE) as db:
@@ -523,7 +553,7 @@ async def on_member_remove(member):
     embed_log = discord.Embed(title="📤 Member Left", color=discord.Color.red(), timestamp=discord.utils.utcnow())
     embed_log.add_field(name="User", value=f"{member.mention} ({member.id})", inline=True)
     embed_log.set_thumbnail(url=member.display_avatar.url)
-    await log_embed(member.guild, "member_log_channel", embed_log)
+    await log_embed(member.guild, "leave_log_channel", embed_log)
 
     # Farewell system
     async with aiosqlite.connect(DB_FILE) as db:
@@ -546,7 +576,7 @@ async def on_member_remove(member):
                 pass
     embed_log.add_field(name="Account Created", value=member.created_at.strftime("%b %d, %Y"), inline=True)
     embed_log.set_thumbnail(url=member.display_avatar.url)
-    await log_embed(member.guild, "member_log_channel", embed_log)
+    await log_embed(member.guild, "leave_log_channel", embed_log)
 
     # Welcome system
     async with aiosqlite.connect(DB_FILE) as db:
@@ -621,7 +651,7 @@ async def on_member_remove(member):
     embed_log = discord.Embed(title="📤 Member Left", color=discord.Color.red(), timestamp=discord.utils.utcnow())
     embed_log.add_field(name="User", value=f"{member} ({member.id})", inline=True)
     embed_log.set_thumbnail(url=member.display_avatar.url)
-    await log_embed(member.guild, "member_log_channel", embed_log)
+    await log_embed(member.guild, "leave_log_channel", embed_log)
 
     # Farewell system
     async with aiosqlite.connect(DB_FILE) as db:
@@ -861,6 +891,43 @@ async def clear_warnings(ctx: commands.Context, user: discord.User):
     await ctx.send(f"✅ Cleared all warnings for **{user.display_name}**.")
     await log_mod_action(ctx.guild, "Clear Warnings", user, ctx.author, "All warnings cleared")
 
+# --- Utility Moderation Commands ---
+
+@bot.hybrid_command(name="purge", description="Delete a number of messages from this channel")
+@commands.has_permissions(manage_messages=True)
+@app_commands.describe(count="Number of messages to delete (1-100)")
+async def purge(ctx: commands.Context, count: int):
+    if count < 1 or count > 100:
+        return await ctx.send("❌ Please provide a count between 1 and 100.")
+    try:
+        deleted = await ctx.channel.purge(limit=count, bulk=True)
+        await ctx.send(f"🧹 Deleted {len(deleted)} messages.", delete_after=5)
+        embed = discord.Embed(title="Bulk Message Delete", color=discord.Color.dark_red(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="Channel", value=ctx.channel.mention, inline=False)
+        embed.add_field(name="Count", value=str(len(deleted)), inline=True)
+        embed.add_field(name="Actor", value=f"{ctx.author} ({ctx.author.id})", inline=False)
+        await log_embed(ctx.guild, "message_log_channel", embed)
+        await log_mod_action(ctx.guild, "Purge", ctx.channel, ctx.author, f"Deleted {len(deleted)} messages")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to manage messages here.")
+    except Exception as e:
+        await ctx.send(f"❌ Error while purging: {e}")
+
+@bot.hybrid_command(name="setnick", description="Set a member's nickname")
+@commands.has_permissions(manage_nicknames=True)
+@app_commands.describe(member="Member to rename", nickname="New nickname")
+async def setnick(ctx: commands.Context, member: discord.Member, *, nickname: str):
+    if len(nickname) > 32:
+        return await ctx.send("❌ Nickname must be 32 characters or fewer.")
+    try:
+        await member.edit(nick=nickname, reason=f"Set by {ctx.author}")
+        await ctx.send(f"✅ Changed nickname for **{member.display_name}** to **{nickname}**.")
+        await log_mod_action(ctx.guild, "Set Nickname", member, ctx.author, f"Nickname → {nickname}")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to change that member's nickname.")
+    except Exception as e:
+        await ctx.send(f"❌ Error changing nickname: {e}")
+
 @bot.hybrid_command(name="removewarn", description="Delete a specific warning by ID")
 @commands.has_permissions(kick_members=True)
 @app_commands.describe(warn_id="The ID of the warning to remove")
@@ -1014,6 +1081,8 @@ async def farewell_channel_autocomplete(interaction: discord.Interaction, curren
 @app_commands.choices(category=[
     app_commands.Choice(name="Message Logs", value="message_log_channel"),
     app_commands.Choice(name="Member Logs", value="member_log_channel"),
+    app_commands.Choice(name="Join Logs", value="join_log_channel"),
+    app_commands.Choice(name="Leave Logs", value="leave_log_channel"),
     app_commands.Choice(name="Server Logs", value="server_log_channel"),
     app_commands.Choice(name="Mod Logs", value="mod_log_channel"),
     app_commands.Choice(name="Automod Logs", value="automod_log_channel")
@@ -1290,7 +1359,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         embed.add_field(name="User", value=f"{after} ({after.id})", inline=False)
         for k, v in changes:
             embed.add_field(name=k, value=v or "None", inline=False)
-        await log_embed(after.guild, "user_log_channel", embed)
+        await log_embed(after.guild, "member_log_channel", embed)
 
 @bot.event
 async def on_user_update(before: discord.User, after: discord.User):
@@ -1302,24 +1371,68 @@ async def on_user_update(before: discord.User, after: discord.User):
         embed.add_field(name="Global Name", value=f"{before.global_name} → {after.global_name}", inline=False)
     for guild in bot.guilds:
         if guild.get_member(after.id):
-            await log_embed(guild, "user_log_channel", embed)
+            await log_embed(guild, "member_log_channel", embed)
 
 @bot.event
 async def on_guild_channel_create(channel: discord.abc.GuildChannel):
+    actor, reason = await _find_actor(channel.guild, discord.AuditLogAction.channel_create, channel.id)
     embed = discord.Embed(title="Channel Created", color=discord.Color.green())
     embed.add_field(name="Channel", value=f"{channel.mention} ({channel.id})", inline=False)
+    if actor:
+        embed.add_field(name="Actor", value=f"{actor} ({actor.id})", inline=False)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
     await log_embed(channel.guild, "server_log_channel", embed)
 
 @bot.event
 async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
+    actor, reason = await _find_actor(channel.guild, discord.AuditLogAction.channel_delete, channel.id)
     embed = discord.Embed(title="Channel Deleted", color=discord.Color.dark_red())
     embed.add_field(name="Channel", value=f"#{channel.name} ({channel.id})", inline=False)
+    if actor:
+        embed.add_field(name="Actor", value=f"{actor} ({actor.id})", inline=False)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
     await log_embed(channel.guild, "server_log_channel", embed)
 
 @bot.event
 async def on_guild_channel_update(before: discord.abc.GuildChannel, after: discord.abc.GuildChannel):
+    actor, reason = await _find_actor(after.guild, discord.AuditLogAction.channel_update, after.id)
     embed = discord.Embed(title="Channel Updated", color=discord.Color.orange())
     embed.add_field(name="Channel", value=f"{after.mention} ({after.id})", inline=False)
+    if before.name != after.name:
+        embed.add_field(name="Name", value=f"{before.name} → {after.name}", inline=False)
+    topic_b = getattr(before, "topic", None)
+    topic_a = getattr(after, "topic", None)
+    if topic_b != topic_a:
+        embed.add_field(name="Topic", value=f"{topic_b or 'None'} → {topic_a or 'None'}", inline=False)
+    cat_b = before.category.name if before.category else "None"
+    cat_a = after.category.name if after.category else "None"
+    if cat_b != cat_a:
+        embed.add_field(name="Category", value=f"{cat_b} → {cat_a}", inline=False)
+    nsfw_b = getattr(before, "nsfw", None)
+    nsfw_a = getattr(after, "nsfw", None)
+    if nsfw_b != nsfw_a:
+        embed.add_field(name="NSFW", value=f"{nsfw_b} → {nsfw_a}", inline=False)
+    rate_b = getattr(before, "slowmode_delay", getattr(before, "rate_limit_per_user", None))
+    rate_a = getattr(after, "slowmode_delay", getattr(after, "rate_limit_per_user", None))
+    if rate_b != rate_a:
+        embed.add_field(name="Slowmode", value=f"{rate_b} → {rate_a}", inline=False)
+    pos_b = getattr(before, "position", None)
+    pos_a = getattr(after, "position", None)
+    if pos_b != pos_a:
+        embed.add_field(name="Position", value=f"{pos_b} → {pos_a}", inline=False)
+    try:
+        ow_b = before.overwrites or {}
+        ow_a = after.overwrites or {}
+        if ow_b != ow_a:
+            embed.add_field(name="Permissions", value="Changed", inline=False)
+    except:
+        pass
+    if actor:
+        embed.add_field(name="Actor", value=f"{actor} ({actor.id})", inline=False)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
     await log_embed(after.guild, "server_log_channel", embed)
 
 @bot.event
@@ -1330,20 +1443,39 @@ async def on_guild_update(before: discord.Guild, after: discord.Guild):
 
 @bot.event
 async def on_guild_role_create(role: discord.Role):
+    actor, reason = await _find_actor(role.guild, discord.AuditLogAction.role_create, role.id)
     embed = discord.Embed(title="Role Created", color=discord.Color.green())
     embed.add_field(name="Role", value=f"{role.name} ({role.id})", inline=False)
+    if actor:
+        embed.add_field(name="Actor", value=f"{actor} ({actor.id})", inline=False)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
     await log_embed(role.guild, "server_log_channel", embed)
 
 @bot.event
 async def on_guild_role_delete(role: discord.Role):
+    actor, reason = await _find_actor(role.guild, discord.AuditLogAction.role_delete, role.id)
     embed = discord.Embed(title="Role Deleted", color=discord.Color.dark_red())
     embed.add_field(name="Role", value=f"{role.name} ({role.id})", inline=False)
+    if actor:
+        embed.add_field(name="Actor", value=f"{actor} ({actor.id})", inline=False)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
     await log_embed(role.guild, "server_log_channel", embed)
 
 @bot.event
 async def on_guild_role_update(before: discord.Role, after: discord.Role):
+    actor, reason = await _find_actor(after.guild, discord.AuditLogAction.role_update, after.id)
     embed = discord.Embed(title="Role Updated", color=discord.Color.orange())
     embed.add_field(name="Role", value=f"{after.name} ({after.id})", inline=False)
+    if before.name != after.name:
+        embed.add_field(name="Name", value=f"{before.name} → {after.name}", inline=False)
+    if before.permissions != after.permissions:
+        embed.add_field(name="Permissions", value="Changed", inline=False)
+    if actor:
+        embed.add_field(name="Actor", value=f"{actor} ({actor.id})", inline=False)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
     await log_embed(after.guild, "server_log_channel", embed)
 
 @bot.event
@@ -3570,3 +3702,4 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
