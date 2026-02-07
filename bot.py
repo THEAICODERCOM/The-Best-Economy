@@ -2117,57 +2117,131 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member):
-    # Welcome message
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT welcome_channel, welcome_message FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                channel = await resolve_channel(member.guild, row[0])
-                if channel:
-                    msg = row[1].replace("{user}", member.mention)
-                    await channel.send(msg)
-        
-    # Member join log & account age verification
+        async with db.execute('SELECT welcome_channel, welcome_message, welcome_embed_json FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
+            wf = await cursor.fetchone()
+
+    if wf and wf[0]:
+        ch = await resolve_channel(member.guild, wf[0])
+        if ch:
+            placeholders = {
+                "{user}": member.mention,
+                "{username}": member.name,
+                "{server}": member.guild.name,
+                "{member_count}": str(member.guild.member_count),
+                "{avatar}": member.display_avatar.url,
+                "{join_date}": member.joined_at.strftime("%b %d, %Y")
+            }
+            embed_to_send = None
+            msg_to_send = None
+            embed_json = wf[2]
+            if embed_json:
+                try:
+                    data = json.loads(embed_json)
+                    def replace_in_dict(d):
+                        if isinstance(d, str):
+                            for k, v in placeholders.items(): d = d.replace(k, v)
+                            return d
+                        if isinstance(d, dict): return {k: replace_in_dict(v) for k, v in d.items()}
+                        if isinstance(d, list): return [replace_in_dict(i) for i in d]
+                        return d
+                    data = replace_in_dict(data)
+                    embed_to_send = discord.Embed.from_dict(data)
+                except:
+                    embed_to_send = None
+            if not embed_to_send:
+                msg = (wf[1] or "").strip()
+                if msg:
+                    for k, v in placeholders.items(): msg = msg.replace(k, v)
+                    msg_to_send = msg
+                else:
+                    embed_to_send = discord.Embed(
+                        title=f"👋 Welcome {member.name}",
+                        description=f"Glad to have you in {member.guild.name}! You are member #{member.guild.member_count}.",
+                        color=0x00d2ff,
+                        timestamp=discord.utils.utcnow()
+                    )
+                    try: embed_to_send.set_thumbnail(url=member.display_avatar.url)
+                    except: pass
+            try:
+                if embed_to_send:
+                    await ch.send(embed=embed_to_send)
+                else:
+                    await ch.send(content=msg_to_send)
+            except:
+                pass
+
+    account_age = (discord.utils.utcnow() - member.created_at).days
+    join_embed = discord.Embed(title="📥 Member Joined", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+    join_embed.set_thumbnail(url=member.display_avatar.url)
+    join_embed.add_field(name="User", value=f"{member} ({member.id})")
+    join_embed.add_field(name="Account Age", value=f"{account_age} days")
+    if account_age < 7:
+        join_embed.description = "⚠️ New Account"
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT member_log_channel FROM logging_config WHERE guild_id = ?', (member.guild.id,)) as cursor:
+        async with db.execute('SELECT join_log_channel, member_log_channel FROM logging_config WHERE guild_id = ?', (member.guild.id,)) as cursor:
             row = await cursor.fetchone()
-            if row and row[0]:
-                channel = await resolve_channel(member.guild, row[0])
-                if channel:
-                    account_age = (discord.utils.utcnow() - member.created_at).days
-                    embed = discord.Embed(title="Member Joined", color=discord.Color.green())
-                    embed.set_thumbnail(url=member.display_avatar.url)
-                    embed.add_field(name="User", value=f"{member} ({member.id})")
-                    embed.add_field(name="Account Age", value=f"{account_age} days")
-                    if account_age < 7:
-                        embed.description = "⚠️ **Warning: New Account!**"
-                    embed.timestamp = discord.utils.utcnow()
-                    await channel.send(embed=embed)
+    if row and row[0]:
+        await log_embed(member.guild, "join_log_channel", join_embed)
+    elif row and row[1]:
+        await log_embed(member.guild, "member_log_channel", join_embed)
 
 @bot.event
 async def on_member_remove(member):
-    # Farewell message
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT farewell_channel, farewell_message FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                channel = await resolve_channel(member.guild, row[0])
-                if channel:
-                    msg = row[1].replace("{user}", member.display_name)
-                    await channel.send(msg)
+        async with db.execute('SELECT farewell_channel, farewell_message, farewell_embed_json FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
+            wf = await cursor.fetchone()
 
-    # Member leave log
+    if wf and wf[0]:
+        ch = await resolve_channel(member.guild, wf[0])
+        if ch:
+            placeholders = {
+                "{user}": member.display_name,
+                "{username}": member.name,
+                "{server}": member.guild.name,
+                "{member_count}": str(member.guild.member_count),
+                "{avatar}": member.display_avatar.url
+            }
+            embed_to_send = None
+            msg_to_send = None
+            embed_json = wf[2]
+            if embed_json:
+                try:
+                    data = json.loads(embed_json)
+                    def replace_in_dict(d):
+                        if isinstance(d, str):
+                            for k, v in placeholders.items(): d = d.replace(k, v)
+                            return d
+                        if isinstance(d, dict): return {k: replace_in_dict(v) for k, v in d.items()}
+                        if isinstance(d, list): return [replace_in_dict(i) for i in d]
+                        return d
+                    data = replace_in_dict(data)
+                    embed_to_send = discord.Embed.from_dict(data)
+                except:
+                    embed_to_send = None
+            if not embed_to_send:
+                msg = (wf[1] or "").strip()
+                if msg:
+                    for k, v in placeholders.items(): msg = msg.replace(k, v)
+                    msg_to_send = msg
+            try:
+                if embed_to_send:
+                    await ch.send(embed=embed_to_send)
+                elif msg_to_send:
+                    await ch.send(content=msg_to_send)
+            except:
+                pass
+
+    leave_embed = discord.Embed(title="📤 Member Left", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+    leave_embed.set_thumbnail(url=member.display_avatar.url)
+    leave_embed.add_field(name="User", value=f"{member} ({member.id})")
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT member_log_channel FROM logging_config WHERE guild_id = ?', (member.guild.id,)) as cursor:
+        async with db.execute('SELECT leave_log_channel, member_log_channel FROM logging_config WHERE guild_id = ?', (member.guild.id,)) as cursor:
             row = await cursor.fetchone()
-            if row and row[0]:
-                channel = await resolve_channel(member.guild, row[0])
-                if channel:
-                    embed = discord.Embed(title="Member Left", color=discord.Color.orange())
-                    embed.set_thumbnail(url=member.display_avatar.url)
-                    embed.add_field(name="User", value=f"{member} ({member.id})")
-                    embed.timestamp = discord.utils.utcnow()
-                    await channel.send(embed=embed)
+    if row and row[0]:
+        await log_embed(member.guild, "leave_log_channel", leave_embed)
+    elif row and row[1]:
+        await log_embed(member.guild, "member_log_channel", leave_embed)
 
 @bot.event
 async def on_message_delete(message):
@@ -3791,5 +3865,4 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
-
 
