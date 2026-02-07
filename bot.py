@@ -527,10 +527,10 @@ async def on_member_join(member):
     embed_log.set_thumbnail(url=member.display_avatar.url)
     await log_embed(member.guild, "join_log_channel", embed_log)
 
-    # Welcome system
+    # Welcome system (embed-only)
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT welcome_channel, welcome_message FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
+        async with db.execute('SELECT welcome_channel, welcome_embed_json FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
             row = await cursor.fetchone()
     
     if row and row['welcome_channel']:
@@ -540,10 +540,53 @@ async def on_member_join(member):
             except: pass
             
         if channel:
-            msg = row['welcome_message'] or "Welcome {user} to {guild}!"
-            msg = msg.replace("{user}", member.mention).replace("{guild}", member.guild.name)
+            embed_json = row['welcome_embed_json']
+            placeholders = {
+                "{user}": member.mention,
+                "{username}": member.name,
+                "{server}": member.guild.name,
+                "{member_count}": str(member.guild.member_count),
+                "{avatar}": member.display_avatar.url,
+                "{join_date}": member.joined_at.strftime("%b %d, %Y")
+            }
+            embed = None
+            if embed_json:
+                try:
+                    data = json.loads(embed_json)
+                    def replace_in_dict(d):
+                        if isinstance(d, str):
+                            for key, val in placeholders.items():
+                                d = d.replace(key, val)
+                            return d
+                        if isinstance(d, dict):
+                            return {k: replace_in_dict(v) for k, v in d.items()}
+                        if isinstance(d, list):
+                            return [replace_in_dict(i) for i in d]
+                        return d
+                    data = replace_in_dict(data)
+                    embed = discord.Embed.from_dict(data)
+                except:
+                    pass
+            if embed is None:
+                embed = discord.Embed(
+                    title=f"👋 Welcome {member.name}",
+                    description=f"Glad to have you in {member.guild.name}! You are member #{member.guild.member_count}.",
+                    color=0x00d2ff,
+                    timestamp=discord.utils.utcnow()
+                )
+            if member.display_avatar:
+                try:
+                    embed.set_thumbnail(url=member.display_avatar.url)
+                except:
+                    pass
+            class WelcomeView(discord.ui.View):
+                def __init__(self):
+                    super().__init__(timeout=None)
+                @discord.ui.button(label="Say Hi 👋", style=discord.ButtonStyle.primary, custom_id="welcome_hi")
+                async def hi(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    await interaction.response.send_message(f"Welcome {member.mention}!", ephemeral=True)
             try:
-                await channel.send(msg)
+                await channel.send(embed=embed, view=WelcomeView())
             except:
                 pass
 
@@ -774,13 +817,23 @@ def parse_duration(duration_str):
     
     return total_seconds
 
+def can_act_on(actor: discord.Member, target: discord.Member) -> bool:
+    if actor.guild.owner_id == actor.id:
+        return True
+    if actor.id == target.id:
+        return False
+    try:
+        return actor.top_role > target.top_role
+    except:
+        return False
+
 # --- MODERATION COMMANDS ---
 
 @bot.hybrid_command(name="kick", description="Remove a member from the server")
 @commands.has_permissions(kick_members=True)
 @app_commands.describe(member="The member to kick", reason="Reason for kicking", duration="Optional time (e.g. 1h, 1d) - will be logged")
 async def kick(ctx: commands.Context, member: discord.Member, reason: str = "No reason provided", duration: str = None):
-    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
+    if not can_act_on(ctx.author, member):
         return await ctx.send("❌ You cannot kick someone with a higher or equal role!")
     
     try:
@@ -794,7 +847,7 @@ async def kick(ctx: commands.Context, member: discord.Member, reason: str = "No 
 @commands.has_permissions(ban_members=True)
 @app_commands.describe(member="The member to ban", reason="Reason for banning", duration="Duration (e.g. 1h, 1d)")
 async def ban(ctx: commands.Context, member: discord.Member, reason: str = "No reason provided", duration: str = None):
-    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
+    if not can_act_on(ctx.author, member):
         return await ctx.send("❌ You cannot ban someone with a higher or equal role!")
 
     seconds = parse_duration(duration)
@@ -815,7 +868,7 @@ async def ban(ctx: commands.Context, member: discord.Member, reason: str = "No r
 @commands.has_permissions(kick_members=True)
 @app_commands.describe(member="The member to warn", reason="Reason for warning", duration="Expiration time (e.g. 1d, 30d)")
 async def warn(ctx: commands.Context, member: discord.Member, reason: str = "No reason provided", duration: str = None):
-    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
+    if not can_act_on(ctx.author, member):
         return await ctx.send("❌ You cannot warn someone with a higher or equal role!")
 
     seconds = parse_duration(duration)
@@ -835,6 +888,9 @@ async def warn(ctx: commands.Context, member: discord.Member, reason: str = "No 
 @commands.has_permissions(kick_members=True)
 @app_commands.describe(user="The user to clear warnings for")
 async def clearwarnings_standalone(ctx: commands.Context, user: discord.User):
+    target_member = ctx.guild.get_member(user.id)
+    if target_member and not can_act_on(ctx.author, target_member):
+        return await ctx.send("❌ You cannot modify warnings for someone with a higher or equal role!")
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('DELETE FROM warnings WHERE user_id = ? AND guild_id = ?', (user.id, ctx.guild.id))
         await db.commit()
@@ -853,6 +909,9 @@ async def delwarn_standalone(ctx: commands.Context, id: int):
                 return await ctx.send(f"❌ Warning ID `{id}` not found in this server.")
             
             user_id = row[0]
+            target_member = ctx.guild.get_member(user_id)
+            if target_member and not can_act_on(ctx.author, target_member):
+                return await ctx.send("❌ You cannot modify warnings for someone with a higher or equal role!")
             await db.execute('DELETE FROM warnings WHERE warn_id = ?', (id,))
             await db.commit()
     
@@ -884,6 +943,9 @@ async def warnings_group(ctx: commands.Context, user: discord.User):
 @warnings_group.command(name="clear", description="Purge all warnings for a specified user")
 @commands.has_permissions(kick_members=True)
 async def clear_warnings(ctx: commands.Context, user: discord.User):
+    target_member = ctx.guild.get_member(user.id)
+    if target_member and not can_act_on(ctx.author, target_member):
+        return await ctx.send("❌ You cannot modify warnings for someone with a higher or equal role!")
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('DELETE FROM warnings WHERE user_id = ? AND guild_id = ?', (user.id, ctx.guild.id))
         await db.commit()
@@ -919,6 +981,8 @@ async def purge(ctx: commands.Context, count: int):
 async def setnick(ctx: commands.Context, member: discord.Member, *, nickname: str):
     if len(nickname) > 32:
         return await ctx.send("❌ Nickname must be 32 characters or fewer.")
+    if not can_act_on(ctx.author, member):
+        return await ctx.send("❌ You cannot change the nickname of someone with a higher or equal role!")
     try:
         await member.edit(nick=nickname, reason=f"Set by {ctx.author}")
         await ctx.send(f"✅ Changed nickname for **{member.display_name}** to **{nickname}**.")
@@ -927,6 +991,29 @@ async def setnick(ctx: commands.Context, member: discord.Member, *, nickname: st
         await ctx.send("❌ I don't have permission to change that member's nickname.")
     except Exception as e:
         await ctx.send(f"❌ Error changing nickname: {e}")
+
+@bot.hybrid_command(name="timeout", description="Timeout a member for a duration")
+@commands.has_permissions(moderate_members=True)
+@app_commands.describe(member="Member to timeout", duration="e.g. 30m, 2h, 1d", reason="Reason")
+async def timeout(ctx: commands.Context, member: discord.Member, duration: str, *, reason: str = "No reason provided"):
+    if not can_act_on(ctx.author, member):
+        return await ctx.send("❌ You cannot timeout someone with a higher or equal role!")
+    seconds = parse_duration(duration)
+    if not seconds or seconds < 60:
+        return await ctx.send("❌ Duration must be at least 1 minute. Use formats like 30m, 2h, 1d.")
+    try:
+        from datetime import timedelta, datetime
+        try:
+            await member.timeout(timedelta(seconds=seconds), reason=reason)
+        except:
+            until = datetime.utcnow() + timedelta(seconds=seconds)
+            await member.edit(communication_disabled_until=until, reason=reason)
+        await ctx.send(f"⏳ Timed out **{member.display_name}** for **{duration}**. Reason: {reason}")
+        await log_mod_action(ctx.guild, "Timeout", member, ctx.author, reason, duration)
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to timeout that member.")
+    except Exception as e:
+        await ctx.send(f"❌ Error applying timeout: {e}")
 
 @bot.hybrid_command(name="removewarn", description="Delete a specific warning by ID")
 @commands.has_permissions(kick_members=True)
@@ -3702,4 +3789,3 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
-
