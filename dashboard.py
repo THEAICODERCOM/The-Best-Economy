@@ -178,6 +178,17 @@ def init_db():
         prefix TEXT DEFAULT '!',
         PRIMARY KEY (guild_id, name)
     )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS mod_stats (
+        user_id INTEGER,
+        guild_id INTEGER,
+        messages INTEGER DEFAULT 0,
+        warns INTEGER DEFAULT 0,
+        bans INTEGER DEFAULT 0,
+        kicks INTEGER DEFAULT 0,
+        timeouts INTEGER DEFAULT 0,
+        points INTEGER DEFAULT 0,
+        PRIMARY KEY (user_id, guild_id)
+    )''')
     
     # Ensure new columns exist
     try:
@@ -2500,5 +2511,6 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
