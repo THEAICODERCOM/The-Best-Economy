@@ -2336,13 +2336,15 @@ async def on_ready():
     except Exception as e:
         print(f"CRITICAL: Error syncing slash commands: {e}")
     try:
-        g = bot.get_guild(TEST_GUILD_ID)
-        if g:
-            bot.tree.copy_global_to(guild=g)
-            gsynced = await bot.tree.sync(guild=g)
-            print(f"DEBUG: Synced {len(gsynced)} slash commands for test guild {TEST_GUILD_ID}.")
+        for g in bot.guilds:
+            try:
+                bot.tree.copy_global_to(guild=g)
+                gsynced = await bot.tree.sync(guild=g)
+                print(f"DEBUG: Synced {len(gsynced)} in guild {g.id}.")
+            except Exception as ge:
+                print(f"DEBUG: Guild {g.id} sync error: {ge}")
     except Exception as e:
-        print(f"CRITICAL: Error syncing test guild commands: {e}")
+        print(f"CRITICAL: Error syncing guild commands: {e}")
     print(f'Logged in as {bot.user.name}')
 
 @bot.event
@@ -4324,19 +4326,16 @@ async def antiphish(ctx: commands.Context, state: str):
 @bot.hybrid_command(name="sync", description="Sync slash commands for this server")
 @commands.has_permissions(administrator=True)
 async def sync(ctx: commands.Context):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
     try:
+        bot.tree.copy_global_to(guild=ctx.guild)
         synced = await bot.tree.sync(guild=ctx.guild)
-        await ctx.send(f"✅ Synced {len(synced)} slash commands for this server.")
+        await ctx.send(f"✅ Synced {len(synced)} commands for this server.")
     except Exception as e:
         await ctx.send(f"❌ Sync failed: {e}")
 
 @bot.hybrid_command(name="syncall", description="Sync global and server slash commands")
 @commands.has_permissions(administrator=True)
 async def syncall(ctx: commands.Context):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
     try:
         gsynced = await bot.tree.sync()
         bot.tree.copy_global_to(guild=ctx.guild)
@@ -5157,4 +5156,5 @@ async def remove_owner_cmd(ctx: commands.Context, member: discord.Member):
     await ctx.send(f"✅ {member.mention} can no longer use owner-only commands.")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
