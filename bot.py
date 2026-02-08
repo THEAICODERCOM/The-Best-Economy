@@ -1433,6 +1433,11 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     changes = []
     if before.nick != after.nick:
         changes.append(("Nickname", f"{before.nick} → {after.nick}"))
+    try:
+        if str(before.display_avatar.url) != str(after.display_avatar.url):
+            changes.append(("Avatar", "Changed"))
+    except:
+        pass
     before_roles = set(r.id for r in before.roles)
     after_roles = set(r.id for r in after.roles)
     added = after_roles - before_roles
@@ -1445,17 +1450,25 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         changes.append(("Roles Removed", ", ".join(names)))
     if changes:
         embed = discord.Embed(title="Member Updated", color=discord.Color.blurple())
-        embed.add_field(name="User", value=f"{after} ({after.id})", inline=False)
+        embed.add_field(name="User", value=f"{after.mention} ({after.id})", inline=False)
         for k, v in changes:
             embed.add_field(name=k, value=v or "None", inline=False)
+        try:
+            embed.set_thumbnail(url=after.display_avatar.url)
+        except:
+            pass
         await log_embed(after.guild, "member_log_channel", embed)
 
 @bot.event
 async def on_user_update(before: discord.User, after: discord.User):
     embed = discord.Embed(title="User Updated", color=discord.Color.blurple())
-    embed.add_field(name="User", value=f"{after} ({after.id})", inline=False)
+    embed.add_field(name="User", value=f"<@{after.id}> ({after.id})", inline=False)
     if before.avatar != after.avatar:
         embed.add_field(name="Avatar", value="Changed", inline=False)
+        try:
+            embed.set_thumbnail(url=after.display_avatar.url)
+        except:
+            pass
     if before.global_name != after.global_name:
         embed.add_field(name="Global Name", value=f"{before.global_name} → {after.global_name}", inline=False)
     for guild in bot.guilds:
@@ -2124,33 +2137,19 @@ async def on_member_join(member):
     if wf and wf[0]:
         ch = await resolve_channel(member.guild, wf[0])
         if ch:
-            placeholders = {
-                "{user}": member.mention,
-                "{username}": member.name,
-                "{server}": member.guild.name,
-                "{member_count}": str(member.guild.member_count),
-                "{avatar}": member.display_avatar.url,
-                "{join_date}": member.joined_at.strftime("%b %d, %Y")
-            }
+            placeholders = _apply_placeholders_member(member.guild, member)
             embed_to_send = None
             msg_to_send = None
             embed_json = wf[2]
             if embed_json:
                 try:
                     data = json.loads(embed_json)
-                    def replace_in_dict(d):
-                        if isinstance(d, str):
-                            for k, v in placeholders.items(): d = d.replace(k, v)
-                            return d
-                        if isinstance(d, dict): return {k: replace_in_dict(v) for k, v in d.items()}
-                        if isinstance(d, list): return [replace_in_dict(i) for i in d]
-                        return d
-                    data = replace_in_dict(data)
+                    data = _replace_in_data(member.guild, data, placeholders)
                     embed_to_send = discord.Embed.from_dict(data)
                 except:
                     embed_to_send = None
             if not embed_to_send:
-                msg = (wf[1] or "").strip()
+                msg = _resolve_text_mentions(member.guild, (wf[1] or "").strip())
                 if msg:
                     for k, v in placeholders.items(): msg = msg.replace(k, v)
                     msg_to_send = msg
@@ -2174,7 +2173,7 @@ async def on_member_join(member):
     account_age = (discord.utils.utcnow() - member.created_at).days
     join_embed = discord.Embed(title="📥 Member Joined", color=discord.Color.green(), timestamp=discord.utils.utcnow())
     join_embed.set_thumbnail(url=member.display_avatar.url)
-    join_embed.add_field(name="User", value=f"{member} ({member.id})")
+    join_embed.add_field(name="User", value=f"{member.mention} ({member.id})")
     join_embed.add_field(name="Account Age", value=f"{account_age} days")
     if account_age < 7:
         join_embed.description = "⚠️ New Account"
@@ -2195,37 +2194,30 @@ async def on_member_remove(member):
     if wf and wf[0]:
         ch = await resolve_channel(member.guild, wf[0])
         if ch:
-            placeholders = {
-                "{user}": member.display_name,
-                "{username}": member.name,
-                "{server}": member.guild.name,
-                "{member_count}": str(member.guild.member_count),
-                "{avatar}": member.display_avatar.url
-            }
+            placeholders = _apply_placeholders_member(member.guild, member)
             embed_to_send = None
             msg_to_send = None
             embed_json = wf[2]
             if embed_json:
                 try:
                     data = json.loads(embed_json)
-                    def replace_in_dict(d):
-                        if isinstance(d, str):
-                            for k, v in placeholders.items(): d = d.replace(k, v)
-                            return d
-                        if isinstance(d, dict): return {k: replace_in_dict(v) for k, v in d.items()}
-                        if isinstance(d, list): return [replace_in_dict(i) for i in d]
-                        return d
-                    data = replace_in_dict(data)
+                    data = _replace_in_data(member.guild, data, placeholders)
                     embed_to_send = discord.Embed.from_dict(data)
                 except:
                     embed_to_send = None
             if not embed_to_send:
-                msg = (wf[1] or "").strip()
+                msg = _resolve_text_mentions(member.guild, (wf[1] or "").strip())
                 if msg:
                     for k, v in placeholders.items(): msg = msg.replace(k, v)
                     msg_to_send = msg
             try:
                 if embed_to_send:
+                    try:
+                        if not embed_to_send.thumbnail.url:
+                            embed_to_send.set_thumbnail(url=member.display_avatar.url)
+                    except:
+                        try: embed_to_send.set_thumbnail(url=member.display_avatar.url)
+                        except: pass
                     await ch.send(embed=embed_to_send)
                 elif msg_to_send:
                     await ch.send(content=msg_to_send)
@@ -2234,7 +2226,7 @@ async def on_member_remove(member):
 
     leave_embed = discord.Embed(title="📤 Member Left", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
     leave_embed.set_thumbnail(url=member.display_avatar.url)
-    leave_embed.add_field(name="User", value=f"{member} ({member.id})")
+    leave_embed.add_field(name="User", value=f"{member.mention} ({member.id})")
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute('SELECT leave_log_channel, member_log_channel FROM logging_config WHERE guild_id = ?', (member.guild.id,)) as cursor:
             row = await cursor.fetchone()
@@ -2588,6 +2580,52 @@ async def resolve_channel(guild, raw_id):
         except:
             return None
     return ch
+
+def _resolve_text_mentions(guild: discord.Guild, text: str) -> str:
+    if not text:
+        return text
+    try:
+        import re
+        def repl_channel(m):
+            name = m.group(1)
+            for ch in guild.channels:
+                if getattr(ch, "type", None) == discord.ChannelType.text and ch.name == name:
+                    return f"<#{ch.id}>"
+            return f"#{name}"
+        def repl_emoji(m):
+            name = m.group(1)
+            for e in guild.emojis:
+                if e.name == name:
+                    return f"<:{e.name}:{e.id}>"
+            return f":{name}:"
+        text = re.sub(r"(?<!\\w)#([A-Za-z0-9_\\-]+)", repl_channel, text)
+        text = re.sub(r":([A-Za-z0-9_\\-]+):", repl_emoji, text)
+    except:
+        pass
+    return text
+
+def _apply_placeholders_member(guild: discord.Guild, member: discord.Member) -> dict:
+    return {
+        "{user}": member.mention,
+        "{username}": member.name,
+        "{server}": guild.name,
+        "{member_count}": str(guild.member_count),
+        "{avatar}": member.display_avatar.url,
+        "{join_date}": member.joined_at.strftime("%b %d, %Y") if member.joined_at else ""
+    }
+
+def _replace_in_data(guild: discord.Guild, data, placeholders: dict):
+    if isinstance(data, str):
+        s = data
+        for k, v in placeholders.items():
+            s = s.replace(k, v)
+        s = _resolve_text_mentions(guild, s)
+        return s
+    if isinstance(data, dict):
+        return {k: _replace_in_data(guild, v, placeholders) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_replace_in_data(guild, i, placeholders) for i in data]
+    return data
 
 class HelpView(discord.ui.View):
     def __init__(self, prefix):
@@ -3865,6 +3903,3 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
-
-
-
