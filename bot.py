@@ -80,6 +80,42 @@ DEFAULT_BANK_PLANS = {
     }
 }
 
+# Boss System: Loot items and boss definitions
+LOOT_ITEMS = {
+    "healing_potion": {"name": "Healing Potion", "rarity": "common", "value": 1000, "effect": "heal_10"},
+    "minor_damage_booster": {"name": "Minor Damage Booster", "rarity": "common", "value": 2500, "effect": "boost_5"},
+    "silver_coin": {"name": "Silver Coin", "rarity": "uncommon", "value": 50000, "effect": "wallet_add"},
+    "gold_coin": {"name": "Gold Coin", "rarity": "uncommon", "value": 150000, "effect": "wallet_add"},
+    "rare_gem": {"name": "Rare Gem", "rarity": "rare", "value": 500000, "effect": "sellable"},
+    "mana_elixir": {"name": "Mana Elixir", "rarity": "rare", "value": 500000, "effect": "boost_20"},
+    "epic_sword": {"name": "Epic Sword", "rarity": "epic", "value": 1000000, "effect": "boost_50"},
+    "legendary_amulet": {"name": "Legendary Amulet", "rarity": "legendary", "value": 2500000, "effect": "auto_attack_5hp"},
+    "shield_of_fortitude": {"name": "Shield of Fortitude", "rarity": "rare", "value": 750000, "effect": "reduce_incoming"},
+    "boss_trophy": {"name": "Boss Trophy", "rarity": "epic", "value": 1500000, "effect": "cosmetic"},
+    "lucky_charm": {"name": "Lucky Charm", "rarity": "uncommon", "value": 100000, "effect": "luck_10"},
+    "crystal_of_rage": {"name": "Crystal of Rage", "rarity": "epic", "value": 1000000, "effect": "double_next"},
+    "mystic_scroll": {"name": "Mystic Scroll", "rarity": "rare", "value": 500000, "effect": "reveal_hp"},
+    "treasure_chest": {"name": "Treasure Chest", "rarity": "legendary", "value": 3000000, "effect": "random_loot"},
+    "coin_multiplier": {"name": "Coin Multiplier", "rarity": "epic", "value": 1500000, "effect": "double_rewards"}
+}
+
+BOSSES = [
+    {"name": "Robo-King", "difficulty": "Medium", "hp": 5_000_000, "features": ["reflect_5"], "loot": ["healing_potion","silver_coin","rare_gem"]},
+    {"name": "Shadow Serpent", "difficulty": "Hard", "hp": 10_000_000, "features": ["reduce_10"], "loot": ["mana_elixir","rare_gem","epic_sword"]},
+    {"name": "Flame Golem", "difficulty": "Medium", "hp": 5_000_000, "features": ["fire_aura_10"], "loot": ["silver_coin","rare_gem","lucky_charm"]},
+    {"name": "Frost Titan", "difficulty": "Expert", "hp": 25_000_000, "features": ["freeze_5s"], "loot": ["epic_sword","legendary_amulet"]},
+    {"name": "Dark Phantom", "difficulty": "Hard", "hp": 10_000_000, "features": ["evade_10"], "loot": ["mana_elixir","lucky_charm","epic_sword"]},
+    {"name": "Golden Dragon", "difficulty": "Expert", "hp": 25_000_000, "features": ["double_coin_drops"], "loot": ["legendary_amulet","treasure_chest"]},
+    {"name": "Vicious Wolf", "difficulty": "Easy", "hp": 1_000_000, "features": ["fast_regen"], "loot": ["healing_potion","silver_coin"]},
+    {"name": "Cursed Knight", "difficulty": "Medium", "hp": 5_000_000, "features": ["curse_wallet_5"], "loot": ["rare_gem","crystal_of_rage"]},
+    {"name": "Thunder Beast", "difficulty": "Hard", "hp": 10_000_000, "features": ["strike_back_5"], "loot": ["epic_sword","lucky_charm"]},
+    {"name": "Toxic Slime", "difficulty": "Easy", "hp": 1_000_000, "features": ["poison"], "loot": ["healing_potion","silver_coin"]},
+    {"name": "Phantom Mage", "difficulty": "Medium", "hp": 5_000_000, "features": ["shield_5"], "loot": ["mana_elixir","mystic_scroll"]},
+    {"name": "Colossal Ogre", "difficulty": "Medium", "hp": 5_000_000, "features": ["high_def_90"], "loot": ["rare_gem","epic_sword"]},
+    {"name": "Shadow Hydra", "difficulty": "Expert", "hp": 25_000_000, "features": ["split_heads"], "loot": ["legendary_amulet","treasure_chest"]},
+    {"name": "Iron Golem", "difficulty": "Hard", "hp": 10_000_000, "features": ["reduce_20"], "loot": ["crystal_of_rage","epic_sword"]},
+    {"name": "Arcane Elemental", "difficulty": "Medium", "hp": 5_000_000, "features": ["random_boost_reduce"], "loot": ["healing_potion","silver_coin","rare_gem"]}
+]
 JOBS = {
     "miner": {
         "name": "Mine Overseer",
@@ -527,6 +563,48 @@ async def migrate_db():
         except:
             pass
         try:
+            await db.execute('''CREATE TABLE IF NOT EXISTS boss_state (
+                guild_id INTEGER PRIMARY KEY,
+                boss_name TEXT,
+                difficulty TEXT,
+                max_hp INTEGER,
+                hp INTEGER,
+                spawned_at INTEGER,
+                is_active INTEGER DEFAULT 0
+            )''')
+        except:
+            pass
+        try:
+            await db.execute('''CREATE TABLE IF NOT EXISTS boss_damage (
+                guild_id INTEGER,
+                user_id INTEGER,
+                damage INTEGER DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            )''')
+        except:
+            pass
+        try:
+            await db.execute('''CREATE TABLE IF NOT EXISTS boss_items (
+                user_id INTEGER,
+                item_id TEXT,
+                count INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, item_id)
+            )''')
+        except:
+            pass
+        try:
+            await db.execute('ALTER TABLE guild_config ADD COLUMN boss_spawn_interval INTEGER DEFAULT 3600')
+        except:
+            pass
+        try:
+            await db.execute('''CREATE TABLE IF NOT EXISTS auto_sync_config (
+                id INTEGER PRIMARY KEY CHECK (id=1),
+                enabled INTEGER DEFAULT 0,
+                last_run INTEGER DEFAULT 0
+            )''')
+        except:
+            pass
+        try:
             await db.execute('''CREATE TABLE IF NOT EXISTS guild_auto_role (
                 guild_id INTEGER PRIMARY KEY,
                 role_id INTEGER
@@ -662,6 +740,138 @@ async def get_total_multiplier(user_id):
         total += (m - 1.0)
     return max(1.0, total)
 
+# --- Boss System Helpers & Tasks ---
+def _hp_bar(hp: int, max_hp: int, length: int = 20) -> str:
+    pct = 0 if max_hp <= 0 else max(0, min(1, hp / max_hp))
+    filled = int(length * pct)
+    return "█" * filled + "░" * (length - filled)
+
+async def _get_boss_interval(guild_id: int) -> int:
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT boss_spawn_interval FROM guild_config WHERE guild_id = ?', (guild_id,)) as c:
+            row = await c.fetchone()
+            return int(row[0]) if row and row[0] else 3600
+
+def _pick_text_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    for ch in getattr(guild, "text_channels", []):
+        me = guild.me or guild.get_member(bot.user.id)
+        if not me: return ch
+        try:
+            if ch.permissions_for(me).send_messages:
+                return ch
+        except:
+            continue
+    return None
+
+async def _spawn_boss(guild: discord.Guild):
+    if not guild:
+        return
+    boss = random.choice(BOSSES)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR REPLACE INTO boss_state (guild_id, boss_name, difficulty, max_hp, hp, spawned_at, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)',
+                         (guild.id, boss["name"], boss["difficulty"], boss["hp"], boss["hp"], int(time.time())))
+        await db.execute('DELETE FROM boss_damage WHERE guild_id = ?', (guild.id,))
+        await db.commit()
+    ch = _pick_text_channel(guild)
+    if ch:
+        embed = discord.Embed(title=f"👹 Boss Spawned — {boss['name']}", color=discord.Color.red(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="Difficulty", value=boss["difficulty"], inline=True)
+        embed.add_field(name="HP", value=f"{boss['hp']:,}\n{_hp_bar(boss['hp'], boss['hp'])}", inline=True)
+        try:
+            await ch.send(embed=embed)
+        except:
+            pass
+
+async def _get_boss(guild_id: int):
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM boss_state WHERE guild_id = ?', (guild_id,)) as c:
+            return await c.fetchone()
+
+async def _set_boss_hp(guild_id: int, new_hp: int):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('UPDATE boss_state SET hp = ?, is_active = CASE WHEN ? <= 0 THEN 0 ELSE 1 END WHERE guild_id = ?', (max(0, new_hp), new_hp, guild_id))
+        await db.commit()
+
+async def _add_damage(guild_id: int, user_id: int, dmg: int):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT INTO boss_damage (guild_id, user_id, damage) VALUES (?, ?, ?) ON CONFLICT(guild_id, user_id) DO UPDATE SET damage = damage + ?', (guild_id, user_id, dmg, dmg))
+        await db.commit()
+
+def _rarity_chance(rarity: str) -> float:
+    return {"common": 0.6, "uncommon": 0.4, "rare": 0.25, "epic": 0.10, "legendary": 0.04}.get(rarity, 0.2)
+
+async def _distribute_loot(guild: discord.Guild):
+    boss = await _get_boss(guild.id)
+    if not boss:
+        return
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT SUM(damage) FROM boss_damage WHERE guild_id = ?', (guild.id,)) as c:
+            total = (await c.fetchone())[0] or 0
+        async with db.execute('SELECT user_id, damage FROM boss_damage WHERE guild_id = ?', (guild.id,)) as c:
+            rows = await c.fetchall()
+    if total <= 0 or not rows:
+        return
+    lootable_ids = next((b["loot"] for b in BOSSES if b["name"] == boss["boss_name"]), [])
+    for uid, dmg in rows:
+        share = dmg / total
+        drop_pool = []
+        for iid in lootable_ids:
+            item = LOOT_ITEMS[iid]
+            chance = _rarity_chance(item["rarity"]) * share
+            if chance >= 0.9 or random.random() < chance:
+                drop_pool.append(iid)
+        awarded = drop_pool or ([random.choice(lootable_ids)] if lootable_ids else [])
+        for iid in awarded:
+            item = LOOT_ITEMS[iid]
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute('INSERT INTO boss_items (user_id, item_id, count) VALUES (?, ?, 1) ON CONFLICT(user_id, item_id) DO UPDATE SET count = count + 1', (uid, iid))
+                if item["effect"] in ("wallet_add", "sellable"):
+                    await update_global_balance(uid, item["value"])
+                await db.commit()
+        member = guild.get_member(uid)
+        if member:
+            try:
+                await member.send(f"🎁 Boss defeated in {guild.name}! You received: " + ", ".join([LOOT_ITEMS[i]['name'] for i in awarded]))
+            except:
+                pass
+
+@tasks.loop(seconds=30)
+async def boss_spawn_task():
+    try:
+        for g in bot.guilds:
+            boss = await _get_boss(g.id)
+            interval = await _get_boss_interval(g.id)
+            now = int(time.time())
+            if not boss or not boss["is_active"] or (boss["spawned_at"] or 0) + interval <= now:
+                await _spawn_boss(g)
+    except:
+        pass
+
+@tasks.loop(hours=6)
+async def auto_sync_task():
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT enabled FROM auto_sync_config WHERE id = 1') as c:
+                row = await c.fetchone()
+                enabled = bool(row and (row[0] or 0))
+        if not enabled:
+            return
+        for g in bot.guilds:
+            try:
+                bot.tree.clear_commands(guild=g)
+                await bot.tree.sync(guild=g)
+            except:
+                pass
+        try:
+            await bot.tree.sync()
+        except:
+            pass
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('INSERT OR REPLACE INTO auto_sync_config (id, enabled, last_run) VALUES (1, 1, ?)', (int(time.time()),))
+            await db.commit()
+    except:
+        pass
 async def ensure_user(user_id, guild_id):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('INSERT OR IGNORE INTO users (user_id, guild_id) VALUES (?, ?)', (user_id, guild_id))
@@ -2578,6 +2788,14 @@ async def on_ready():
     except Exception as e:
         print(f"CRITICAL: Error syncing guild commands: {e}")
     print(f'Logged in as {bot.user.name}')
+    try:
+        boss_spawn_task.start()
+    except:
+        pass
+    try:
+        auto_sync_task.start()
+    except:
+        pass
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
@@ -4591,7 +4809,7 @@ async def syncall(ctx: commands.Context):
         await ctx.send(f"❌ Sync failed: {e}")
 
 @bot.hybrid_command(name="synccleanup", description="Remove guild-local commands to fix duplicates, then re-sync globals")
-@commands.has_permissions(administrator=True)
+@is_authorized_owner()
 async def synccleanup(ctx: commands.Context):
     try:
         bot.tree.clear_commands(guild=ctx.guild)
@@ -4600,6 +4818,72 @@ async def synccleanup(ctx: commands.Context):
         await ctx.send(f"🧹 Cleared guild-local commands ({len(cleared)}). Re-synced {len(gsynced)} globals.")
     except Exception as e:
         await ctx.send(f"❌ Cleanup failed: {e}")
+
+@bot.hybrid_command(name="auto_synccleanup", description="Owner-only: Toggle automatic global sync/cleanup across all guilds")
+@is_authorized_owner()
+async def auto_synccleanup(ctx: commands.Context, mode: str = "on"):
+    mode = str(mode).lower().strip()
+    enabled = 1 if mode == "on" else 0
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR REPLACE INTO auto_sync_config (id, enabled, last_run) VALUES (1, ?, COALESCE((SELECT last_run FROM auto_sync_config WHERE id=1), 0))', (enabled,))
+        await db.commit()
+    await ctx.send(f"⚙️ Auto sync cleanup is now {'ENABLED' if enabled else 'DISABLED'}.")
+@bot.hybrid_command(name="reportabuse", description="Report staff abuse to the moderators")
+@bot.hybrid_command(name="currentboss", description="View current boss status")
+async def currentboss(ctx: commands.Context):
+    boss = await _get_boss(ctx.guild.id)
+    if not boss or not boss["is_active"]:
+        return await ctx.send("No active boss. Please wait for the next spawn.")
+    e = discord.Embed(title=f"👹 {boss['boss_name']}", color=discord.Color.red(), timestamp=discord.utils.utcnow())
+    e.add_field(name="Difficulty", value=boss["difficulty"], inline=True)
+    e.add_field(name="HP", value=f"{boss['hp']:,} / {boss['max_hp']:,}\n{_hp_bar(boss['hp'], boss['max_hp'])}", inline=False)
+    await ctx.send(embed=e)
+
+@bot.hybrid_command(name="attack", description="Attack the boss by spending coins")
+@app_commands.describe(amount="Coins to spend as damage")
+async def attack(ctx: commands.Context, amount: int):
+    if amount <= 0:
+        return await ctx.send("Enter a positive amount.")
+    boss = await _get_boss(ctx.guild.id)
+    if not boss or not boss["is_active"]:
+        return await ctx.send("No active boss to attack.")
+    data = await get_global_money(ctx.author.id)
+    if data["balance"] < amount:
+        return await ctx.send(f"You need **{amount - data['balance']:,} more coins**.")
+    await update_global_balance(ctx.author.id, -amount)
+    dmg = amount
+    await _add_damage(ctx.guild.id, ctx.author.id, dmg)
+    new_hp = int(boss["hp"] - dmg)
+    await _set_boss_hp(ctx.guild.id, new_hp)
+    if new_hp <= 0:
+        await ctx.send(f"💥 Massive hit by {ctx.author.mention}! The boss has been defeated.")
+        await _distribute_loot(ctx.guild)
+    else:
+        await ctx.send(f"⚔️ {ctx.author.mention} dealt **{dmg:,}** damage. Boss HP: **{new_hp:,}/{boss['max_hp']:,}**")
+
+@bot.hybrid_command(name="itemuse", description="Use a boss loot item for this fight")
+@app_commands.describe(item="Item ID (e.g., epic_sword, mana_elixir)")
+async def itemuse(ctx: commands.Context, item: str):
+    iid = str(item).lower().strip()
+    if iid not in LOOT_ITEMS:
+        return await ctx.send("Invalid item ID.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT count FROM boss_items WHERE user_id = ? AND item_id = ?', (ctx.author.id, iid)) as c:
+            row = await c.fetchone()
+        if not row or (row[0] or 0) <= 0:
+            return await ctx.send("You don't have that item.")
+        await db.execute('UPDATE boss_items SET count = count - 1 WHERE user_id = ? AND item_id = ?', (ctx.author.id, iid))
+        await db.commit()
+    await ctx.send(f"✅ Used **{LOOT_ITEMS[iid]['name']}**. Effect applied to your next attack (where applicable).")
+
+@bot.hybrid_command(name="cd", description="Admin: Set boss spawn interval in minutes")
+@commands.has_permissions(administrator=True)
+async def cd(ctx: commands.Context, minutes: int):
+    m = max(1, int(minutes))
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR REPLACE INTO guild_config (guild_id, boss_spawn_interval) VALUES (?, ?)', (ctx.guild.id, m * 60))
+        await db.commit()
+    await ctx.send(f"⏱️ Boss spawn interval set to **{m} minutes**.")
 @bot.hybrid_command(name="reportabuse", description="Report staff abuse to the moderators")
 async def report_abuse(ctx: commands.Context, accused: discord.Member, reason: str, evidence: str = None):
     now = int(time.time())
@@ -5181,6 +5465,8 @@ async def market_list(ctx: commands.Context, item: str, price: int, quantity: in
     item = item.strip()
     if not item or price <= 0 or quantity <= 0:
         return await ctx.send("Provide a valid item, positive price, and quantity.")
+    if item not in LOOT_ITEMS:
+        return await ctx.send("You can only list boss loot items. Use their IDs (e.g., epic_sword).")
     cfg = await _cfg_get(ctx.guild.id, ["marketplace_enabled"])
     if cfg.get("marketplace_enabled", 1) == 0:
         return await ctx.send("🛒 Marketplace is disabled for this server.")
@@ -5220,6 +5506,8 @@ async def market_buy(ctx: commands.Context, listing_id: int, quantity: int = 1):
         if not row:
             return await ctx.send("Listing not found.")
         seller_id, item, price, avail_qty = row
+        if item not in LOOT_ITEMS:
+            return await ctx.send("This listing contains an invalid item.")
         if ctx.author.id == seller_id:
             return await ctx.send("You cannot buy your own listing.")
         if quantity > avail_qty:
@@ -5233,6 +5521,7 @@ async def market_buy(ctx: commands.Context, listing_id: int, quantity: int = 1):
         seller_take = total - tax_amt
         await update_global_balance(ctx.author.id, -total)
         await update_global_balance(seller_id, seller_take)
+        await db.execute('INSERT INTO boss_items (user_id, item_id, count) VALUES (?, ?, ?) ON CONFLICT(user_id, item_id) DO UPDATE SET count = count + ?', (ctx.author.id, item, quantity, quantity))
         new_qty = avail_qty - quantity
         if new_qty == 0:
             await db.execute('DELETE FROM market_listings WHERE listing_id = ?', (listing_id,))
