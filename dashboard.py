@@ -139,6 +139,96 @@ def init_db():
         conn.execute("ALTER TABLE logging_config ADD COLUMN leave_log_channel TEXT")
     except sqlite3.OperationalError:
         pass
+    # New guild_config columns
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN raid_mode INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN anti_phish_enabled INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN marketplace_enabled INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN marketplace_tax INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN vassal_max_percent INTEGER DEFAULT 15")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN alliances_enabled INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    # Moderation points config
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN mod_message_point INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN mod_warn_point INTEGER DEFAULT 5")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN mod_kick_point INTEGER DEFAULT 10")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN mod_ban_point INTEGER DEFAULT 15")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN mod_timeout_point INTEGER DEFAULT 4")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN mod_promo_threshold INTEGER DEFAULT 500")
+    except sqlite3.OperationalError:
+        pass
+    # Promotion system tables
+    conn.execute('''CREATE TABLE IF NOT EXISTS promo_config (
+        guild_id INTEGER PRIMARY KEY,
+        tier_trial_role_id INTEGER,
+        tier_mod_role_id INTEGER,
+        tier_head_mod_role_id INTEGER,
+        tier_admin_role_id INTEGER,
+        tier_head_admin_role_id INTEGER,
+        threshold_trial_to_mod INTEGER DEFAULT 10,
+        threshold_mod_to_head_mod INTEGER DEFAULT 100,
+        threshold_head_mod_to_admin INTEGER DEFAULT 250,
+        threshold_admin_to_head_admin INTEGER DEFAULT 500,
+        allow_demotions INTEGER DEFAULT 1,
+        deduction_enabled INTEGER DEFAULT 1,
+        deduction_invalid_warn INTEGER DEFAULT 2,
+        deduction_reversed_kick INTEGER DEFAULT 5,
+        deduction_reversed_ban INTEGER DEFAULT 10,
+        deduction_abuse_report INTEGER DEFAULT 20,
+        check_interval_sec INTEGER DEFAULT 60
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS mod_points_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER,
+        user_id INTEGER,
+        delta INTEGER,
+        reason TEXT,
+        source TEXT,
+        created_at INTEGER
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS promo_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER,
+        user_id INTEGER,
+        action TEXT,
+        from_role_id INTEGER,
+        to_role_id INTEGER,
+        points_at_action INTEGER,
+        note TEXT,
+        created_at INTEGER
+    )''')
 
     conn.commit()
     conn.close()
@@ -596,6 +686,9 @@ def dashboard(guild_id):
                     <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
                     <a href="/dashboard/{guild_id}" class="menu-item {'active' if request.path == f'/dashboard/{guild_id}' else ''}"><span class="menu-label">⚙️ General</span></a>
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item {'active' if '/moderation' in request.path else ''}"><span class="menu-label">🛡️ Moderation</span></a>
+                    {"<a href=\"/dashboard/%d/security\" class=\"menu-item\"><span class=\"menu-label\">🛡️ Security</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    {"<a href=\"/dashboard/%d/systems\" class=\"menu-item\"><span class=\"menu-label\">🏗️ Systems</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
                     <a href="/dashboard/{guild_id}/logging" class="menu-item {'active' if '/logging' in request.path else ''}"><span class="menu-label">📝 Logging</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item {'active' if '/custom-commands' in request.path else ''}"><span class="menu-label">💻 Custom Commands</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
@@ -975,7 +1068,10 @@ def moderation_dashboard(guild_id):
                     <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
                     <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item active"><span class="menu-label">🛡️ Moderation</span></a>
+                    {"<a href=\"/dashboard/%d/security\" class=\"menu-item\"><span class=\"menu-label\">🛡️ Security</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
                     <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    {"<a href=\"/dashboard/%d/systems\" class=\"menu-item\"><span class=\"menu-label\">🏗️ Systems</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
                     <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
@@ -1084,7 +1180,10 @@ def welcome_dashboard(guild_id):
                     <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
                     <a href="/dashboard/{guild_id}/welcome" class="menu-item active"><span class="menu-label">👋 Welcome</span></a>
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
+                    {"<a href=\"/dashboard/%d/security\" class=\"menu-item\"><span class=\"menu-label\">🛡️ Security</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
                     <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    {"<a href=\"/dashboard/%d/systems\" class=\"menu-item\"><span class=\"menu-label\">🏗️ Systems</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
                     <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
@@ -1426,8 +1525,10 @@ def logging_dashboard(guild_id):
                     <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
                     <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
                     <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
-                    <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
+                    <a href="/dashboard/{guild_id}/security" class="menu-item"><span class="menu-label">🛡️ Security</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item active"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/systems" class="menu-item"><span class="menu-label">🏗️ Systems</span></a>
+                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
                     <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
@@ -1502,6 +1603,425 @@ def logging_dashboard(guild_id):
         </body>
     </html>
     """
+
+@app.route('/dashboard/<int:guild_id>/security')
+def security_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    try:
+        if int(guild_id) != 1465437620245889237:
+            return redirect('/servers')
+    except:
+        return redirect('/servers')
+    conn = get_db()
+    cfg = conn.execute('SELECT raid_mode, anti_phish_enabled FROM guild_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    conn.close()
+    raid_mode = int(cfg['raid_mode'] if cfg and cfg['raid_mode'] is not None else 0)
+    anti_phish = int(cfg['anti_phish_enabled'] if cfg and cfg['anti_phish_enabled'] is not None else 1)
+    return f"""
+    <html>
+        <head><title>Security | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
+                    <a href="/dashboard/{guild_id}/security" class="menu-item active"><span class="menu-label">🛡️ Security</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/systems" class="menu-item"><span class="menu-label">🏗️ Systems</span></a>
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">🛡️ Security</h1>
+                    <p class="page-desc">Toggle raid mode and anti‑phishing filters.</p>
+                    <form action="/save-security/{guild_id}" method="post">
+                        <div class="card">
+                            <h2 class="card-title">Protection</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Raid Mode</label>
+                                    <select name="raid_mode">
+                                        <option value="0" {"selected" if raid_mode==0 else ""}>Off</option>
+                                        <option value="1" {"selected" if raid_mode==1 else ""}>On</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Anti‑Phishing</label>
+                                    <select name="anti_phish">
+                                        <option value="0" {"selected" if anti_phish==0 else ""}>Off</option>
+                                        <option value="1" {"selected" if anti_phish==1 else ""}>On</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn">Save Security</button>
+                    </form>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/dashboard/<int:guild_id>/promotion')
+def promotion_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    try:
+        if int(guild_id) != 1465437620245889237:
+            return redirect('/servers')
+    except:
+        return redirect('/servers')
+    conn = get_db()
+    cfg = conn.execute('SELECT * FROM promo_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    top_mods = conn.execute('SELECT user_id, points FROM mod_stats WHERE guild_id = ? ORDER BY points DESC LIMIT 10', (int(guild_id),)).fetchall()
+    conn.close()
+    roles = get_server_roles(guild_id) or []
+    def role_options(selected_id):
+        opts = '<option value="">None</option>'
+        for r in roles:
+            sel = 'selected' if str(r['id']) == str(selected_id) else ''
+            opts += f'<option value="{r["id"]}" {sel}>{r["name"]}</option>'
+        return opts
+    def val(key, default):
+        return int(cfg[key]) if cfg and cfg.get(key) is not None else default
+    trial = val('tier_trial_role_id', '')
+    mod = val('tier_mod_role_id', '')
+    head_mod = val('tier_head_mod_role_id', '')
+    admin = val('tier_admin_role_id', '')
+    head_admin = val('tier_head_admin_role_id', '')
+    th_t2m = val('threshold_trial_to_mod', 10)
+    th_m2hm = val('threshold_mod_to_head_mod', 100)
+    th_hm2a = val('threshold_head_mod_to_admin', 250)
+    th_a2ha = val('threshold_admin_to_head_admin', 500)
+    allow_demotions = val('allow_demotions', 1)
+    deduction_enabled = val('deduction_enabled', 1)
+    ded_warn = val('deduction_invalid_warn', 2)
+    ded_kick = val('deduction_reversed_kick', 5)
+    ded_ban = val('deduction_reversed_ban', 10)
+    ded_abuse = val('deduction_abuse_report', 20)
+    interval = val('check_interval_sec', 60)
+    top_list_html = ""
+    next_threshold = th_t2m
+    for row in top_mods:
+        pts = int(row['points'] or 0)
+        pct = 100 if next_threshold == 0 else min(100, int(pts * 100 / next_threshold))
+        top_list_html += f"""
+        <div class="list-item">
+            <div class="list-item-info">
+                <div class="list-item-name">@{row['user_id']}</div>
+                <div class="list-item-price">{pts} points</div>
+            </div>
+            <div class="progress-track"><div class="progress-fill" style="width:{pct}%;"></div></div>
+        </div>"""
+    return f"""
+    <html>
+        <head><title>Promotion System | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
+                    <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
+                    <a href="/dashboard/{guild_id}/security" class="menu-item"><span class="menu-label">🛡️ Security</span></a>
+                    <a href="/dashboard/{guild_id}/systems" class="menu-item"><span class="menu-label">🏗️ Systems</span></a>
+                    <a href="/dashboard/{guild_id}/promotion" class="menu-item active"><span class="menu-label">📈 Promotion System</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">📈 Auto‑Promotion System</h1>
+                    <p class="page-desc">Configure role mappings, thresholds, and deduction rules.</p>
+                    <form action="/save-promotion/{guild_id}" method="post">
+                        <div class="card">
+                            <h2 class="card-title">Role Mapping</h2>
+                            <div class="stat-grid">
+                                <div class="form-group"><label>Trial Mod</label><select name="tier_trial_role_id">{role_options(trial)}</select></div>
+                                <div class="form-group"><label>Mod</label><select name="tier_mod_role_id">{role_options(mod)}</select></div>
+                                <div class="form-group"><label>Head Mod</label><select name="tier_head_mod_role_id">{role_options(head_mod)}</select></div>
+                                <div class="form-group"><label>Admin</label><select name="tier_admin_role_id">{role_options(admin)}</select></div>
+                                <div class="form-group"><label>Head Admin</label><select name="tier_head_admin_role_id">{role_options(head_admin)}</select></div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h2 class="card-title">Promotion Thresholds</h2>
+                            <div class="stat-grid">
+                                <div class="form-group"><label>Trial → Mod</label><input type="number" name="threshold_trial_to_mod" min="1" value="{th_t2m}"></div>
+                                <div class="form-group"><label>Mod → Head Mod</label><input type="number" name="threshold_mod_to_head_mod" min="1" value="{th_m2hm}"></div>
+                                <div class="form-group"><label>Head Mod → Admin</label><input type="number" name="threshold_head_mod_to_admin" min="1" value="{th_hm2a}"></div>
+                                <div class="form-group"><label>Admin → Head Admin</label><input type="number" name="threshold_admin_to_head_admin" min="1" value="{th_a2ha}"></div>
+                                <div class="form-group"><label>Check Interval (sec)</label><input type="number" name="check_interval_sec" min="30" max="600" value="{interval}"></div>
+                                <div class="form-group"><label>Allow Demotions</label>
+                                    <select name="allow_demotions"><option value="1" {'selected' if allow_demotions==1 else ''}>Yes</option><option value="0" {'selected' if allow_demotions==0 else ''}>No</option></select>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h2 class="card-title">Deduction Rules</h2>
+                            <div class="stat-grid">
+                                <div class="form-group"><label>Enable Deductions</label>
+                                    <select name="deduction_enabled"><option value="1" {'selected' if deduction_enabled==1 else ''}>Yes</option><option value="0" {'selected' if deduction_enabled==0 else ''}>No</option></select>
+                                </div>
+                                <div class="form-group"><label>Invalid Warn</label><input type="number" name="deduction_invalid_warn" min="0" value="{ded_warn}"></div>
+                                <div class="form-group"><label>Reversed Kick</label><input type="number" name="deduction_reversed_kick" min="0" value="{ded_kick}"></div>
+                                <div class="form-group"><label>Reversed Ban</label><input type="number" name="deduction_reversed_ban" min="0" value="{ded_ban}"></div>
+                                <div class="form-group"><label>Abuse Report Confirmed</label><input type="number" name="deduction_abuse_report" min="0" value="{ded_abuse}"></div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn">Save Promotion Settings</button>
+                    </form>
+                    <div class="card" style="margin-top:20px;">
+                        <h2 class="card-title">Top Moderators</h2>
+                        <div id="topMods">{top_list_html or '<div class=\"hint\">No moderator points yet.</div>'}</div>
+                    </div>
+                    <div style="display:flex; gap:10px; margin-top:10px;">
+                        <form action="/adjust-points/{guild_id}" method="post" style="display:flex; gap:10px;">
+                            <input type="number" name="user_id" placeholder="User ID" required>
+                            <input type="number" name="delta" placeholder="+/- Points" required>
+                            <input type="text" name="reason" placeholder="Reason" required>
+                            <button type="submit" class="btn">Adjust Points</button>
+                        </form>
+                        <form action="/reset-points/{guild_id}" method="post" style="display:flex; gap:10px;">
+                            <input type="number" name="user_id" placeholder="User ID" required>
+                            <button type="submit" class="btn" style="background:#EF4444;">Reset Points</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/save-promotion/<int:guild_id>', methods=['POST'])
+def save_promotion(guild_id):
+    try:
+        if int(guild_id) != 1465437620245889237:
+            return redirect('/servers')
+    except:
+        return redirect('/servers')
+    fields = [
+        'tier_trial_role_id','tier_mod_role_id','tier_head_mod_role_id','tier_admin_role_id','tier_head_admin_role_id',
+        'threshold_trial_to_mod','threshold_mod_to_head_mod','threshold_head_mod_to_admin','threshold_admin_to_head_admin',
+        'allow_demotions','deduction_enabled','deduction_invalid_warn','deduction_reversed_kick','deduction_reversed_ban','deduction_abuse_report','check_interval_sec'
+    ]
+    data = {}
+    for f in fields:
+        v = request.form.get(f, None)
+        if v is None: continue
+        if f.startswith('tier_'):
+            data[f] = int(v) if v else None
+        else:
+            data[f] = int(v)
+    conn = get_db()
+    conn.execute('INSERT OR IGNORE INTO promo_config (guild_id) VALUES (?)', (int(guild_id),))
+    sets = ', '.join([f"{k} = ?" for k in data.keys()])
+    vals = list(data.values()) + [int(guild_id)]
+    conn.execute(f'UPDATE promo_config SET {sets} WHERE guild_id = ?', vals)
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/promotion?success=1')
+
+@app.route('/adjust-points/<int:guild_id>', methods=['POST'])
+def adjust_points(guild_id):
+    try:
+        if int(guild_id) != 1465437620245889237:
+            return redirect('/servers')
+    except:
+        return redirect('/servers')
+    user_id = int(request.form.get('user_id'))
+    delta = int(request.form.get('delta'))
+    reason = request.form.get('reason','Manual adjust')
+    now = int(time.time())
+    conn = get_db()
+    conn.execute('INSERT OR IGNORE INTO mod_stats (user_id, guild_id, messages, warns, bans, kicks, timeouts, points) VALUES (?, ?, 0, 0, 0, 0, 0, 0)', (user_id, int(guild_id)))
+    conn.execute('UPDATE mod_stats SET points = points + ? WHERE user_id = ? AND guild_id = ?', (delta, user_id, int(guild_id)))
+    conn.execute('INSERT INTO mod_points_history (guild_id, user_id, delta, reason, source, created_at) VALUES (?, ?, ?, ?, ?, ?)', (int(guild_id), user_id, delta, reason, 'dashboard', now))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/promotion?success=1')
+
+@app.route('/reset-points/<int:guild_id>', methods=['POST'])
+def reset_points(guild_id):
+    try:
+        if int(guild_id) != 1465437620245889237:
+            return redirect('/servers')
+    except:
+        return redirect('/servers')
+    user_id = int(request.form.get('user_id'))
+    now = int(time.time())
+    conn = get_db()
+    conn.execute('INSERT OR IGNORE INTO mod_stats (user_id, guild_id, messages, warns, bans, kicks, timeouts, points) VALUES (?, ?, 0, 0, 0, 0, 0, 0)', (user_id, int(guild_id)))
+    # Read current points for audit trail
+    cur = conn.execute('SELECT points FROM mod_stats WHERE user_id = ? AND guild_id = ?', (user_id, int(guild_id))).fetchone()
+    old_pts = int(cur['points'] if cur and cur['points'] is not None else 0)
+    conn.execute('UPDATE mod_stats SET points = 0 WHERE user_id = ? AND guild_id = ?', (user_id, int(guild_id)))
+    conn.execute('INSERT INTO mod_points_history (guild_id, user_id, delta, reason, source, created_at) VALUES (?, ?, ?, ?, ?, ?)', (int(guild_id), user_id, -old_pts, 'Reset to zero', 'dashboard', now))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/promotion?success=1')
+@app.route('/save-security/<int:guild_id>', methods=['POST'])
+def save_security(guild_id):
+    raid_mode = int(request.form.get('raid_mode', '0'))
+    anti_phish = int(request.form.get('anti_phish', '1'))
+    conn = get_db()
+    conn.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (int(guild_id),))
+    conn.execute('UPDATE guild_config SET raid_mode = ?, anti_phish_enabled = ? WHERE guild_id = ?', (raid_mode, anti_phish, int(guild_id)))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/security?success=1')
+
+@app.route('/dashboard/<int:guild_id>/systems')
+def systems_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    try:
+        if int(guild_id) != 1465437620245889237:
+            return redirect('/servers')
+    except:
+        return redirect('/servers')
+    conn = get_db()
+    cfg = conn.execute('SELECT marketplace_enabled, marketplace_tax, vassal_max_percent, alliances_enabled, mod_message_point, mod_warn_point, mod_kick_point, mod_ban_point, mod_timeout_point, mod_promo_threshold FROM guild_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    conn.close()
+    marketplace_enabled = int(cfg['marketplace_enabled'] if cfg and cfg['marketplace_enabled'] is not None else 1)
+    marketplace_tax = int(cfg['marketplace_tax'] if cfg and cfg['marketplace_tax'] is not None else 0)
+    vassal_max_percent = int(cfg['vassal_max_percent'] if cfg and cfg['vassal_max_percent'] is not None else 15)
+    alliances_enabled = int(cfg['alliances_enabled'] if cfg and cfg['alliances_enabled'] is not None else 1)
+    mod_message_point = int(cfg['mod_message_point'] if cfg and cfg['mod_message_point'] is not None else 1)
+    mod_warn_point = int(cfg['mod_warn_point'] if cfg and cfg['mod_warn_point'] is not None else 5)
+    mod_kick_point = int(cfg['mod_kick_point'] if cfg and cfg['mod_kick_point'] is not None else 10)
+    mod_ban_point = int(cfg['mod_ban_point'] if cfg and cfg['mod_ban_point'] is not None else 15)
+    mod_timeout_point = int(cfg['mod_timeout_point'] if cfg and cfg['mod_timeout_point'] is not None else 4)
+    mod_promo_threshold = int(cfg['mod_promo_threshold'] if cfg and cfg['mod_promo_threshold'] is not None else 500)
+    return f"""
+    <html>
+        <head><title>Systems | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
+                    <a href="/dashboard/{guild_id}/security" class="menu-item"><span class="menu-label">🛡️ Security</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/systems" class="menu-item active"><span class="menu-label">🏗️ Systems</span></a>
+                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">🏗️ Systems</h1>
+                    <p class="page-desc">Configure marketplace, vassals, and alliances.</p>
+                    <form action="/save-systems/{guild_id}" method="post">
+                        <div class="card">
+                            <h2 class="card-title">Marketplace</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Enabled</label>
+                                    <select name="marketplace_enabled">
+                                        <option value="1" {"selected" if marketplace_enabled==1 else ""}>On</option>
+                                        <option value="0" {"selected" if marketplace_enabled==0 else ""}>Off</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Tax (%)</label>
+                                    <input type="number" name="marketplace_tax" min="0" max="25" value="{marketplace_tax}">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h2 class="card-title">Vassals</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Max Percent</label>
+                                    <input type="number" name="vassal_max_percent" min="1" max="25" value="{vassal_max_percent}">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h2 class="card-title">Alliances</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Enabled</label>
+                                    <select name="alliances_enabled">
+                                        <option value="1" {"selected" if alliances_enabled==1 else ""}>On</option>
+                                        <option value="0" {"selected" if alliances_enabled==0 else ""}>Off</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h2 class="card-title">Moderation Points & Promotions</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Message Point</label>
+                                    <input type="number" name="mod_message_point" min="0" max="10" value="{mod_message_point}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Warn Point</label>
+                                    <input type="number" name="mod_warn_point" min="0" max="50" value="{mod_warn_point}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Kick Point</label>
+                                    <input type="number" name="mod_kick_point" min="0" max="100" value="{mod_kick_point}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Ban Point</label>
+                                    <input type="number" name="mod_ban_point" min="0" max="150" value="{mod_ban_point}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Timeout Point</label>
+                                    <input type="number" name="mod_timeout_point" min="0" max="50" value="{mod_timeout_point}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Promo Threshold (points)</label>
+                                    <input type="number" name="mod_promo_threshold" min="0" max="10000" value="{mod_promo_threshold}">
+                                </div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn">Save Systems</button>
+                    </form>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/save-systems/<int:guild_id>', methods=['POST'])
+def save_systems(guild_id):
+    marketplace_enabled = int(request.form.get('marketplace_enabled', '1'))
+    marketplace_tax = int(request.form.get('marketplace_tax', '0'))
+    vassal_max_percent = int(request.form.get('vassal_max_percent', '15'))
+    alliances_enabled = int(request.form.get('alliances_enabled', '1'))
+    mod_message_point = int(request.form.get('mod_message_point', '1'))
+    mod_warn_point = int(request.form.get('mod_warn_point', '5'))
+    mod_kick_point = int(request.form.get('mod_kick_point', '10'))
+    mod_ban_point = int(request.form.get('mod_ban_point', '15'))
+    mod_timeout_point = int(request.form.get('mod_timeout_point', '4'))
+    mod_promo_threshold = int(request.form.get('mod_promo_threshold', '500'))
+    marketplace_tax = max(0, min(25, marketplace_tax))
+    vassal_max_percent = max(1, min(25, vassal_max_percent))
+    conn = get_db()
+    conn.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (int(guild_id),))
+    conn.execute('UPDATE guild_config SET marketplace_enabled = ?, marketplace_tax = ?, vassal_max_percent = ?, alliances_enabled = ?, mod_message_point = ?, mod_warn_point = ?, mod_kick_point = ?, mod_ban_point = ?, mod_timeout_point = ?, mod_promo_threshold = ? WHERE guild_id = ?', 
+                 (marketplace_enabled, marketplace_tax, vassal_max_percent, alliances_enabled, mod_message_point, mod_warn_point, mod_kick_point, mod_ban_point, mod_timeout_point, mod_promo_threshold, int(guild_id)))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/systems?success=1')
 
  
 
@@ -1912,4 +2432,5 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
