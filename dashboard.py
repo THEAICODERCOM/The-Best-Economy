@@ -258,6 +258,12 @@ def get_server_channels(guild_id):
     # Filter for text channels (type 0)
     return [ch for ch in channels if ch['type'] == 0]
 
+def get_server_emojis(guild_id):
+    headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
+    emojis = get_cached_api(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/emojis", headers, f"emojis_{guild_id}")
+    if emojis is None: return []
+    return emojis
+
 def get_bot_user_id():
     headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
     data = get_cached_api(f"{DISCORD_API_BASE_URL}/users/@me", headers, "bot_user")
@@ -1022,6 +1028,7 @@ def welcome_dashboard(guild_id):
     conn.close()
 
     channels = get_server_channels(guild_id)
+    emojis = get_server_emojis(guild_id)
     if channels is None: return redirect('/servers')
 
     def get_selected_channel_options(selected_id):
@@ -1050,6 +1057,9 @@ def welcome_dashboard(guild_id):
     f_desc = fobj.get("description", "")
     f_color = fobj.get("color", 15158332)
     f_footer = (fobj.get("footer", {}) or {}).get("text", "")
+
+    channel_select_options = ''.join([f'<option value="{c["name"]}">#{c["name"]}</option>' for c in channels])
+    emoji_select_options = ''.join([f'<option value="{e["name"]}">:{e["name"]}:</option>' for e in emojis])
 
     return f"""
     <html>
@@ -1105,7 +1115,18 @@ def welcome_dashboard(guild_id):
                                 <button type="button" class="btn" onclick="insertVar('welcome_description','{{server}}')">server</button>
                                 <button type="button" class="btn" onclick="wrapSelection('welcome_description','**')">Bold</button>
                                 <button type="button" class="btn" onclick="wrapSelection('welcome_description','*')">Italic</button>
+                                <select id="channelPick" style="margin-left:10px;">
+                                    <option value="">Insert channel…</option>
+                                    {channel_select_options}
+                                </select>
+                                <button type="button" class="btn" onclick="insertPickedChannel('welcome_description')">Insert</button>
+                                <select id="emojiPick" style="margin-left:10px;">
+                                    <option value="">Insert emoji…</option>
+                                    {emoji_select_options}
+                                </select>
+                                <button type="button" class="btn" onclick="insertPickedEmoji('welcome_description')">Insert</button>
                             </div>
+                            <div id="welcomeSuggest" style="margin-top:6px;"></div>
                         </div>
                         <div class="card">
                             <h2 class="card-title">Farewell Settings</h2>
@@ -1142,11 +1163,24 @@ def welcome_dashboard(guild_id):
                                 <button type="button" class="btn" onclick="insertVar('farewell_description','{{server}}')">server</button>
                                 <button type="button" class="btn" onclick="wrapSelection('farewell_description','**')">Bold</button>
                                 <button type="button" class="btn" onclick="wrapSelection('farewell_description','*')">Italic</button>
+                                <select id="channelPick2" style="margin-left:10px;">
+                                    <option value="">Insert channel…</option>
+                                    {channel_select_options}
+                                </select>
+                                <button type="button" class="btn" onclick="insertPickedChannel('farewell_description', true)">Insert</button>
+                                <select id="emojiPick2" style="margin-left:10px;">
+                                    <option value="">Insert emoji…</option>
+                                    {emoji_select_options}
+                                </select>
+                                <button type="button" class="btn" onclick="insertPickedEmoji('farewell_description', true)">Insert</button>
                             </div>
+                            <div id="farewellSuggest" style="margin-top:6px;"></div>
                         </div>
                         <button type="submit" class="btn">Save Welcome/Farewell</button>
                     </form>
                     <script>
+                        const channelsData = {json.dumps([{'name': c['name']} for c in channels])};
+                        const emojisData = {json.dumps([{'name': e['name'], 'id': e['id'], 'animated': bool(e.get('animated'))} for e in emojis])};
                         function hexToInt(hex) {{
                             try {{ return parseInt(hex.replace('#',''), 16); }} catch(e) {{ return 0x00d2ff; }}
                         }}
@@ -1160,6 +1194,19 @@ def welcome_dashboard(guild_id):
                                 '{{avatar}}': 'https://cdn.example/avatar.png'
                             }};
                             for (const k in sample) str = str.replaceAll(k, sample[k]);
+                            try {{
+                                str = str.replace(/#([A-Za-z0-9_\\-]+)/g, function(m, p) {{
+                                    const c = channelsData.find(x => x.name === p);
+                                    return c ? '<span style=\"background:#2f3136;color:#00d2ff;padding:0 4px;border-radius:3px;\">#' + p + '</span>' : m;
+                                }});
+                                str = str.replace(/:([A-Za-z0-9_\\-]+):/g, function(m, p) {{
+                                    const e = emojisData.find(x => x.name === p);
+                                    if (!e) return m;
+                                    const ext = e.animated ? 'gif' : 'png';
+                                    const url = 'https://cdn.discordapp.com/emojis/' + e.id + '.' + ext + '?size=24&quality=lossless';
+                                    return '<img src=\"' + url + '\" alt=\":' + p + ':\" style=\"height:1em;width:1em;vertical-align:-0.15em;\" />';
+                                }});
+                            }} catch(e) {{}}
                             return str;
                         }}
                         function renderPreview(prefix) {{
@@ -1187,12 +1234,73 @@ def welcome_dashboard(guild_id):
                             el.value = el.value.slice(0,start) + marker + sel + marker + el.value.slice(end);
                             el.dispatchEvent(new Event('input'));
                         }}
+                        function insertPickedChannel(field, second) {{
+                            const sel = document.getElementById(second ? 'channelPick2' : 'channelPick');
+                            const name = sel.value;
+                            if (!name) return;
+                            insertVar(field, '#' + name);
+                            sel.selectedIndex = 0;
+                        }}
+                        function insertPickedEmoji(field, second) {{
+                            const sel = document.getElementById(second ? 'emojiPick2' : 'emojiPick');
+                            const name = sel.value;
+                            if (!name) return;
+                            insertVar(field, ':' + name + ':');
+                            sel.selectedIndex = 0;
+                        }}
+                        function showSuggest(containerId, items, type, insertCb) {{
+                            const box = document.getElementById(containerId);
+                            if (!items.length) {{ box.innerHTML = ''; return; }}
+                            let html = '<div style=\"background:#111827;border:1px solid #1f2937;border-radius:6px;padding:6px;display:inline-block;max-width:100%;\">';
+                            items.slice(0,8).forEach(function(it) {{
+                                const label = type === 'channel' ? ('#' + it.name) : (':' + it.name + ':');
+                                html += '<button type=\"button\" style=\"margin:3px;padding:4px 8px;background:#1f2937;color:#e5e7eb;border:0;border-radius:4px;cursor:pointer;\" data-name=\"' + it.name + '\">' + label + '</button>';
+                            }});
+                            html += '</div>';
+                            box.innerHTML = html;
+                            box.querySelectorAll('button').forEach(function(btn) {{
+                                btn.addEventListener('click', function() {{
+                                    insertCb(btn.getAttribute('data-name'));
+                                    box.innerHTML = '';
+                                }});
+                            }});
+                        }}
+                        function caretToken(el) {{
+                            const val = el.value;
+                            const pos = el.selectionStart;
+                            const hash = val.lastIndexOf('#', pos-1);
+                            const colon = val.lastIndexOf(':', pos-1);
+                            let type = null, start = -1;
+                            if (hash >= 0 && (pos - hash) <= 32) {{ type = 'channel'; start = hash; }}
+                            if (colon >= 0 && (pos - colon) <= 32) {{ type = 'emoji'; start = colon; }}
+                            if (type === null) return null;
+                            const end = pos;
+                            const raw = val.slice(start, end);
+                            const name = raw.replace(/^#/, '').replace(/^:/,'').replace(/:$/,'');
+                            return {{ type, name }};
+                        }}
+                        function attachSuggest(field, containerId) {{
+                            const el = document.querySelector('textarea[name=\"' + field + '\"]');
+                            el.addEventListener('input', function() {{
+                                const tok = caretToken(el);
+                                if (!tok || !tok.name) {{ document.getElementById(containerId).innerHTML=''; return; }}
+                                if (tok.type === 'channel') {{
+                                    const list = channelsData.filter(x => x.name.toLowerCase().startsWith(tok.name.toLowerCase()));
+                                    showSuggest(containerId, list, 'channel', function(name) {{ insertVar(field, '#' + name); }});
+                                }} else {{
+                                    const list = emojisData.filter(x => x.name.toLowerCase().startsWith(tok.name.toLowerCase()));
+                                    showSuggest(containerId, list, 'emoji', function(name) {{ insertVar(field, ':' + name + ':'); }});
+                                }}
+                            }});
+                        }}
                         ['welcome','farewell'].forEach(function(p) {{
                             document.querySelectorAll('[name^=\"' + p + '_\"]').forEach(function(el) {{
                                 el.addEventListener('input', function() {{ renderPreview(p); }});
                             }});
                             renderPreview(p);
                         }});
+                        attachSuggest('welcome_description', 'welcomeSuggest');
+                        attachSuggest('farewell_description', 'farewellSuggest');
                     </script>
                 </div>
             </div>
@@ -1762,6 +1870,7 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
 
