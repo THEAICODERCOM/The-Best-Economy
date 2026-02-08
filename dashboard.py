@@ -5,6 +5,7 @@ import os
 import time
 import requests
 import urllib3
+import hashlib
 from dotenv import load_dotenv
 
 # Disable insecure request warnings for macOS SSL bypass
@@ -36,9 +37,14 @@ http_session = requests.Session()
 http_session.verify = False # Maintain user's preference for disabling SSL verification
 CACHE = {}
 CACHE_TTL = 300 # 5 minutes
+LAST_CACHE_PURGE = 0
 
 def get_cached_api(url, headers, cache_key):
+    global LAST_CACHE_PURGE, CACHE
     now = time.time()
+    if now - LAST_CACHE_PURGE > 86400:
+        CACHE = {}
+        LAST_CACHE_PURGE = now
     if cache_key in CACHE:
         data, expiry = CACHE[cache_key]
         if now < expiry:
@@ -55,6 +61,61 @@ def get_cached_api(url, headers, cache_key):
     except Exception as e:
         print(f"DEBUG: API Error ({url}): {e}")
         # Return stale data if available on error
+        if cache_key in CACHE:
+            return CACHE[cache_key][0]
+        return None
+
+def auto_cleanup_script():
+    return """
+    <script>
+    (function(){
+      try{
+        var key='nexus_last_clean';
+        var now=Date.now();
+        var last=parseInt(localStorage.getItem(key)||'0',10);
+        if(!last || (now-last)>86400000){
+          localStorage.clear();
+          sessionStorage.clear();
+          var parts=document.cookie.split(';');
+          for(var i=0;i<parts.length;i++){
+            var name=parts[i].split('=')[0].trim();
+            if(name){
+              document.cookie=name+'=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+            }
+          }
+          localStorage.setItem(key,String(now));
+        }
+      }catch(e){}
+    })();
+    </script>
+    """
+def get_user_guilds(access_token):
+    key = hashlib.sha256(access_token.encode()).hexdigest()[:16]
+    cache_key = f"user_guilds_{key}"
+    now = time.time()
+    if cache_key in CACHE:
+        data, expiry = CACHE[cache_key]
+        if now < expiry:
+            return data
+    headers = {'Authorization': f"Bearer {access_token}"}
+    url = f"{DISCORD_API_BASE_URL}/users/@me/guilds"
+    try:
+        r = http_session.get(url, headers=headers, timeout=10)
+        if r.status_code == 429:
+            retry_after = r.headers.get('Retry-After')
+            try:
+                wait_s = min(3, int(float(retry_after))) if retry_after else 1
+            except:
+                wait_s = 1
+            time.sleep(wait_s)
+            r = http_session.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        # Shorter TTL for user guilds
+        CACHE[cache_key] = (data, now + 120)
+        return data
+    except Exception as e:
+        print(f"DEBUG: User guilds fetch error: {e}")
         if cache_key in CACHE:
             return CACHE[cache_key][0]
         return None
@@ -384,6 +445,7 @@ def index():
         <title>Empire Nexus | Control Center</title>
         {STYLE}
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
+        {auto_cleanup_script()}
     </head>
     <body style="background-color: #0a0a0c !important; color: white !important;">
         <div class="navbar">
@@ -452,10 +514,9 @@ def servers():
         return redirect('/')
     
     try:
-        headers = {'Authorization': f"Bearer {session['access_token']}"}
-        r = requests.get(f"{DISCORD_API_BASE_URL}/users/@me/guilds", headers=headers, verify=False)
-        r.raise_for_status()
-        guilds = r.json()
+        guilds = get_user_guilds(session['access_token'])
+        if guilds is None:
+            return "Please wait a moment and refresh; Discord rate limit reached.", 429
         
         bot_guilds = get_bot_guilds()
     except Exception as e:
@@ -500,6 +561,7 @@ def servers():
             <title>Empire Nexus | Kingdoms</title>
             {STYLE}
             <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
+            {auto_cleanup_script()}
         </head>
         <body style="display: block; overflow-y: auto;">
             <div class="sidebar">
@@ -2438,3 +2500,4 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
