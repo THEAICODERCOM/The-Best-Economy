@@ -1,5162 +1,2444 @@
-import discord
-from discord.ext import commands, tasks
-from discord import app_commands
-import os
-import random
-import time
-import aiosqlite
+from flask import Flask, request, redirect, session
+import sqlite3
 import json
-import ssl
-import aiohttp
-import asyncio
+import os
+import time
+import requests
+import urllib3
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv(override=True)
-TOKEN = os.getenv('DISCORD_TOKEN')
+# Disable insecure request warnings for macOS SSL bypass
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# FIX: macOS SSL Certificate verification bug
-# This is the most aggressive way to bypass the macOS certificate issue
-try:
-    _create_unverified_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
-else:
-    ssl._create_default_https_context = _create_unverified_https_context
+load_dotenv()
 
-# Monkeypatch aiohttp to completely disable SSL verification for Discord
-orig_request = aiohttp.ClientSession._request
-async def new_request(self, method, url, *args, **kwargs):
-    kwargs['ssl'] = False
-    return await orig_request(self, method, url, *args, **kwargs)
-aiohttp.ClientSession._request = new_request
+app = Flask(__name__)
+app.secret_key = os.getenv('FLASK_SECRET', 'nexus-secret-key-123')
 
-orig_ws_connect = aiohttp.ClientSession.ws_connect
-async def new_ws_connect(self, url, *args, **kwargs):
-    kwargs['ssl'] = False
-    return await orig_ws_connect(self, url, *args, **kwargs)
-aiohttp.ClientSession.ws_connect = new_ws_connect
-
-# Database Setup
+# Configuration
 DB_FILE = 'empire_v2.db'
-TEST_GUILD_ID = 1465437620245889237
-SUPPORT_SERVER_INVITE = "BkCxVgJa"
-SUPPORT_GUILD_ID = None
-BOT_OWNERS = [1324354578338025533]
-
-# Default Assets
-DEFAULT_ASSETS = {
-    "lemonade_stand": {"name": "Lemonade Stand", "price": 500, "income": 5},
-    "gaming_pc": {"name": "Gaming PC", "price": 2500, "income": 30},
-    "coffee_shop": {"name": "Coffee Shop", "price": 10000, "income": 150},
-}
-
-DEFAULT_BANK_PLANS = {
-    "standard": {
-        "name": "Standard Vault",
-        "min": 0.01,
-        "max": 0.02,
-        "price": 0,
-        "min_level": 0
-    },
-    "saver": {
-        "name": "Saver Vault",
-        "min": 0.015,
-        "max": 0.025,
-        "price": 25000,
-        "min_level": 5
-    },
-    "royal": {
-        "name": "Royal Vault",
-        "min": 0.02,
-        "max": 0.03,
-        "price": 100000,
-        "min_level": 10
-    }
-}
-
-JOBS = {
-    "miner": {
-        "name": "Mine Overseer",
-        "difficulty": "Easy",
-        "min_level": 1,
-        "focus": "work",
-        "question": "Which command lets you supervise the mines for coins?",
-        "answer": "work",
-        "multiplier": 1.2
-    },
-    "enforcer": {
-        "name": "City Enforcer",
-        "difficulty": "Medium",
-        "min_level": 5,
-        "focus": "crime",
-        "question": "Which command do you use to attempt a high-risk heist?",
-        "answer": "crime",
-        "multiplier": 1.3
-    },
-    "croupier": {
-        "name": "Casino Croupier",
-        "difficulty": "Hard",
-        "min_level": 10,
-        "focus": "blackjack",
-        "question": "Which command starts a game of blackjack?",
-        "answer": "blackjack",
-        "multiplier": 1.4
-    }
-}
-
-DAILY_QUESTS = [
-    {"id": "daily_cmd_25", "description": "Use 25 commands today", "target": 25, "reward": 10000},
-    {"id": "daily_cmd_50", "description": "Use 50 commands today", "target": 50, "reward": 20000},
-    {"id": "daily_cmd_75", "description": "Use 75 commands today", "target": 75, "reward": 35000},
-    {"id": "daily_cmd_100", "description": "Use 100 commands today", "target": 100, "reward": 50000},
-    {"id": "daily_cmd_150", "description": "Use 150 commands today", "target": 150, "reward": 80000},
-    {"id": "daily_cmd_10", "description": "Use 10 commands today", "target": 10, "reward": 5000},
-    {"id": "daily_cmd_5", "description": "Use 5 commands today", "target": 5, "reward": 2000},
-    {"id": "daily_cmd_200", "description": "Use 200 commands today", "target": 200, "reward": 120000}
-]
-
-WEEKLY_QUESTS = [
-    {"id": "weekly_cmd_100", "description": "Use 100 commands this week", "target": 100, "reward": 40000},
-    {"id": "weekly_cmd_200", "description": "Use 200 commands this week", "target": 200, "reward": 90000},
-    {"id": "weekly_cmd_300", "description": "Use 300 commands this week", "target": 300, "reward": 140000},
-    {"id": "weekly_cmd_400", "description": "Use 400 commands this week", "target": 400, "reward": 190000},
-    {"id": "weekly_cmd_500", "description": "Use 500 commands this week", "target": 500, "reward": 250000},
-    {"id": "weekly_cmd_750", "description": "Use 750 commands this week", "target": 750, "reward": 375000},
-    {"id": "weekly_cmd_50", "description": "Use 50 commands this week", "target": 50, "reward": 25000},
-    {"id": "weekly_cmd_1000", "description": "Use 1000 commands this week", "target": 1000, "reward": 500000}
-]
-
-# Additional action-based quests
-DAILY_QUESTS += [
-    {"id": "daily_work_10", "description": "Work 10 times", "target": 10, "reward": 25000, "kind": "work"},
-    {"id": "daily_crime_3", "description": "Succeed 3 crimes", "target": 3, "reward": 30000, "kind": "crime_success"},
-    {"id": "daily_blackjack_3", "description": "Win 3 blackjack games", "target": 3, "reward": 35000, "kind": "blackjack_wins"},
-    {"id": "daily_rob_2", "description": "Successfully rob 2 users", "target": 2, "reward": 40000, "kind": "rob_success"}
-]
-WEEKLY_QUESTS += [
-    {"id": "weekly_work_50", "description": "Work 50 times", "target": 50, "reward": 150000, "kind": "work"},
-    {"id": "weekly_crime_15", "description": "Succeed 15 crimes", "target": 15, "reward": 200000, "kind": "crime_success"},
-    {"id": "weekly_blackjack_20", "description": "Win 20 blackjack games", "target": 20, "reward": 220000, "kind": "blackjack_wins"},
-    {"id": "weekly_rob_10", "description": "Successfully rob 10 users", "target": 10, "reward": 250000, "kind": "rob_success"}
-]
-
-# Blackjack Card Emojis
-CARD_EMOJIS = {
-    # 2s
-    ('2', '♣️'): '<:2_of_clubs:1464574130169839707>',
-    ('2', '♦️'): '<:2_of_diamonds:1464574132866777281>',
-    ('2', '♥️'): '<:2_of_hearts:1464574134620131442>',
-    ('2', '♠️'): '<:2_of_spades:1464574137111416874>',
-    # 3s
-    ('3', '♣️'): '<:3_of_clubs:1464574140265791692>',
-    ('3', '♦️'): '<:3_of_diamonds:1464574142643699765>',
-    ('3', '♥️'): '<:3_of_hearts:1464574145047036047>',
-    ('3', '♠️'): '<:3_of_spades:1464574147832184862>',
-    # 4s
-    ('4', '♣️'): '<:4_of_clubs:1464574149660901593>',
-    ('4', '♦️'): '<:4_of_diamonds:1464574151091159060>',
-    ('4', '♥️'): '<:4_of_hearts:1464574158389379244>',
-    ('4', '♠️'): '<:4_of_spades:1464574159949402299>',
-    # 5s
-    ('5', '♣️'): '<:5_of_clubs:1464574161404952576>',
-    ('5', '♦️'): '<:5_of_diamonds:1464574163497783391>',
-    ('5', '♥️'): '<:5_of_hearts:1464574165125169315>',
-    ('5', '♠️'): '<:5_of_spades:1464574166526066769>',
-    # 6s
-    ('6', '♣️'): '<:6_of_clubs:1464574168585474089>',
-    ('6', '♦️'): '<:6_of_diamonds:1464574171408502858>',
-    ('6', '♥️'): '<:6_of_hearts:1464574173438279770>',
-    ('6', '♠️'): '<:6_of_spades:1464574175678169214>',
-    # 7s
-    ('7', '♣️'): '<:7_of_clubs:1464574177712275466>',
-    ('7', '♦️'): '<:7_of_diamonds:1464574179063103621>',
-    ('7', '♥️'): '<:7_of_hearts:1464574180476321803>',
-    ('7', '♠️'): '<:7_of_spades:1464574181977882634>',
-    # 8s
-    ('8', '♣️'): '<:8_of_clubs:1464574183852867805>',
-    ('8', '♦️'): '<:8_of_diamonds:1464574185652359280>',
-    ('8', '♥️'): '<:8_of_hearts:1464574187308974177>',
-    ('8', '♠️'): '<:8_of_spades:1464574188848418982>',
-    # 9s
-    ('9', '♣️'): '<:9_of_clubs:1464574190639386736>',
-    ('9', '♦️'): '<:9_of_diamonds:1464574192333885565>',
-    ('9', '♥️'): '<:9_of_hearts:1464574193864540284>',
-    ('9', '♠️'): '<:9_of_spades:1464574195357843539>',
-    # 10s
-    ('10', '♣️'): '<:10_of_clubs:1464574196762804326>',
-    ('10', '♦️'): '<:10_of_diamonds:1464574198969143357>',
-    ('10', '♥️'): '<:10_of_hearts:1464574200218910877>',
-    ('10', '♠️'): '<:10_of_spades:1464574201661886506>',
-    # Aces
-    ('A', '♣️'): '<:ace_of_clubs:1464574202907459636>',
-    ('A', '♦️'): '<:ace_of_diamonds:1464574204895690926>',
-    ('A', '♥️'): '<:ace_of_hearts:1464574206368026769>',
-    ('A', '♠️'): '<:ace_of_spades:1464574208188092466>',
-    # Jacks
-    ('J', '♣️'): '<:w_jack_of_clubs:1464575453888249961>',
-    ('J', '♦️'): '<:w_jack_of_diamonds:1464575455305928788>',
-    ('J', '♥️'): '<:w_jack_of_hearts:1464575456937513104>',
-    ('J', '♠️'): '<:w_jack_of_spades:1464575460854993070>',
-    # Queens
-    ('Q', '♣️'): '<:w_queen_of_clubs:1464575475228872796>',
-    ('Q', '♦️'): '<:w_queen_of_diamonds:1464575477057454366>',
-    ('Q', '♥️'): '<:w_queen_of_hearts:1464575479779561636>',
-    ('Q', '♠️'): '<:w_queen_of_spades:1464575481235116088>',
-    # Kings
-    ('K', '♣️'): '<:w_king_of_clubs:1464575462763266142>',
-    ('K', '♦️'): '<:w_king_of_diamonds:1464575470875054259>',
-    ('K', '♥️'): '<:w_king_of_hearts:1464575472745582878>',
-    ('K', '♠️'): '<:w_king_of_spades:1464575473928634516>',
-    # Back
-    'back': '<:back:1464566298460553249>'
-}
-
-async def init_db():
-    async with aiosqlite.connect(DB_FILE, timeout=30) as db:
-        await db.execute('PRAGMA journal_mode=WAL')
-        await db.execute('''CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER, guild_id INTEGER, balance INTEGER DEFAULT 100,
-            bank INTEGER DEFAULT 0, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1,
-            prestige INTEGER DEFAULT 0, last_work INTEGER DEFAULT 0,
-            last_crime INTEGER DEFAULT 0, last_rob INTEGER DEFAULT 0,
-            last_vote INTEGER DEFAULT 0, auto_deposit INTEGER DEFAULT 0,
-            bank_plan TEXT DEFAULT 'standard',
-            daily_commands INTEGER DEFAULT 0, daily_reset INTEGER DEFAULT 0,
-            daily_reward_claimed INTEGER DEFAULT 0,
-            weekly_commands INTEGER DEFAULT 0, weekly_reset INTEGER DEFAULT 0,
-            weekly_reward_claimed INTEGER DEFAULT 0,
-            daily_quest_completed_json TEXT DEFAULT '{}',
-            weekly_quest_completed_json TEXT DEFAULT '{}',
-            daily_stats_json TEXT DEFAULT '{}',
-            weekly_stats_json TEXT DEFAULT '{}',
-            PRIMARY KEY (user_id, guild_id)
-        )''')
-        try:
-            await db.execute('ALTER TABLE users ADD COLUMN last_vote INTEGER DEFAULT 0')
-            await db.execute('ALTER TABLE users ADD COLUMN auto_deposit INTEGER DEFAULT 0')
-        except:
-            pass
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN bank_plan TEXT DEFAULT 'standard'")
-        except:
-            pass
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN daily_commands INTEGER DEFAULT 0")
-            await db.execute("ALTER TABLE users ADD COLUMN daily_reset INTEGER DEFAULT 0")
-            await db.execute("ALTER TABLE users ADD COLUMN daily_reward_claimed INTEGER DEFAULT 0")
-            await db.execute("ALTER TABLE users ADD COLUMN weekly_commands INTEGER DEFAULT 0")
-            await db.execute("ALTER TABLE users ADD COLUMN weekly_reset INTEGER DEFAULT 0")
-            await db.execute("ALTER TABLE users ADD COLUMN weekly_reward_claimed INTEGER DEFAULT 0")
-        except:
-            pass
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN daily_quest_completed_json TEXT DEFAULT '{}'")
-            await db.execute("ALTER TABLE users ADD COLUMN weekly_quest_completed_json TEXT DEFAULT '{}'")
-            await db.execute("ALTER TABLE users ADD COLUMN daily_stats_json TEXT DEFAULT '{}'")
-            await db.execute("ALTER TABLE users ADD COLUMN weekly_stats_json TEXT DEFAULT '{}'")
-        except:
-            pass
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN started INTEGER DEFAULT 0")
-        except:
-            pass
-            
-        await db.execute('''CREATE TABLE IF NOT EXISTS user_assets (
-            user_id INTEGER, guild_id INTEGER, asset_id TEXT, count INTEGER DEFAULT 0,
-            PRIMARY KEY (user_id, guild_id, asset_id)
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS marriages (
-            user_id INTEGER PRIMARY KEY,
-            partner_id INTEGER
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS guild_config (
-            guild_id INTEGER PRIMARY KEY, prefix TEXT DEFAULT '.',
-            role_shop_json TEXT DEFAULT '{}', custom_assets_json TEXT DEFAULT '{}',
-            bank_plans_json TEXT DEFAULT '{}'
-        )''')
-        try:
-            await db.execute("ALTER TABLE guild_config ADD COLUMN bank_plans_json TEXT DEFAULT '{}'")
-        except:
-            pass
-        await db.execute('''CREATE TABLE IF NOT EXISTS guild_wonder (
-            guild_id INTEGER PRIMARY KEY,
-            level INTEGER DEFAULT 0,
-            progress INTEGER DEFAULT 0,
-            goal INTEGER DEFAULT 50000,
-            boost_multiplier REAL DEFAULT 1.25,
-            boost_until INTEGER DEFAULT 0
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS user_jobs (
-            user_id INTEGER, guild_id INTEGER, job_id TEXT,
-            PRIMARY KEY (user_id, guild_id)
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS global_votes (
-            user_id INTEGER PRIMARY KEY, last_vote INTEGER DEFAULT 0
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS user_rewards (
-            user_id INTEGER PRIMARY KEY,
-            multipliers_json TEXT DEFAULT '{}',
-            titles_json TEXT DEFAULT '[]',
-            medals_json TEXT DEFAULT '[]'
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS title_templates (
-            title_name TEXT PRIMARY KEY,
-            description TEXT,
-            created_at INTEGER
-        )''')
-
-        # --- MODERATION & UTILITY TABLES ---
-        await db.execute('''CREATE TABLE IF NOT EXISTS warnings (
-            warn_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            guild_id INTEGER,
-            moderator_id INTEGER,
-            reason TEXT,
-            timestamp INTEGER,
-            expires_at INTEGER
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS automod_words (
-            word_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER,
-            word TEXT,
-            punishment TEXT DEFAULT 'warn'
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS logging_config (
-            guild_id INTEGER PRIMARY KEY,
-            message_log_channel INTEGER,
-            member_log_channel INTEGER,
-            join_log_channel INTEGER,
-            leave_log_channel INTEGER,
-            user_log_channel INTEGER,
-            server_log_channel INTEGER,
-            voice_log_channel INTEGER,
-            mod_log_channel INTEGER,
-            automod_log_channel INTEGER,
-            command_log_channel INTEGER
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS welcome_farewell (
-            guild_id INTEGER PRIMARY KEY,
-            welcome_channel INTEGER,
-            welcome_message TEXT,
-            welcome_embed_json TEXT,
-            farewell_channel INTEGER,
-            farewell_message TEXT,
-            farewell_embed_json TEXT
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS reaction_roles (
-            message_id INTEGER,
-            guild_id INTEGER,
-            emoji TEXT,
-            role_id INTEGER,
-            PRIMARY KEY (message_id, emoji)
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS custom_commands (
-            guild_id INTEGER,
-            name TEXT,
-            code TEXT,
-            prefix TEXT DEFAULT '.',
-            PRIMARY KEY (guild_id, name)
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS alliances (
-            alliance_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER,
-            name TEXT UNIQUE,
-            bank INTEGER DEFAULT 0,
-            owner_id INTEGER
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS alliance_members (
-            alliance_id INTEGER,
-            user_id INTEGER,
-            role TEXT DEFAULT 'member',
-            PRIMARY KEY (alliance_id, user_id)
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS vassals (
-            lord_id INTEGER,
-            vassal_id INTEGER,
-            guild_id INTEGER,
-            percent INTEGER DEFAULT 5,
-            PRIMARY KEY (lord_id, vassal_id, guild_id)
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS market_listings (
-            listing_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER,
-            seller_id INTEGER,
-            item TEXT,
-            price INTEGER,
-            quantity INTEGER DEFAULT 1,
-            created_at INTEGER
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS marriage_proposals (
-            proposer_id INTEGER,
-            target_id INTEGER,
-            guild_id INTEGER,
-            created_at INTEGER,
-            PRIMARY KEY (proposer_id, target_id, guild_id)
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS divorce_cases (
-            case_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER,
-            spouse1_id INTEGER,
-            spouse2_id INTEGER,
-            kids INTEGER DEFAULT 0,
-            questions_json TEXT,
-            answers1_json TEXT,
-            answers2_json TEXT,
-            status TEXT DEFAULT 'pending',
-            fines_json TEXT
-        )''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS mod_stats (
-            user_id INTEGER,
-            guild_id INTEGER,
-            messages INTEGER DEFAULT 0,
-            warns INTEGER DEFAULT 0,
-            bans INTEGER DEFAULT 0,
-            kicks INTEGER DEFAULT 0,
-            timeouts INTEGER DEFAULT 0,
-            points INTEGER DEFAULT 0,
-            PRIMARY KEY (user_id, guild_id)
-        )''')
-        await db.commit()
-
-async def migrate_db():
-    async with aiosqlite.connect(DB_FILE) as db:
-        # Columns to add to users table
-        columns = [
-            ("total_commands", "INTEGER DEFAULT 0"),
-            ("successful_robs", "INTEGER DEFAULT 0"),
-            ("successful_crimes", "INTEGER DEFAULT 0"),
-            ("passive_income", "REAL DEFAULT 0.0"),
-            ("blackjack_wins", "INTEGER DEFAULT 0"),
-            ("last_login", "INTEGER DEFAULT 0"),
-            ("login_streak", "INTEGER DEFAULT 0")
-        ]
-        for col_name, col_type in columns:
-            try:
-                await db.execute(f'ALTER TABLE users ADD COLUMN {col_name} {col_type}')
-            except:
-                pass
-        try:
-            await db.execute('ALTER TABLE logging_config ADD COLUMN join_log_channel INTEGER')
-        except:
-            pass
-        try:
-            await db.execute('ALTER TABLE logging_config ADD COLUMN leave_log_channel INTEGER')
-        except:
-            pass
-        try:
-            await db.execute('ALTER TABLE logging_config ADD COLUMN use_webhooks INTEGER DEFAULT 0')
-        except:
-            pass
-        try:
-            await db.execute("ALTER TABLE guild_config ADD COLUMN raid_mode INTEGER DEFAULT 0")
-        except:
-            pass
-        try:
-            await db.execute("ALTER TABLE guild_config ADD COLUMN anti_phish_enabled INTEGER DEFAULT 1")
-        except:
-            pass
-        try:
-            await db.execute("ALTER TABLE guild_config ADD COLUMN marketplace_enabled INTEGER DEFAULT 1")
-        except:
-            pass
-        try:
-            await db.execute("ALTER TABLE guild_config ADD COLUMN marketplace_tax INTEGER DEFAULT 0")
-        except:
-            pass
-        try:
-            await db.execute("ALTER TABLE guild_config ADD COLUMN vassal_max_percent INTEGER DEFAULT 15")
-        except:
-            pass
-        try:
-            await db.execute("ALTER TABLE guild_config ADD COLUMN alliances_enabled INTEGER DEFAULT 1")
-        except:
-            pass
-        try:
-            await db.execute("ALTER TABLE marriages ADD COLUMN kids INTEGER DEFAULT 0")
-        except:
-            pass
-        try:
-            await db.execute('''CREATE TABLE IF NOT EXISTS owner_access (
-                guild_id INTEGER,
-                user_id INTEGER,
-                PRIMARY KEY (guild_id, user_id)
-            )''')
-        except:
-            pass
-        await db.commit()
-
-# Bot setup
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-
-# Cache for guild prefixes to optimize performance
-PREFIX_CACHE = {}
-
-async def get_prefix(bot, message):
-    if not message.guild: return '.'
-    guild_id = message.guild.id
-    if guild_id in PREFIX_CACHE:
-        return PREFIX_CACHE[guild_id]
-    
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT prefix FROM guild_config WHERE guild_id = ?', (guild_id,)) as cursor:
-            row = await cursor.fetchone()
-            prefix = row[0] if row else '.'
-            PREFIX_CACHE[guild_id] = prefix
-            return prefix
-intents.members = True
-intents.message_content = True 
-bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None)
-
-# Debug: Check if token is loaded
-if not TOKEN:
-    print("CRITICAL: DISCORD_TOKEN not found in .env file!")
-else:
-    TOKEN = TOKEN.strip()
-
-# --- Database Helpers ---
-async def ensure_rewards(user_id):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR IGNORE INTO user_rewards (user_id) VALUES (?)', (user_id,))
-        await db.commit()
-
-async def get_user_multipliers(user_id):
-    await ensure_rewards(user_id)
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT multipliers_json FROM user_rewards WHERE user_id = ?', (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                return json.loads(row[0])
-    return {}
-
-async def get_total_multiplier(user_id):
-    multipliers = await get_user_multipliers(user_id)
-    total = 1.0
-    for m in multipliers.values():
-        total += (m - 1.0)
-    return max(1.0, total)
-
-async def ensure_user(user_id, guild_id):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR IGNORE INTO users (user_id, guild_id) VALUES (?, ?)', (user_id, guild_id))
-        await db.commit()
-
-async def ensure_global_user(user_id):
-    await ensure_user(user_id, 0)
-
-async def get_global_money(user_id):
-    await ensure_global_user(user_id)
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT user_id, guild_id, balance, bank, bank_plan, last_work, last_crime, last_rob FROM users WHERE user_id = ? AND guild_id = 0', (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                return row
-        async with db.execute('SELECT COALESCE(SUM(balance),0), COALESCE(SUM(bank),0) FROM users WHERE user_id = ?', (user_id,)) as cursor:
-            agg = await cursor.fetchone()
-        balance_sum = int((agg[0] or 0))
-        bank_sum = int((agg[1] or 0))
-        await db.execute('INSERT OR REPLACE INTO users (user_id, guild_id, balance, bank, bank_plan) VALUES (?, 0, ?, ?, ?)', (user_id, balance_sum, bank_sum, 'standard'))
-        await db.commit()
-    async with aiosqlite.connect(DB_FILE) as db2:
-        db2.row_factory = aiosqlite.Row
-        async with db2.execute('SELECT user_id, guild_id, balance, bank, bank_plan, last_work, last_crime, last_rob FROM users WHERE user_id = ? AND guild_id = 0', (user_id,)) as cursor2:
-            return await cursor2.fetchone()
-
-async def update_global_balance(user_id, delta):
-    await ensure_global_user(user_id)
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = MAX(0, balance + ?) WHERE user_id = ? AND guild_id = 0', (int(delta), user_id))
-        await db.commit()
-
-async def move_global_wallet_to_bank(user_id, amount):
-    await ensure_global_user(user_id)
-    amt = int(amount)
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = MAX(0, balance - ?), bank = bank + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
-        await db.commit()
-
-async def move_global_bank_to_wallet(user_id, amount):
-    await ensure_global_user(user_id)
-    amt = int(amount)
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET bank = MAX(0, bank - ?), balance = balance + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
-        await db.commit()
-
-async def has_owner_access(guild_id, user_id):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT 1 FROM owner_access WHERE guild_id = ? AND user_id = ?', (guild_id, user_id)) as c:
-            return (await c.fetchone()) is not None
-
-def is_guild_owner_only():
-    async def predicate(ctx):
-        return ctx.guild and ctx.author.id == ctx.guild.owner_id
-    return commands.check(predicate)
-
-def is_owner_or_delegate():
-    async def predicate(ctx):
-        if not ctx.guild:
-            return False
-        if ctx.author.id == ctx.guild.owner_id:
-            return True
-        return await has_owner_access(ctx.guild.id, ctx.author.id)
-    return commands.check(predicate)
-async def add_xp(user_id, guild_id, amount):
-    await ensure_user(user_id, guild_id)
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET xp = xp + ? WHERE user_id = ? AND guild_id = ?', (amount, user_id, guild_id))
-        await db.commit()
-        
-        # Check for level up
-        async with db.execute('SELECT xp, level FROM users WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                current_xp, current_level = row
-                next_level_xp = current_level * 100
-                if current_xp >= next_level_xp:
-                    new_level = current_level + 1
-                    await db.execute('UPDATE users SET level = ?, xp = xp - ? WHERE user_id = ? AND guild_id = ?', 
-                                    (new_level, next_level_xp, user_id, guild_id))
-                    await db.commit()
-                    return True, new_level
-    return False, None
-
-async def get_user_data(user_id, guild_id):
-    await ensure_user(user_id, guild_id)
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        # Get last_vote from global_votes table (preferred), fallback to user-specific last_vote
-        # Use CASE to properly compare and select the maximum timestamp
-        async with db.execute('''
-            SELECT u.*, 
-                   CASE 
-                       WHEN COALESCE(gv.last_vote, 0) > COALESCE(u.last_vote, 0) 
-                       THEN gv.last_vote 
-                       ELSE COALESCE(u.last_vote, 0) 
-                   END as last_vote
-            FROM users u
-            LEFT JOIN global_votes gv ON u.user_id = gv.user_id
-            WHERE u.user_id = ? AND u.guild_id = ?
-        ''', (user_id, guild_id)) as cursor:
-            row = await cursor.fetchone()
-            return row
-
-# --- MODERATION HELPERS ---
-
-async def log_embed(guild, config_key, embed):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute(f'SELECT {config_key} FROM logging_config WHERE guild_id = ?', (guild.id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                channel_id = row[0]
-                try:
-                    channel_id = int(channel_id)
-                except:
-                    pass
-                channel = guild.get_channel(channel_id)
-                if channel:
-                    try:
-                        await channel.send(embed=apply_theme(embed))
-                    except:
-                        pass
-
-async def _find_actor(guild: discord.Guild, action: discord.AuditLogAction, target_id: int):
-    user = None
-    reason = None
-    try:
-        await asyncio.sleep(1)
-        async for entry in guild.audit_logs(limit=6, action=action):
-            tgt = entry.target
-            if hasattr(tgt, "id") and tgt.id == target_id:
-                user = entry.user
-                reason = entry.reason
-                break
-    except:
-        pass
-    return user, reason
-
-@bot.event
-async def on_message_delete(message):
-    if not message.guild or message.author.bot:
-        return
-    embed = discord.Embed(title="🗑️ Message Deleted", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
-    embed.add_field(name="Author", value=f"{message.author.mention} ({message.author.id})", inline=True)
-    embed.add_field(name="Channel", value=message.channel.mention, inline=True)
-    embed.add_field(name="Message ID", value=str(message.id), inline=True)
-    embed.add_field(name="Content", value=message.content[:1024] or "*No content*", inline=False)
-    await log_embed(message.guild, "message_log_channel", embed)
-
-@bot.event
-async def on_message_edit(before, after):
-    if not before.guild or before.author.bot or before.content == after.content:
-        return
-    embed = discord.Embed(title="📝 Message Edited", color=discord.Color.blue(), timestamp=after.edited_at or discord.utils.utcnow())
-    embed.add_field(name="Author", value=f"{before.author.mention} ({before.author.id})", inline=True)
-    embed.add_field(name="Channel", value=before.channel.mention, inline=True)
-    embed.add_field(name="Message ID", value=str(before.id), inline=True)
-    embed.add_field(name="Before", value=before.content[:1024] or "*No content*", inline=False)
-    embed.add_field(name="After", value=after.content[:1024] or "*No content*", inline=False)
-    await log_embed(before.guild, "message_log_channel", embed)
-
-@bot.event
-async def on_member_join(member):
-    # Log the event
-    embed_log = discord.Embed(title="📥 Member Joined", color=discord.Color.green(), timestamp=discord.utils.utcnow())
-    embed_log.add_field(name="User", value=f"{member.mention} ({member.id})", inline=True)
-    embed_log.add_field(name="Account Created", value=member.created_at.strftime("%b %d, %Y"), inline=True)
-    embed_log.set_thumbnail(url=member.display_avatar.url)
-    await log_embed(member.guild, "join_log_channel", embed_log)
-
-    # Welcome system (embed-only)
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT welcome_channel, welcome_embed_json FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
-            row = await cursor.fetchone()
-    
-    if row and row['welcome_channel']:
-        channel = member.guild.get_channel(int(row['welcome_channel']))
-        if not channel:
-            try: channel = await member.guild.fetch_channel(int(row['welcome_channel']))
-            except: pass
-            
-        if channel:
-            embed_json = row['welcome_embed_json']
-            placeholders = {
-                "{user}": member.mention,
-                "{username}": member.name,
-                "{server}": member.guild.name,
-                "{member_count}": str(member.guild.member_count),
-                "{avatar}": member.display_avatar.url,
-                "{join_date}": member.joined_at.strftime("%b %d, %Y")
-            }
-            embed = None
-            if embed_json:
-                try:
-                    data = json.loads(embed_json)
-                    def replace_in_dict(d):
-                        if isinstance(d, str):
-                            for key, val in placeholders.items():
-                                d = d.replace(key, val)
-                            return d
-                        if isinstance(d, dict):
-                            return {k: replace_in_dict(v) for k, v in d.items()}
-                        if isinstance(d, list):
-                            return [replace_in_dict(i) for i in d]
-                        return d
-                    data = replace_in_dict(data)
-                    embed = discord.Embed.from_dict(data)
-                except:
-                    pass
-            if embed is None:
-                embed = discord.Embed(
-                    title=f"👋 Welcome {member.name}",
-                    description=f"Glad to have you in {member.guild.name}! You are member #{member.guild.member_count}.",
-                    color=0x00d2ff,
-                    timestamp=discord.utils.utcnow()
-                )
-            if member.display_avatar:
-                try:
-                    embed.set_thumbnail(url=member.display_avatar.url)
-                except:
-                    pass
-            class WelcomeView(discord.ui.View):
-                def __init__(self):
-                    super().__init__(timeout=None)
-                @discord.ui.button(label="Say Hi 👋", style=discord.ButtonStyle.primary, custom_id="welcome_hi")
-                async def hi(self, interaction: discord.Interaction, button: discord.ui.Button):
-                    await interaction.response.send_message(f"Welcome {member.mention}!", ephemeral=True)
-            try:
-                await channel.send(embed=embed, view=WelcomeView())
-            except:
-                pass
-
-@bot.event
-async def on_member_remove(member):
-    # Log the event
-    embed_log = discord.Embed(title="📤 Member Left", color=discord.Color.red(), timestamp=discord.utils.utcnow())
-    embed_log.add_field(name="User", value=f"{member.mention} ({member.id})", inline=True)
-    embed_log.set_thumbnail(url=member.display_avatar.url)
-    await log_embed(member.guild, "leave_log_channel", embed_log)
-
-    # Farewell system
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT farewell_channel, farewell_message FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
-            row = await cursor.fetchone()
-    
-    if row and row['farewell_channel']:
-        channel = member.guild.get_channel(int(row['farewell_channel']))
-        if not channel:
-            try: channel = await member.guild.fetch_channel(int(row['farewell_channel']))
-            except: pass
-            
-        if channel:
-            msg = row['farewell_message'] or "Goodbye {user}!"
-            msg = msg.replace("{user}", member.name).replace("{guild}", member.guild.name)
-            try:
-                await channel.send(msg)
-            except:
-                pass
-    embed_log.add_field(name="Account Created", value=member.created_at.strftime("%b %d, %Y"), inline=True)
-    embed_log.set_thumbnail(url=member.display_avatar.url)
-    await log_embed(member.guild, "leave_log_channel", embed_log)
-
-    # Welcome system
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT * FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
-            config = await cursor.fetchone()
-    
-    if not config or not config['welcome_channel']:
-        return
-        
-    channel = member.guild.get_channel(config['welcome_channel'])
-    if not channel:
-        try: channel = await member.guild.fetch_channel(config['welcome_channel'])
-        except: return
-
-    message = config['welcome_message'] or "Welcome {user} to {server}!"
-    embed_json = config['welcome_embed_json']
-    
-    # Replace placeholders
-    placeholders = {
-        "{user}": member.mention,
-        "{username}": member.name,
-        "{server}": member.guild.name,
-        "{member_count}": str(member.guild.member_count),
-        "{avatar}": member.display_avatar.url,
-        "{join_date}": member.joined_at.strftime("%b %d, %Y")
-    }
-    
-    final_message = message
-    for key, val in placeholders.items():
-        final_message = final_message.replace(key, val)
-
-    embed = None
-    if embed_json:
-        try:
-            data = json.loads(embed_json)
-            # Placeholder replacement in embed data
-            def replace_in_dict(d):
-                if isinstance(d, str):
-                    for key, val in placeholders.items():
-                        d = d.replace(key, val)
-                    return d
-                if isinstance(d, dict):
-                    return {k: replace_in_dict(v) for k, v in d.items()}
-                if isinstance(d, list):
-                    return [replace_in_dict(i) for i in d]
-                return d
-            
-            data = replace_in_dict(data)
-            embed = discord.Embed.from_dict(data)
-        except:
-            pass
-
-    # Create Button View if needed (example: a button that shows server info or a welcome message)
-    class WelcomeView(discord.ui.View):
-        def __init__(self):
-            super().__init__(timeout=None)
-            
-        @discord.ui.button(label="Server Info", style=discord.ButtonStyle.primary, custom_id="welcome_server_info")
-        async def server_info(self, interaction: discord.Interaction, button: discord.ui.Button):
-            guild = interaction.guild
-            embed = discord.Embed(title=f"🏰 {guild.name} Info", color=0x00d2ff)
-            embed.add_field(name="Members", value=str(guild.member_count))
-            embed.add_field(name="Owner", value=guild.owner.mention)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    await channel.send(content=final_message, embed=embed, view=WelcomeView())
-
-@bot.event
-async def on_member_remove(member):
-    # Log the event
-    embed_log = discord.Embed(title="📤 Member Left", color=discord.Color.red(), timestamp=discord.utils.utcnow())
-    embed_log.add_field(name="User", value=f"{member} ({member.id})", inline=True)
-    embed_log.set_thumbnail(url=member.display_avatar.url)
-    await log_embed(member.guild, "leave_log_channel", embed_log)
-
-    # Farewell system
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT * FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
-            config = await cursor.fetchone()
-    
-    if not config or not config['farewell_channel']:
-        return
-        
-    channel = member.guild.get_channel(config['farewell_channel'])
-    if not channel:
-        try: channel = await member.guild.fetch_channel(config['farewell_channel'])
-        except: return
-
-    message = config['farewell_message'] or "{user} has left the server."
-    farewell_message = message.replace("{user}", str(member)).replace("{server}", member.guild.name)
-    
-    await channel.send(farewell_message)
-
-@bot.event
-async def on_guild_channel_create(channel):
-    embed = discord.Embed(title="📁 Channel Created", color=discord.Color.green(), timestamp=discord.utils.utcnow())
-    embed.add_field(name="Name", value=channel.name, inline=True)
-    embed.add_field(name="Type", value=str(channel.type), inline=True)
-    embed.add_field(name="Category", value=channel.category.name if channel.category else "None", inline=True)
-    await log_embed(channel.guild, "server_log_channel", embed)
-
-@bot.event
-async def on_guild_channel_delete(channel):
-    embed = discord.Embed(title="📁 Channel Deleted", color=discord.Color.red(), timestamp=discord.utils.utcnow())
-    embed.add_field(name="Name", value=channel.name, inline=True)
-    embed.add_field(name="Type", value=str(channel.type), inline=True)
-    await log_embed(channel.guild, "server_log_channel", embed)
-
-async def log_mod_action(guild, action, target, moderator, reason, duration=None):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT mod_log_channel FROM logging_config WHERE guild_id = ?', (guild.id,)) as cursor:
-            row = await cursor.fetchone()
-            if not row or not row[0]:
-                return
-            channel_id = row[0]
-            channel = guild.get_channel(channel_id)
-            if not channel:
-                # Try to fetch if not in cache
-                try:
-                    channel = await guild.fetch_channel(channel_id)
-                except:
-                    return
-
-            embed = discord.Embed(title=f"Moderation Action: {action}", color=discord.Color.red())
-            embed.add_field(name="Target", value=f"{target} ({target.id})", inline=False)
-            embed.add_field(name="Moderator", value=f"{moderator} ({moderator.id})", inline=False)
-            embed.add_field(name="Reason", value=reason, inline=False)
-            if duration:
-                embed.add_field(name="Duration", value=duration, inline=False)
-            embed.timestamp = discord.utils.utcnow()
-            
-            # Retry mechanism
-            for attempt in range(3):
-                try:
-                    await channel.send(embed=embed)
-                    break
-                except discord.HTTPException as e:
-                    if attempt == 2:
-                        print(f"Failed to send mod log to {channel_id} after 3 attempts: {e}")
-                    await asyncio.sleep(1 * (attempt + 1))
-                except Exception as e:
-                    print(f"Error logging mod action: {e}")
-                    break
-
-async def log_embed(guild, column, embed):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute(f'SELECT {column}, use_webhooks FROM logging_config WHERE guild_id = ?', (guild.id,)) as cursor:
-            row = await cursor.fetchone()
-            if not row or not row[0]:
-                return
-            try:
-                channel_id = int(row[0])
-            except Exception:
-                channel_id = row[0]
-
-            channel = guild.get_channel(channel_id)
-            if not channel:
-                try:
-                    channel = await guild.fetch_channel(channel_id)
-                except:
-                    return
-
-            use_webhooks = 0
-            try:
-                use_webhooks = int(row[1] or 0)
-            except:
-                use_webhooks = 0
-
-            if channel and use_webhooks == 1:
-                try:
-                    whs = await channel.webhooks()
-                    wh = whs[0] if whs else None
-                    if not wh:
-                        wh = await channel.create_webhook(name="EmpireNexus Logs")
-                    await wh.send(embed=embed, username=guild.me.display_name if guild.me else "EmpireNexus", avatar_url=guild.me.display_avatar.url if guild.me else None)
-                    return
-                except:
-                    pass
-
-            for attempt in range(3):
-                try:
-                    await channel.send(embed=embed)
-                    break
-                except discord.HTTPException as e:
-                    if attempt == 2:
-                        print(f"Failed to send log to {channel_id} ({column}) after 3 attempts: {e}")
-                    await asyncio.sleep(1 * (attempt + 1))
-                except Exception as e:
-                    print(f"Error logging embed ({column}): {e}")
-                    break
-
-def parse_duration(duration_str):
-    if not duration_str:
-        return None
-    
-    total_seconds = 0
-    import re
-    matches = re.findall(r'(\d+)([smhd])', duration_str.lower())
-    if not matches:
-        return None
-    
-    for amount, unit in matches:
-        amount = int(amount)
-        if unit == 's': total_seconds += amount
-        elif unit == 'm': total_seconds += amount * 60
-        elif unit == 'h': total_seconds += amount * 3600
-        elif unit == 'd': total_seconds += amount * 86400
-    
-    return total_seconds
-
-def can_act_on(actor: discord.Member, target: discord.Member) -> bool:
-    if actor.guild.owner_id == actor.id:
-        return True
-    if actor.id == target.id:
-        return False
-    try:
-        return actor.top_role > target.top_role
-    except:
-        return False
-
-# --- MODERATION COMMANDS ---
-
-@bot.hybrid_command(name="kick", description="Remove a member from the server")
-@commands.has_permissions(kick_members=True)
-@app_commands.describe(member="The member to kick", reason="Reason for kicking", duration="Optional time (e.g. 1h, 1d) - will be logged")
-async def kick(ctx: commands.Context, member: discord.Member, reason: str = "No reason provided", duration: str = None):
-    if not can_act_on(ctx.author, member):
-        return await ctx.send("❌ You cannot kick someone with a higher or equal role!")
-    
-    try:
-        await member.kick(reason=reason)
-        await ctx.send(f"✅ **{member.display_name}** has been kicked. Reason: {reason}")
-        await log_mod_action(ctx.guild, "Kick", member, ctx.author, reason, duration)
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to kick this member.")
-
-@bot.hybrid_command(name="ban", description="Ban a member from the server")
-@commands.has_permissions(ban_members=True)
-@app_commands.describe(member="The member to ban", reason="Reason for banning", duration="Duration (e.g. 1h, 1d)")
-async def ban(ctx: commands.Context, member: discord.Member, reason: str = "No reason provided", duration: str = None):
-    if not can_act_on(ctx.author, member):
-        return await ctx.send("❌ You cannot ban someone with a higher or equal role!")
-
-    seconds = parse_duration(duration)
-    
-    try:
-        await member.ban(reason=reason)
-        await ctx.send(f"✅ **{member.display_name}** has been banned. Reason: {reason}" + (f" for {duration}" if duration else ""))
-        await log_mod_action(ctx.guild, "Ban", member, ctx.author, reason, duration)
-        
-        if seconds:
-            # We would need a background task to unban, but for now we'll just log it.
-            # In a real production bot, you'd store this in DB and have a loop.
-            pass
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to ban this member.")
-
-@bot.hybrid_command(name="warn", description="Issue a warning to a member")
-@commands.has_permissions(kick_members=True)
-@app_commands.describe(member="The member to warn", reason="Reason for warning", duration="Expiration time (e.g. 1d, 30d)")
-async def warn(ctx: commands.Context, member: discord.Member, reason: str = "No reason provided", duration: str = None):
-    if not can_act_on(ctx.author, member):
-        return await ctx.send("❌ You cannot warn someone with a higher or equal role!")
-
-    seconds = parse_duration(duration)
-    expires_at = int(time.time() + seconds) if seconds else None
-    
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('''
-            INSERT INTO warnings (user_id, guild_id, moderator_id, reason, timestamp, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (member.id, ctx.guild.id, ctx.author.id, reason, int(time.time()), expires_at))
-        await db.commit()
-    
-    await ctx.send(f"⚠️ **{member.display_name}** has been warned. Reason: {reason}")
-    await log_mod_action(ctx.guild, "Warning", member, ctx.author, reason, duration)
-
-@bot.hybrid_command(name="clearwarnings", description="Clears all warnings of a user")
-@commands.has_permissions(kick_members=True)
-@app_commands.describe(user="The user to clear warnings for")
-async def clearwarnings_standalone(ctx: commands.Context, user: discord.User):
-    target_member = ctx.guild.get_member(user.id)
-    if target_member and not can_act_on(ctx.author, target_member):
-        return await ctx.send("❌ You cannot modify warnings for someone with a higher or equal role!")
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('DELETE FROM warnings WHERE user_id = ? AND guild_id = ?', (user.id, ctx.guild.id))
-        await db.commit()
-    
-    await ctx.send(f"✅ Cleared all warnings for **{user.display_name}**.")
-    await log_mod_action(ctx.guild, "Clear Warnings", user, ctx.author, "All warnings cleared")
-
-@bot.hybrid_command(name="delwarn", description="Delete a specific warning by ID")
-@commands.has_permissions(kick_members=True)
-@app_commands.describe(id="The ID of the warning to remove")
-async def delwarn_standalone(ctx: commands.Context, id: int):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT user_id FROM warnings WHERE warn_id = ? AND guild_id = ?', (id, ctx.guild.id)) as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                return await ctx.send(f"❌ Warning ID `{id}` not found in this server.")
-            
-            user_id = row[0]
-            target_member = ctx.guild.get_member(user_id)
-            if target_member and not can_act_on(ctx.author, target_member):
-                return await ctx.send("❌ You cannot modify warnings for someone with a higher or equal role!")
-            await db.execute('DELETE FROM warnings WHERE warn_id = ?', (id,))
-            await db.commit()
-    
-    user = bot.get_user(user_id) or f"User ({user_id})"
-    await ctx.send(f"✅ Removed warning `{id}` from **{user}**.")
-    await log_mod_action(ctx.guild, "Remove Warning", user, ctx.author, f"Warning ID {id} removed")
-
-@bot.hybrid_group(name="warnings", description="Display warning history for a user")
-async def warnings_group(ctx: commands.Context, user: discord.User):
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT * FROM warnings WHERE user_id = ? AND guild_id = ? ORDER BY timestamp DESC', (user.id, ctx.guild.id)) as cursor:
-            rows = await cursor.fetchall()
-    
-    if not rows:
-        return await ctx.send(f"✅ {user.display_name} has no warnings.")
-    
-    embed = discord.Embed(title=f"Warnings for {user.display_name}", color=discord.Color.orange())
-    for row in rows:
-        moderator = ctx.guild.get_member(row['moderator_id']) or f"Unknown ({row['moderator_id']})"
-        expiry = f"\nExpires: <t:{row['expires_at']}:R>" if row['expires_at'] else ""
-        embed.add_field(
-            name=f"ID: {row['warn_id']} | <t:{row['timestamp']}:R>",
-            value=f"**Reason:** {row['reason']}\n**Moderator:** {moderator}{expiry}",
-            inline=False
-        )
-    await ctx.send(embed=apply_theme(embed))
-
-@warnings_group.command(name="clear", description="Purge all warnings for a specified user")
-@commands.has_permissions(kick_members=True)
-async def clear_warnings(ctx: commands.Context, user: discord.User):
-    target_member = ctx.guild.get_member(user.id)
-    if target_member and not can_act_on(ctx.author, target_member):
-        return await ctx.send("❌ You cannot modify warnings for someone with a higher or equal role!")
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('DELETE FROM warnings WHERE user_id = ? AND guild_id = ?', (user.id, ctx.guild.id))
-        await db.commit()
-    
-    await ctx.send(f"✅ Cleared all warnings for **{user.display_name}**.")
-    await log_mod_action(ctx.guild, "Clear Warnings", user, ctx.author, "All warnings cleared")
-
-# --- Utility Moderation Commands ---
-
-@bot.hybrid_command(name="purge", description="Delete a number of messages from this channel")
-@commands.has_permissions(manage_messages=True)
-@app_commands.describe(count="Number of messages to delete (1-100)")
-async def purge(ctx: commands.Context, count: int):
-    if count < 1 or count > 100:
-        return await ctx.send("❌ Please provide a count between 1 and 100.")
-    try:
-        deleted = await ctx.channel.purge(limit=count, bulk=True)
-        await ctx.send(f"🧹 Deleted {len(deleted)} messages.", delete_after=5)
-        embed = discord.Embed(title="Bulk Message Delete", color=discord.Color.dark_red(), timestamp=discord.utils.utcnow())
-        embed.add_field(name="Channel", value=ctx.channel.mention, inline=False)
-        embed.add_field(name="Count", value=str(len(deleted)), inline=True)
-        embed.add_field(name="Actor", value=f"{ctx.author} ({ctx.author.id})", inline=False)
-        await log_embed(ctx.guild, "message_log_channel", embed)
-        await log_mod_action(ctx.guild, "Purge", ctx.channel, ctx.author, f"Deleted {len(deleted)} messages")
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to manage messages here.")
-    except Exception as e:
-        await ctx.send(f"❌ Error while purging: {e}")
-
-@bot.hybrid_command(name="setnick", description="Set a member's nickname")
-@commands.has_permissions(manage_nicknames=True)
-@app_commands.describe(member="Member to rename", nickname="New nickname")
-async def setnick(ctx: commands.Context, member: discord.Member, *, nickname: str):
-    if len(nickname) > 32:
-        return await ctx.send("❌ Nickname must be 32 characters or fewer.")
-    if not can_act_on(ctx.author, member):
-        return await ctx.send("❌ You cannot change the nickname of someone with a higher or equal role!")
-    try:
-        await member.edit(nick=nickname, reason=f"Set by {ctx.author}")
-        await ctx.send(f"✅ Changed nickname for **{member.display_name}** to **{nickname}**.")
-        await log_mod_action(ctx.guild, "Set Nickname", member, ctx.author, f"Nickname → {nickname}")
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to change that member's nickname.")
-    except Exception as e:
-        await ctx.send(f"❌ Error changing nickname: {e}")
-
-@bot.hybrid_command(name="timeout", description="Timeout a member for a duration")
-@commands.has_permissions(moderate_members=True)
-@app_commands.describe(member="Member to timeout", duration="e.g. 30m, 2h, 1d", reason="Reason")
-async def timeout(ctx: commands.Context, member: discord.Member, duration: str, *, reason: str = "No reason provided"):
-    if not can_act_on(ctx.author, member):
-        return await ctx.send("❌ You cannot timeout someone with a higher or equal role!")
-    seconds = parse_duration(duration)
-    if not seconds or seconds < 60:
-        return await ctx.send("❌ Duration must be at least 1 minute. Use formats like 30m, 2h, 1d.")
-    try:
-        from datetime import timedelta, datetime
-        try:
-            await member.timeout(timedelta(seconds=seconds), reason=reason)
-        except:
-            until = datetime.utcnow() + timedelta(seconds=seconds)
-            await member.edit(communication_disabled_until=until, reason=reason)
-        await ctx.send(f"⏳ Timed out **{member.display_name}** for **{duration}**. Reason: {reason}")
-        await log_mod_action(ctx.guild, "Timeout", member, ctx.author, reason, duration)
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to timeout that member.")
-    except Exception as e:
-        await ctx.send(f"❌ Error applying timeout: {e}")
-
-@bot.hybrid_command(name="removewarn", description="Delete a specific warning by ID")
-@commands.has_permissions(kick_members=True)
-@app_commands.describe(warn_id="The ID of the warning to remove")
-async def remove_warn(ctx: commands.Context, warn_id: int):
-    async with aiosqlite.connect(DB_FILE) as db:
-        # Check if warning exists and belongs to this guild
-        async with db.execute('SELECT user_id FROM warnings WHERE warn_id = ? AND guild_id = ?', (warn_id, ctx.guild.id)) as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                return await ctx.send(f"❌ Warning ID `{warn_id}` not found in this server.")
-            
-            user_id = row[0]
-            await db.execute('DELETE FROM warnings WHERE warn_id = ?', (warn_id,))
-            await db.commit()
-    
-    user = bot.get_user(user_id) or f"User ({user_id})"
-    await ctx.send(f"✅ Removed warning `{warn_id}` from **{user}**.")
-    await log_mod_action(ctx.guild, "Remove Warning", user, ctx.author, f"Warning ID {warn_id} removed")
-
-# --- DASHBOARD CONFIGURABLE FEATURES ---
-
-@bot.hybrid_group(name="set", description="Configure server settings")
-@commands.has_permissions(manage_guild=True)
-async def set_group(ctx: commands.Context):
-    if ctx.invoked_subcommand is None:
-        await ctx.send("❌ Use `/set welcome` or `/set farewell`.")
-
-@set_group.command(name="welcome", description="Configure welcome messages")
-@app_commands.describe(channel="Channel for welcome messages", message="Welcome message text (use {user} for mention)", embed_json="JSON for embed (optional)")
-async def set_welcome(ctx: commands.Context, channel: str, message: str, embed_json: str = None):
-    # Try to convert channel to int if it's an ID string from autocomplete
-    try:
-        if channel.isdigit():
-            channel_id = int(channel)
-        else:
-            channel_id = int(channel.replace("<#", "").replace(">", ""))
-        discord_channel = ctx.guild.get_channel(channel_id)
-    except:
-        return await ctx.send("❌ Invalid channel! Please select a channel from the autocomplete list or mention it.")
-
-    if not discord_channel:
-        return await ctx.send("❌ Channel not found!")
-
-    if embed_json:
-        try:
-            json.loads(embed_json)
-        except:
-            return await ctx.send("❌ Invalid JSON for embed! Please provide a valid JSON string.")
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('''
-            INSERT INTO welcome_farewell (guild_id, welcome_channel, welcome_message, welcome_embed_json)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET 
-                welcome_channel=excluded.welcome_channel, 
-                welcome_message=excluded.welcome_message,
-                welcome_embed_json=excluded.welcome_embed_json
-        ''', (ctx.guild.id, discord_channel.id, message, embed_json))
-        await db.commit()
-    
-    await ctx.send(f"✅ Welcome messages set to {discord_channel.mention}.\n**Message:** {message}" + ("\n**Embed:** Enabled" if embed_json else ""))
-
-@set_welcome.autocomplete("channel")
-async def welcome_channel_autocomplete(interaction: discord.Interaction, current: str):
-    channels = [c for c in interaction.guild.text_channels if current.lower() in c.name.lower()]
-    return [app_commands.Choice(name=c.name, value=str(c.id)) for c in channels[:25]]
-
-@set_group.command(name="welcome_preview", description="Preview your current welcome message configuration")
-async def welcome_preview(ctx: commands.Context):
-    # ... existing implementation ...
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT * FROM welcome_farewell WHERE guild_id = ?', (ctx.guild.id,)) as cursor:
-            config = await cursor.fetchone()
-    
-    if not config or not config['welcome_channel']:
-        return await ctx.send("❌ Welcome messages are not configured!")
-
-    member = ctx.author
-    message = config['welcome_message'] or "Welcome {user} to {server}!"
-    embed_json = config['welcome_embed_json']
-    
-    placeholders = {
-        "{user}": member.mention,
-        "{username}": member.name,
-        "{server}": ctx.guild.name,
-        "{member_count}": str(ctx.guild.member_count),
-        "{avatar}": member.display_avatar.url,
-        "{join_date}": member.joined_at.strftime("%b %d, %Y")
-    }
-    
-    final_message = message
-    for key, val in placeholders.items():
-        final_message = final_message.replace(key, val)
-
-    embed = None
-    if embed_json:
-        try:
-            data = json.loads(embed_json)
-            def replace_in_dict(d):
-                if isinstance(d, str):
-                    for key, val in placeholders.items():
-                        d = d.replace(key, val)
-                    return d
-                if isinstance(d, dict):
-                    return {k: replace_in_dict(v) for k, v in d.items()}
-                if isinstance(d, list):
-                    return [replace_in_dict(i) for i in d]
-                return d
-            data = replace_in_dict(data)
-            embed = discord.Embed.from_dict(data)
-        except Exception as e:
-            await ctx.send(f"⚠️ Error parsing embed JSON: {e}")
-
-    await ctx.send("👀 **Welcome Preview:**", content=final_message, embed=embed)
-
-@set_group.command(name="farewell", description="Configure farewell messages")
-@app_commands.describe(channel="Channel for farewell messages", message="Farewell message text (use {user} for name)")
-async def set_farewell(ctx: commands.Context, channel: str, *, message: str):
-    # Try to convert channel to int if it's an ID string from autocomplete
-    try:
-        if channel.isdigit():
-            channel_id = int(channel)
-        else:
-            channel_id = int(channel.replace("<#", "").replace(">", ""))
-        discord_channel = ctx.guild.get_channel(channel_id)
-    except:
-        return await ctx.send("❌ Invalid channel! Please select a channel from the autocomplete list or mention it.")
-
-    if not discord_channel:
-        return await ctx.send("❌ Channel not found!")
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('''
-            INSERT INTO welcome_farewell (guild_id, farewell_channel, farewell_message)
-            VALUES (?, ?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET farewell_channel=excluded.farewell_channel, farewell_message=excluded.farewell_message
-        ''', (ctx.guild.id, discord_channel.id, message))
-        await db.commit()
-    
-    await ctx.send(f"✅ Farewell messages set to {discord_channel.mention}.\n**Message:** {message}")
-
-@set_farewell.autocomplete("channel")
-async def farewell_channel_autocomplete(interaction: discord.Interaction, current: str):
-    channels = [c for c in interaction.guild.text_channels if current.lower() in c.name.lower()]
-    return [app_commands.Choice(name=c.name, value=str(c.id)) for c in channels[:25]]
-
-@bot.hybrid_command(name="setlogs", description="Configure logging channels")
-@commands.has_permissions(administrator=True)
-@app_commands.describe(category="Log category", channel="Channel to send logs to")
-@app_commands.choices(category=[
-    app_commands.Choice(name="Message Logs", value="message_log_channel"),
-    app_commands.Choice(name="Member Logs", value="member_log_channel"),
-    app_commands.Choice(name="Join Logs", value="join_log_channel"),
-    app_commands.Choice(name="Leave Logs", value="leave_log_channel"),
-    app_commands.Choice(name="Server Logs", value="server_log_channel"),
-    app_commands.Choice(name="Mod Logs", value="mod_log_channel"),
-    app_commands.Choice(name="Automod Logs", value="automod_log_channel")
-])
-async def set_logs(ctx: commands.Context, category: str, channel: str):
-    # Try to convert channel to int if it's an ID string from autocomplete
-    try:
-        if channel.isdigit():
-            channel_id = int(channel)
-        else:
-            channel_id = int(channel.replace("<#", "").replace(">", ""))
-        discord_channel = ctx.guild.get_channel(channel_id)
-    except:
-        return await ctx.send("❌ Invalid channel! Please select a channel from the autocomplete list or mention it.")
-
-    if not discord_channel:
-        return await ctx.send("❌ Channel not found!")
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute(f'''
-            INSERT INTO logging_config (guild_id, {category}) VALUES (?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET {category} = excluded.{category}
-        ''', (ctx.guild.id, discord_channel.id))
-        await db.commit()
-    await ctx.send(f"✅ Logging for **{category.replace('_', ' ').title()}** set to {discord_channel.mention}")
-
-@set_logs.autocomplete("channel")
-async def logs_channel_autocomplete(interaction: discord.Interaction, current: str):
-    channels = [c for c in interaction.guild.text_channels if current.lower() in c.name.lower()]
-    return [app_commands.Choice(name=c.name, value=str(c.id)) for c in channels[:25]]
-
-@bot.hybrid_group(name="automod", description="Manage automatic moderation")
-@commands.has_permissions(manage_guild=True)
-async def automod_group(ctx: commands.Context):
-    if ctx.invoked_subcommand is None:
-        await ctx.send("❌ Use `/automod add` or `/automod remove`.")
-
-@automod_group.command(name="add", description="Add a word to the filter")
-@app_commands.describe(word="The word to filter", punishment="Punishment (warn/kick/ban/delete)")
-async def automod_add(ctx: commands.Context, word: str, punishment: str = "warn"):
-    punishment = punishment.lower()
-    if punishment not in ['warn', 'kick', 'ban', 'delete']:
-        return await ctx.send("❌ Invalid punishment! Choose: `warn`, `kick`, `ban`, or `delete`.")
-    
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT INTO automod_words (guild_id, word, punishment) VALUES (?, ?, ?)', 
-                        (ctx.guild.id, word.lower(), punishment))
-        await db.commit()
-    
-    await ctx.send(f"✅ Added `{word}` to the word filter with punishment: **{punishment}**.")
-
-@automod_group.command(name="remove", description="Remove a word from the filter by ID")
-@app_commands.describe(word_id="The ID of the word to remove")
-async def automod_remove(ctx: commands.Context, word_id: int):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT word FROM automod_words WHERE word_id = ? AND guild_id = ?', (word_id, ctx.guild.id)) as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                return await ctx.send(f"❌ Word ID `{word_id}` not found.")
-            
-            word = row[0]
-            await db.execute('DELETE FROM automod_words WHERE word_id = ?', (word_id,))
-            await db.commit()
-    
-    await ctx.send(f"✅ Removed `{word}` from the word filter.")
-
-@bot.hybrid_command(name="reactionroles", description="Create a reaction role message")
-@commands.has_permissions(manage_roles=True)
-@app_commands.describe(message_id="The ID of the message to add reaction roles to", emoji="The emoji to use", role="The role to assign")
-async def reaction_roles(ctx: commands.Context, message_id: str, emoji: str, role: discord.Role):
-    try:
-        msg_id = int(message_id)
-        msg = await ctx.channel.fetch_message(msg_id)
-    except:
-        return await ctx.send("❌ Invalid message ID or message not found in this channel.")
-
-    try:
-        await msg.add_reaction(emoji)
-    except:
-        return await ctx.send("❌ I couldn't add that reaction. Make sure I have permission and it's a valid emoji.")
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR REPLACE INTO reaction_roles (message_id, guild_id, emoji, role_id) VALUES (?, ?, ?, ?)',
-                        (msg_id, ctx.guild.id, emoji, role.id))
-        await db.commit()
-    
-    await ctx.send(f"✅ Reaction role added! Users reacting with {emoji} to [that message]({msg.jump_url}) will get the **{role.name}** role.")
-
-@bot.event
-async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    if payload.guild_id is None or payload.user_id is None:
-        return
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
-    emoji_key = str(payload.emoji)
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT role_id FROM reaction_roles WHERE message_id = ? AND guild_id = ? AND emoji = ?', (payload.message_id, payload.guild_id, emoji_key)) as cursor:
-            row = await cursor.fetchone()
-    if not row:
-        return
-    role = guild.get_role(row[0])
-    if not role:
-        return
-    member = guild.get_member(payload.user_id)
-    if not member or member.bot:
-        return
-    try:
-        await member.add_roles(role, reason="Reaction Roles")
-    except:
-        pass
-
-@bot.event
-async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
-    if payload.guild_id is None or payload.user_id is None:
-        return
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
-    emoji_key = str(payload.emoji)
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT role_id FROM reaction_roles WHERE message_id = ? AND guild_id = ? AND emoji = ?', (payload.message_id, payload.guild_id, emoji_key)) as cursor:
-            row = await cursor.fetchone()
-    if not row:
-        return
-    role = guild.get_role(row[0])
-    if not role:
-        return
-    member = guild.get_member(payload.user_id)
-    if not member or member.bot:
-        return
-    try:
-        await member.remove_roles(role, reason="Reaction Roles")
-    except:
-        pass
-
-async def run_custom_command(code: str, message: discord.Message):
-    # Allow some common imports if they are at the very top, but better to provide them in globals
-    # We keep the check but relax it for known safe patterns if needed, 
-    # but for now let's just provide the libraries.
-    if "__" in code and "__cmd__" not in code: # Allow our internal func name
-        return False, "Disallowed code (contains __)."
-    
-    func_name = "__cmd__"
-    src = "async def " + func_name + "(message, bot):\n"
-    for line in code.splitlines():
-        # Strip potential imports from user code to avoid the 'import' check failure
-        if line.strip().startswith(("import discord", "import json", "import asyncio", "from discord")):
-            continue
-        src += "    " + line + "\n"
-    
-    sandbox_globals = {
-        "__builtins__": {
-            "len": len, "str": str, "int": int, "float": float, 
-            "min": min, "max": max, "range": range, "list": list, "dict": dict,
-            "sum": sum, "any": any, "all": all, "print": print
-        },
-        "discord": discord,
-        "json": json,
-        "asyncio": asyncio,
-        "time": time,
-        "random": random
-    }
-    sandbox_locals = {}
-    try:
-        exec(src, sandbox_globals, sandbox_locals)
-        fn = sandbox_locals.get(func_name)
-        if not fn:
-            return False, "Code error: function not defined."
-        await asyncio.wait_for(fn(message, bot), timeout=5.0)
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot or not message.guild:
-        return
-
-    content = message.content.lower()
-    prefix = await get_prefix(bot, message)
-    is_command = message.content.startswith(prefix)
-    
-    # --- AUTOMOD & CUSTOM COMMANDS (Optimized DB usage) ---
-    async with aiosqlite.connect(DB_FILE) as db:
-        # Check Automod
-        async with db.execute('SELECT word, punishment FROM automod_words WHERE guild_id = ?', (message.guild.id,)) as cursor:
-            rows = await cursor.fetchall()
-            for word, punishment in rows:
-                if word in content:
-                    if punishment == "delete":
-                        try: await message.delete()
-                        except: pass
-                    elif punishment == "warn":
-                        await db.execute('INSERT INTO warnings (user_id, guild_id, moderator_id, reason, timestamp) VALUES (?, ?, ?, ?, ?)', 
-                                         (message.author.id, message.guild.id, bot.user.id, f"AutoMod: {word}", int(time.time())))
-                        await db.commit()
-                        try: await message.delete()
-                        except: pass
-                    elif punishment == "kick":
-                        try: await message.author.kick(reason=f"AutoMod: {word}")
-                        except: pass
-                    elif punishment == "ban":
-                        try: await message.author.ban(reason=f"AutoMod: {word}")
-                        except: pass
-                    
-                    embed = discord.Embed(title="AutoMod Triggered", color=discord.Color.red())
-                    embed.add_field(name="User", value=f"{message.author} ({message.author.id})", inline=False)
-                    embed.add_field(name="Word", value=word, inline=False)
-                    embed.add_field(name="Channel", value=f"{message.channel.mention}", inline=False)
-                    embed.add_field(name="Content", value=message.content[:512], inline=False)
-                    await log_embed(message.guild, "automod_log_channel", embed)
-                    return # Stop processing if punished
-
-        # Check Custom Commands if it starts with prefix
-        if is_command:
-            cmd_name = message.content[len(prefix):].split()[0]
-            async with db.execute('SELECT code FROM custom_commands WHERE guild_id = ? AND name = ?', (message.guild.id, cmd_name)) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    code = row[0]
-                    ok, err = await run_custom_command(code, message)
-                    embed = discord.Embed(title="Custom Command Executed", color=discord.Color.blurple())
-                    embed.add_field(name="User", value=f"{message.author} ({message.author.id})", inline=False)
-                    embed.add_field(name="Command", value=cmd_name, inline=False)
-                    if err:
-                        embed.add_field(name="Error", value=str(err)[:300], inline=False)
-                    await log_embed(message.guild, "command_log_channel", embed)
-                    return # Custom command handled, don't process regular commands
-
-    await bot.process_commands(message)
-
-@bot.event
-async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent):
-    if not payload.guild_id:
-        return
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
-    embed = discord.Embed(title="Bulk Message Delete", color=discord.Color.dark_red())
-    embed.add_field(name="Channel", value=f"<#{payload.channel_id}>", inline=False)
-    embed.add_field(name="Count", value=str(len(payload.message_ids)), inline=False)
-    await log_embed(guild, "message_log_channel", embed)
-
-@bot.event
-async def on_member_join(member: discord.Member):
-    # This handler is now consolidated in the first on_member_join above.
-    pass
-
-@bot.event
-async def on_member_remove(member: discord.Member):
-    # This handler is now consolidated in the first on_member_remove above.
-    pass
-
-@bot.event
-async def on_member_update(before: discord.Member, after: discord.Member):
-    if not after.guild:
-        return
-    changes = []
-    if before.nick != after.nick:
-        changes.append(("Nickname", f"{before.nick} → {after.nick}"))
-    try:
-        if str(before.display_avatar.url) != str(after.display_avatar.url):
-            changes.append(("Avatar", "Changed"))
-    except:
-        pass
-    before_roles = set(r.id for r in before.roles)
-    after_roles = set(r.id for r in after.roles)
-    added = after_roles - before_roles
-    removed = before_roles - after_roles
-    if added:
-        names = [after.guild.get_role(r).name for r in added if after.guild.get_role(r)]
-        changes.append(("Roles Added", ", ".join(names)))
-    if removed:
-        names = [after.guild.get_role(r).name for r in removed if after.guild.get_role(r)]
-        changes.append(("Roles Removed", ", ".join(names)))
-    if changes:
-        embed = discord.Embed(title="Member Updated", color=discord.Color.blurple())
-        embed.add_field(name="User", value=f"{after.mention} ({after.id})", inline=False)
-        for k, v in changes:
-            embed.add_field(name=k, value=v or "None", inline=False)
-        try:
-            embed.set_thumbnail(url=after.display_avatar.url)
-        except:
-            pass
-        await log_embed(after.guild, "member_log_channel", embed)
-
-@bot.event
-async def on_user_update(before: discord.User, after: discord.User):
-    embed = discord.Embed(title="User Updated", color=discord.Color.blurple())
-    embed.add_field(name="User", value=f"<@{after.id}> ({after.id})", inline=False)
-    if before.avatar != after.avatar:
-        embed.add_field(name="Avatar", value="Changed", inline=False)
-        try:
-            embed.set_thumbnail(url=after.display_avatar.url)
-        except:
-            pass
-    if before.global_name != after.global_name:
-        embed.add_field(name="Global Name", value=f"{before.global_name} → {after.global_name}", inline=False)
-    for guild in bot.guilds:
-        if guild.get_member(after.id):
-            await log_embed(guild, "member_log_channel", embed)
-
-@bot.event
-async def on_guild_channel_create(channel: discord.abc.GuildChannel):
-    actor, reason = await _find_actor(channel.guild, discord.AuditLogAction.channel_create, channel.id)
-    embed = discord.Embed(title="Channel Created", color=discord.Color.green())
-    embed.add_field(name="Channel", value=f"{channel.mention} ({channel.id})", inline=False)
-    if actor:
-        embed.add_field(name="Actor", value=f"{actor} ({actor.id})", inline=False)
-    if reason:
-        embed.add_field(name="Reason", value=reason, inline=False)
-    await log_embed(channel.guild, "server_log_channel", embed)
-
-@bot.event
-async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
-    actor, reason = await _find_actor(channel.guild, discord.AuditLogAction.channel_delete, channel.id)
-    embed = discord.Embed(title="Channel Deleted", color=discord.Color.dark_red())
-    embed.add_field(name="Channel", value=f"#{channel.name} ({channel.id})", inline=False)
-    if actor:
-        embed.add_field(name="Actor", value=f"{actor} ({actor.id})", inline=False)
-    if reason:
-        embed.add_field(name="Reason", value=reason, inline=False)
-    await log_embed(channel.guild, "server_log_channel", embed)
-
-@bot.event
-async def on_guild_channel_update(before: discord.abc.GuildChannel, after: discord.abc.GuildChannel):
-    actor, reason = await _find_actor(after.guild, discord.AuditLogAction.channel_update, after.id)
-    embed = discord.Embed(title="Channel Updated", color=discord.Color.orange())
-    embed.add_field(name="Channel", value=f"{after.mention} ({after.id})", inline=False)
-    if before.name != after.name:
-        embed.add_field(name="Name", value=f"{before.name} → {after.name}", inline=False)
-    topic_b = getattr(before, "topic", None)
-    topic_a = getattr(after, "topic", None)
-    if topic_b != topic_a:
-        embed.add_field(name="Topic", value=f"{topic_b or 'None'} → {topic_a or 'None'}", inline=False)
-    cat_b = before.category.name if before.category else "None"
-    cat_a = after.category.name if after.category else "None"
-    if cat_b != cat_a:
-        embed.add_field(name="Category", value=f"{cat_b} → {cat_a}", inline=False)
-    nsfw_b = getattr(before, "nsfw", None)
-    nsfw_a = getattr(after, "nsfw", None)
-    if nsfw_b != nsfw_a:
-        embed.add_field(name="NSFW", value=f"{nsfw_b} → {nsfw_a}", inline=False)
-    rate_b = getattr(before, "slowmode_delay", getattr(before, "rate_limit_per_user", None))
-    rate_a = getattr(after, "slowmode_delay", getattr(after, "rate_limit_per_user", None))
-    if rate_b != rate_a:
-        embed.add_field(name="Slowmode", value=f"{rate_b} → {rate_a}", inline=False)
-    pos_b = getattr(before, "position", None)
-    pos_a = getattr(after, "position", None)
-    if pos_b != pos_a:
-        embed.add_field(name="Position", value=f"{pos_b} → {pos_a}", inline=False)
-    try:
-        ow_b = before.overwrites or {}
-        ow_a = after.overwrites or {}
-        if ow_b != ow_a:
-            embed.add_field(name="Permissions", value="Changed", inline=False)
-    except:
-        pass
-    if actor:
-        embed.add_field(name="Actor", value=f"{actor} ({actor.id})", inline=False)
-    if reason:
-        embed.add_field(name="Reason", value=reason, inline=False)
-    await log_embed(after.guild, "server_log_channel", embed)
-
-@bot.event
-async def on_guild_update(before: discord.Guild, after: discord.Guild):
-    embed = discord.Embed(title="Server Updated", color=discord.Color.orange())
-    embed.add_field(name="Server", value=f"{after.name} ({after.id})", inline=False)
-    await log_embed(after, "server_log_channel", embed)
-
-@bot.event
-async def on_guild_role_create(role: discord.Role):
-    actor, reason = await _find_actor(role.guild, discord.AuditLogAction.role_create, role.id)
-    embed = discord.Embed(title="Role Created", color=discord.Color.green())
-    embed.add_field(name="Role", value=f"{role.name} ({role.id})", inline=False)
-    if actor:
-        embed.add_field(name="Actor", value=f"{actor} ({actor.id})", inline=False)
-    if reason:
-        embed.add_field(name="Reason", value=reason, inline=False)
-    await log_embed(role.guild, "server_log_channel", embed)
-
-@bot.event
-async def on_guild_role_delete(role: discord.Role):
-    actor, reason = await _find_actor(role.guild, discord.AuditLogAction.role_delete, role.id)
-    embed = discord.Embed(title="Role Deleted", color=discord.Color.dark_red())
-    embed.add_field(name="Role", value=f"{role.name} ({role.id})", inline=False)
-    if actor:
-        embed.add_field(name="Actor", value=f"{actor} ({actor.id})", inline=False)
-    if reason:
-        embed.add_field(name="Reason", value=reason, inline=False)
-    await log_embed(role.guild, "server_log_channel", embed)
-
-@bot.event
-async def on_guild_role_update(before: discord.Role, after: discord.Role):
-    actor, reason = await _find_actor(after.guild, discord.AuditLogAction.role_update, after.id)
-    embed = discord.Embed(title="Role Updated", color=discord.Color.orange())
-    embed.add_field(name="Role", value=f"{after.name} ({after.id})", inline=False)
-    if before.name != after.name:
-        embed.add_field(name="Name", value=f"{before.name} → {after.name}", inline=False)
-    if before.permissions != after.permissions:
-        embed.add_field(name="Permissions", value="Changed", inline=False)
-    if actor:
-        embed.add_field(name="Actor", value=f"{actor} ({actor.id})", inline=False)
-    if reason:
-        embed.add_field(name="Reason", value=reason, inline=False)
-    await log_embed(after.guild, "server_log_channel", embed)
-
-@bot.event
-async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    if not member.guild:
-        return
-    embed = discord.Embed(title="Voice Update", color=discord.Color.blurple())
-    embed.add_field(name="User", value=f"{member} ({member.id})", inline=False)
-    if not before.channel and after.channel:
-        embed.add_field(name="Action", value=f"Joined {after.channel.name}", inline=False)
-    elif before.channel and not after.channel:
-        embed.add_field(name="Action", value=f"Left {before.channel.name}", inline=False)
-    elif before.channel and after.channel and before.channel.id != after.channel.id:
-        embed.add_field(name="Action", value=f"Switched {before.channel.name} → {after.channel.name}", inline=False)
-    if before.mute != after.mute:
-        embed.add_field(name="Mute", value=str(after.mute), inline=False)
-    if before.deaf != after.deaf:
-        embed.add_field(name="Deaf", value=str(after.deaf), inline=False)
-    await log_embed(member.guild, "voice_log_channel", embed)
-async def get_guild_assets(guild_id):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT custom_assets_json FROM guild_config WHERE guild_id = ?', (int(guild_id),)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                try:
-                    custom = json.loads(row[0])
-                    if isinstance(custom, dict):
-                        fixed = {}
-                        for key, data in custom.items():
-                            try:
-                                price = int(data.get("price", 0))
-                                income = int(data.get("income", 0))
-                            except Exception:
-                                continue
-                            if price <= 0:
-                                continue
-                            if income < 0:
-                                income = 0
-                            max_income = price * 20
-                            if income > max_income:
-                                income = max_income
-                            fixed[key] = {
-                                "name": data.get("name", key),
-                                "price": price,
-                                "income": income
-                            }
-                        return {**DEFAULT_ASSETS, **fixed}
-                except json.JSONDecodeError:
-                    return DEFAULT_ASSETS
-    return DEFAULT_ASSETS
-
-async def get_guild_banks(guild_id):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT bank_plans_json FROM guild_config WHERE guild_id = ?', (int(guild_id),)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                try:
-                    data = json.loads(row[0])
-                    if isinstance(data, dict) and data:
-                        fixed = {}
-                        for key, info in data.items():
-                            try:
-                                price = int(info.get("price", 0))
-                            except Exception:
-                                price = 0
-                            steps = max(0, price // 50000)
-                            allowed_min_pct = 1 + steps * 1
-                            allowed_max_pct = 2 + steps * 2
-                            try:
-                                min_rate = float(info.get("min", 0.01))
-                                max_rate = float(info.get("max", 0.02))
-                            except Exception:
-                                min_rate = 0.01
-                                max_rate = 0.02
-                            min_pct = max(0.0, min_rate * 100.0)
-                            max_pct = max(0.0, max_rate * 100.0)
-                            if min_pct > allowed_min_pct:
-                                min_pct = allowed_min_pct
-                            if max_pct > allowed_max_pct:
-                                max_pct = allowed_max_pct
-                            if max_pct < min_pct:
-                                max_pct = min_pct
-                            fixed[key] = {
-                                "name": info.get("name", key),
-                                "min": min_pct / 100.0,
-                                "max": max_pct / 100.0,
-                                "price": price,
-                                "min_level": int(info.get("min_level", 0))
-                            }
-                        if fixed:
-                            return fixed
-                except json.JSONDecodeError:
-                    pass
-    return DEFAULT_BANK_PLANS
-
-def compute_boost_multiplier(level):
-    return min(2.0, 1.25 + (level * 0.05))
-
-async def ensure_wonder(guild_id):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR IGNORE INTO guild_wonder (guild_id) VALUES (?)', (guild_id,))
-        await db.commit()
-
-async def get_wonder(guild_id):
-    await ensure_wonder(guild_id)
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT * FROM guild_wonder WHERE guild_id = ?', (guild_id,)) as cursor:
-            return await cursor.fetchone()
-
-async def get_user_job(user_id, guild_id):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT job_id FROM user_jobs WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else None
-
-def get_server_join_multiplier(user_id):
-    if not SUPPORT_GUILD_ID:
-        return 1.0
-    guild = bot.get_guild(SUPPORT_GUILD_ID)
-    if not guild:
-        return 1.0
-    member = guild.get_member(user_id)
-    return 2.0 if member else 1.0
-
-async def ensure_quest_resets(user_id, guild_id):
-    now = int(time.time())
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT daily_reset, weekly_reset, daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_quest_completed_json, weekly_quest_completed_json, daily_stats_json, weekly_stats_json FROM users WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
-            row = await cursor.fetchone()
-        if not row:
-            return
-        daily_reset, weekly_reset, daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_completed_json, weekly_completed_json, daily_stats_json, weekly_stats_json = row
-        changed = False
-        if daily_reset is None or daily_reset == 0 or now - daily_reset >= 86400:
-            daily_reset = now
-            daily_commands = 0
-            daily_reward_claimed = 0
-            daily_completed_json = '{}'
-            daily_stats_json = '{}'
-            changed = True
-        if weekly_reset is None or weekly_reset == 0 or now - weekly_reset >= 604800:
-            weekly_reset = now
-            weekly_commands = 0
-            weekly_reward_claimed = 0
-            weekly_completed_json = '{}'
-            weekly_stats_json = '{}'
-            changed = True
-        if changed:
-            await db.execute('UPDATE users SET daily_reset = ?, weekly_reset = ?, daily_commands = ?, weekly_commands = ?, daily_reward_claimed = ?, weekly_reward_claimed = ?, daily_quest_completed_json = ?, weekly_quest_completed_json = ?, daily_stats_json = ?, weekly_stats_json = ? WHERE user_id = ? AND guild_id = ?', (daily_reset, weekly_reset, daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_completed_json, weekly_completed_json, daily_stats_json, weekly_stats_json, user_id, guild_id))
-            await db.commit()
-
-async def increment_stat(user_id, guild_id, key):
-    await ensure_quest_resets(user_id, guild_id)
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT daily_stats_json, weekly_stats_json FROM users WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
-            row = await cursor.fetchone()
-        if not row:
-            return
-        try:
-            daily_stats = json.loads(row[0] or '{}')
-        except:
-            daily_stats = {}
-        try:
-            weekly_stats = json.loads(row[1] or '{}')
-        except:
-            weekly_stats = {}
-        daily_stats[key] = int(daily_stats.get(key, 0)) + 1
-        weekly_stats[key] = int(weekly_stats.get(key, 0)) + 1
-        await db.execute('UPDATE users SET daily_stats_json = ?, weekly_stats_json = ? WHERE user_id = ? AND guild_id = ?', (json.dumps(daily_stats), json.dumps(weekly_stats), user_id, guild_id))
-        await db.commit()
-
-async def increment_quests(user_id, guild_id, command_name=None):
-    await ensure_quest_resets(user_id, guild_id)
-    now = int(time.time())
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_quest_completed_json, weekly_quest_completed_json, daily_stats_json, weekly_stats_json FROM users WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
-            row = await cursor.fetchone()
-        if not row:
-            return
-        daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_completed_json, weekly_completed_json, daily_stats_json, weekly_stats_json = row
-        try:
-            daily_completed = json.loads(daily_completed_json) if daily_completed_json else {}
-        except:
-            daily_completed = {}
-        try:
-            weekly_completed = json.loads(weekly_completed_json) if weekly_completed_json else {}
-        except:
-            weekly_completed = {}
-        try:
-            daily_stats = json.loads(daily_stats_json) if daily_stats_json else {}
-        except:
-            daily_stats = {}
-        try:
-            weekly_stats = json.loads(weekly_stats_json) if weekly_stats_json else {}
-        except:
-            weekly_stats = {}
-        daily_commands += 1
-        weekly_commands += 1
-        kinds = ["commands"]
-        if command_name:
-            name = command_name.lower()
-            if name == "work":
-                kinds.append("work")
-            if name == "crime":
-                kinds.append("crime")
-            if name in ["blackjack", "roulette"]:
-                kinds.append("gamble")
-        for k in kinds:
-            daily_stats[k] = int(daily_stats.get(k, 0)) + 1
-            weekly_stats[k] = int(weekly_stats.get(k, 0)) + 1
-        daily_active = get_active_daily_quests(guild_id, now)
-        weekly_active = get_active_weekly_quests(guild_id, now)
-        reward_balance_changes = 0
-        for quest in daily_active:
-            qid = quest["id"]
-            if not daily_completed.get(qid):
-                kind = quest.get("kind", "commands")
-                if kind == "commands":
-                    progress_val = daily_commands
-                else:
-                    progress_val = int(daily_stats.get(kind, 0))
-                if progress_val >= quest["target"]:
-                    reward_balance_changes += quest["reward"]
-                    daily_completed[qid] = True
-        for quest in weekly_active:
-            qid = quest["id"]
-            if not weekly_completed.get(qid):
-                kind = quest.get("kind", "commands")
-                if kind == "commands":
-                    progress_val = weekly_commands
-                else:
-                    progress_val = int(weekly_stats.get(kind, 0))
-                if progress_val >= quest["target"]:
-                    reward_balance_changes += quest["reward"]
-                    weekly_completed[qid] = True
-        daily_completed_json = json.dumps(daily_completed)
-        weekly_completed_json = json.dumps(weekly_completed)
-        daily_stats_json = json.dumps(daily_stats)
-        weekly_stats_json = json.dumps(weekly_stats)
-        await db.execute('UPDATE users SET daily_commands = ?, weekly_commands = ?, daily_reward_claimed = ?, weekly_reward_claimed = ?, daily_quest_completed_json = ?, weekly_quest_completed_json = ?, daily_stats_json = ?, weekly_stats_json = ? WHERE user_id = ? AND guild_id = ?', (daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_completed_json, weekly_completed_json, daily_stats_json, weekly_stats_json, user_id, guild_id))
-        if reward_balance_changes > 0:
-            await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (reward_balance_changes, user_id, guild_id))
-        await db.commit()
-
-def get_active_daily_quests(guild_id, timestamp=None):
-    if timestamp is None:
-        timestamp = int(time.time())
-    day = timestamp // 86400
-    seed = f"{guild_id}-{day}-daily"
-    rng = random.Random(seed)
-    pool = list(DAILY_QUESTS)
-    rng.shuffle(pool)
-    return pool[:3]
-
-def get_active_weekly_quests(guild_id, timestamp=None):
-    if timestamp is None:
-        timestamp = int(time.time())
-    week = timestamp // 604800
-    seed = f"{guild_id}-{week}-weekly"
-    rng = random.Random(seed)
-    pool = list(WEEKLY_QUESTS)
-    rng.shuffle(pool)
-    return pool[:3]
-
-# --- Logic Functions (Shared by Prefix & Slash) ---
-async def work_logic(ctx, user_id, guild_id):
-    data = await get_global_money(user_id)
-    now = int(time.time())
-    if now - data['last_work'] < 300:
-        return False, f"⏳ Your workers are tired! Wait **{300 - (now - data['last_work'])}s**."
-    
-    base = random.randint(100, 300) * data['level'] * (data['prestige'] + 1)
-    job_id = await get_user_job(user_id, guild_id)
-    multiplier = 1.0
-    if job_id and job_id in JOBS and JOBS[job_id].get('focus') == 'work':
-        multiplier = float(JOBS[job_id].get('multiplier', 1.0))
-    
-    # --- Multipliers ---
-    server_multiplier = get_server_join_multiplier(user_id)
-    lb_multiplier = await get_total_multiplier(user_id)
-    
-    earned = int(base * multiplier * server_multiplier * lb_multiplier)
-    
-    msg_boost = []
-    if server_multiplier > 1.0:
-        msg_boost.append("**2x Server Booster**")
-    if lb_multiplier > 1.0:
-        msg_boost.append(f"**{lb_multiplier:.2f}x Leaderboard Reward**")
-        
-    msg_boost_str = ""
-    if msg_boost:
-        msg_boost_str = f" (Includes {' + '.join(msg_boost)}!)"
-            
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = balance + ?, last_work = ? WHERE user_id = ? AND guild_id = 0', 
-                        (earned, now, user_id))
-        await db.commit()
-    
-    # Use helper for XP to trigger level up notifications
-    leveled_up, new_level = await add_xp(user_id, guild_id, 20)
-    
-    return True, f"⚒️ You supervised the mines and earned **{earned:,} coins**!{msg_boost_str}" + (f"\n🎊 **LEVEL UP!** You reached **Level {new_level}**!" if leveled_up else "")
-
-# --- Tasks ---
-@tasks.loop(minutes=10)
-async def passive_income_task():
-    async with aiosqlite.connect(DB_FILE) as db:
-        # Fetch all assets and user data in one go to handle auto-deposit and income
-        async with db.execute('''
-            SELECT ua.user_id, ua.guild_id, ua.asset_id, ua.count, u.auto_deposit, u.last_vote
-            FROM user_assets ua
-            JOIN users u ON ua.user_id = u.user_id AND ua.guild_id = u.guild_id
-            WHERE ua.count > 0
-        ''') as cursor:
-            rows = await cursor.fetchall()
-        
-        if not rows: return
-
-        now = int(time.time())
-        # Group by guild to fetch configs once
-        guild_groups = {}
-        for uid, gid, aid, count, auto_dep, last_vote in rows:
-            if gid not in guild_groups: guild_groups[gid] = []
-            guild_groups[gid].append((uid, aid, count, auto_dep, last_vote))
-
-        updates_balance = [] # List of (income, uid, gid)
-        updates_bank = []    # List of (income, uid, gid)
-        updates_passive = [] # List of (income, uid, gid)
-
-        for gid, members in guild_groups.items():
-            assets_config = await get_guild_assets(gid)
-            await db.execute('INSERT OR IGNORE INTO guild_wonder (guild_id) VALUES (?)', (gid,))
-            async with db.execute('SELECT boost_multiplier, boost_until FROM guild_wonder WHERE guild_id = ?', (gid,)) as cursor:
-                wonder_row = await cursor.fetchone()
-            boost_multiplier = 1.0
-            if wonder_row:
-                boost_multiplier = wonder_row[0] if now < wonder_row[1] else 1.0
-            user_data = {} # uid -> {'income': 0, 'auto_dep': 0, 'last_vote': 0}
-            
-            for uid, aid, count, auto_dep, last_vote in members:
-                if aid in assets_config:
-                    income = assets_config[aid]['income'] * count
-                    if uid not in user_data:
-                        user_data[uid] = {'income': 0, 'auto_dep': auto_dep, 'last_vote': last_vote}
-                    user_data[uid]['income'] += income
-            
-            for uid, data in user_data.items():
-                if data['income'] > 0:
-                    # Check if auto-deposit is active (voted in last 12 hours)
-                    is_voter = (now - data['last_vote']) < 43200 # 12 hours
-                    adjusted_income = int(data['income'] * boost_multiplier)
-                    updates_passive.append((data['income'], uid, gid))
-                    if data['auto_dep'] and is_voter:
-                        updates_bank.append((adjusted_income, uid, gid))
-                    else:
-                        updates_balance.append((adjusted_income, uid, gid))
-
-        if updates_balance:
-            await db.executemany('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', updates_balance)
-        if updates_bank:
-            await db.executemany('UPDATE users SET bank = bank + ? WHERE user_id = ? AND guild_id = ?', updates_bank)
-        if updates_passive:
-            await db.executemany('UPDATE users SET passive_income = ? WHERE user_id = ? AND guild_id = ?', updates_passive)
-        
-        await db.commit()
-
-@tasks.loop(hours=1)
-async def leaderboard_rewards_task():
-    """Update top 3 multipliers and titles hourly."""
-    categories = {
-        "commands": 'SELECT user_id, SUM(total_commands) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 3',
-        "robs": 'SELECT user_id, SUM(successful_robs) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 3',
-        "crimes": 'SELECT user_id, SUM(successful_crimes) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 3',
-        "money": 'SELECT user_id, SUM(balance + bank) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 3',
-        "passive": 'SELECT user_id, SUM(passive_income) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 3',
-        "level": 'SELECT user_id, MAX(level) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 3'
-    }
-    
-    titles_map = {
-        "commands": ["Command Master", "Command Expert", "Command Enthusiast"],
-        "robs": ["Master Thief", "Elite Robber", "Pickpocket"],
-        "crimes": ["Godfather", "Crime Lord", "Thug"],
-        "money": ["Emperor", "Tycoon", "Wealthy Merchant"],
-        "passive": ["Industrialist", "Business Mogul", "Investor"],
-        "level": ["Grand Sage", "Wise Elder", "Scholar"]
-    }
-
-    # Reset current leaderboard multipliers for all users in memory or just track who changed?
-    # Simpler: Clear all 'lb_' multipliers and re-assign.
-    async with aiosqlite.connect(DB_FILE) as db:
-        # Get all users with lb_ multipliers
-        async with db.execute("SELECT user_id, multipliers_json, titles_json, medals_json FROM user_rewards") as cursor:
-            rows = await cursor.fetchall()
-            
-        for uid, mults_json, titles_json, medals_json in rows:
-            mults = json.loads(mults_json)
-            titles = json.loads(titles_json)
-            medals = json.loads(medals_json)
-            
-            # Remove existing lb_ mults, titles, and medals
-            mults = {k: v for k, v in mults.items() if not k.startswith('lb_')}
-            titles = [t for t in titles if not t.get('source', '').startswith('lb_')]
-            medals = [m for m in medals if not m.get('source', '').startswith('lb_')]
-            
-            await db.execute("UPDATE user_rewards SET multipliers_json = ?, titles_json = ?, medals_json = ? WHERE user_id = ?", 
-                            (json.dumps(mults), json.dumps(titles), json.dumps(medals), uid))
-        await db.commit()
-
-        # Re-assign based on current top 3
-        for cat_id, query in categories.items():
-            async with db.execute(query) as cursor:
-                top_rows = await cursor.fetchall()
-                
-            for i, row in enumerate(top_rows):
-                uid = row[0]
-                rank = i + 1
-                multiplier = 2.0 if rank == 1 else 1.5 if rank == 2 else 1.25
-                medal_emoji = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉"
-                title_name = titles_map[cat_id][i]
-                
-                await ensure_rewards(uid)
-                async with db.execute("SELECT multipliers_json, titles_json, medals_json FROM user_rewards WHERE user_id = ?", (uid,)) as cursor:
-                    r = await cursor.fetchone()
-                    mults = json.loads(r[0])
-                    titles = json.loads(r[1])
-                    medals = json.loads(r[2])
-                
-                mults[f"lb_{cat_id}"] = multiplier
-                titles.append({"title": title_name, "source": f"lb_{cat_id}", "timestamp": int(time.time())})
-                medals.append({"medal": medal_emoji, "source": f"lb_{cat_id}", "timestamp": int(time.time())})
-                
-                await db.execute("UPDATE user_rewards SET multipliers_json = ?, titles_json = ?, medals_json = ? WHERE user_id = ?", 
-                                (json.dumps(mults), json.dumps(titles), json.dumps(medals), uid))
-        await db.commit()
-
-@tasks.loop(hours=1)
-async def interest_task():
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT user_id, guild_id, bank, bank_plan FROM users WHERE bank > 0') as cursor:
-            rows = await cursor.fetchall()
-        if not rows:
-            return
-        updates = []
-        for uid, gid, bank, plan in rows:
-            plan_id = plan or 'standard'
-            if gid == 0:
-                plan_data = DEFAULT_BANK_PLANS.get(plan_id) or DEFAULT_BANK_PLANS.get('standard')
-            else:
-                banks_config = await get_guild_banks(gid)
-                plan_data = banks_config.get(plan_id) or banks_config.get('standard')
-            rate_min = float((plan_data or {}).get('min', 0.01))
-            rate_max = float((plan_data or {}).get('max', 0.02))
-            interest = int(bank * random.uniform(rate_min, rate_max))
-            if interest > 0:
-                updates.append((interest, uid, gid))
-        if updates:
-            await db.executemany('UPDATE users SET bank = bank + ? WHERE user_id = ? AND guild_id = ?', updates)
-        await db.commit()
-
-@tasks.loop(minutes=5)
-async def vote_reminder_task():
-    """Check for users whose vote expired in the last 5 minutes and notify them."""
-    now = int(time.time())
-    twelve_hours_ago = now - 43200
-    
-    async with aiosqlite.connect(DB_FILE) as db:
-        # Find users who voted exactly 12h (+/- 5 mins) ago
-        async with db.execute('''
-            SELECT DISTINCT user_id FROM users 
-            WHERE last_vote > ? AND last_vote <= ?
-        ''', (twelve_hours_ago - 300, twelve_hours_ago)) as cursor:
-            rows = await cursor.fetchall()
-            
-    for row in rows:
-        user_id = row[0]
-        try:
-            user = await bot.fetch_user(user_id)
-            if user:
-                vote_url = f"https://top.gg/bot/{bot.user.id}/vote"
-                embed = discord.Embed(title="⌛ Vote Expired!", color=0xffa500)
-                embed.description = f"Your 12-hour vote rewards for **Empire Nexus** have expired!\n\n" \
-                                    f"Vote again now to keep your **Auto-Deposit** active and support the bot!\n\n" \
-                                    f"[**Click here to revote on Top.gg**]({vote_url})"
-                await user.send(embed=embed)
-        except:
-            pass # User might have DMs closed
-
-@tasks.loop(minutes=30)
-async def update_topgg_stats():
-    """Automatically update the bot's server count on Top.gg."""
-    topgg_token = os.getenv('TOPGG_TOKEN')
-    if not topgg_token:
-        return
-    
-    url = f"https://top.gg/api/bots/{bot.user.id}/stats"
-    headers = {"Authorization": topgg_token}
-    payload = {"server_count": len(bot.guilds)}
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, headers=headers, json=payload) as resp:
-                if resp.status == 200:
-                    print(f"DEBUG: Successfully updated Top.gg server count to {len(bot.guilds)}")
-                else:
-                    print(f"DEBUG: Failed to update Top.gg stats: {resp.status}")
-        except Exception as e:
-            print(f"DEBUG: Error updating Top.gg stats: {e}")
-
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandOnCooldown):
-        minutes, seconds = divmod(error.retry_after, 60)
-        return await ctx.send(f"⏳ **Cooldown!** Try again in **{int(minutes)}m {int(seconds)}s**.", delete_after=10)
-    elif isinstance(error, commands.MissingPermissions):
-        return await ctx.send("❌ You don't have permission to use this command!")
-    elif isinstance(error, commands.BadArgument):
-        return await ctx.send("❌ Invalid argument provided! Check `.help`.")
-    print(f"DEBUG Error: {error}")
-
-@bot.event
-async def on_command_completion(ctx):
-    if ctx.guild is None:
-        return
-    leveled_up, new_level = await add_xp(ctx.author.id, ctx.guild.id, 5)
-    
-    # Track global command count for leaderboards
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET total_commands = total_commands + 1 WHERE user_id = ? AND guild_id = ?', 
-                        (ctx.author.id, ctx.guild.id))
-        await db.commit()
-
-    cmd_name = ctx.command.name if ctx.command else None
-    await increment_quests(ctx.author.id, ctx.guild.id, cmd_name)
-    if leveled_up:
-        await ctx.send(f"🎊 **LEVEL UP!** {ctx.author.mention} reached **Level {new_level}**!")
-
-@bot.event
-async def on_ready():
-    await init_db()
-    await migrate_db()
-    
-    global SUPPORT_GUILD_ID
-    try:
-        invite = await bot.fetch_invite(SUPPORT_SERVER_INVITE)
-        if invite.guild:
-            SUPPORT_GUILD_ID = invite.guild.id
-            print(f"DEBUG: Resolved Support Guild ID: {SUPPORT_GUILD_ID}")
-    except Exception as e:
-        print(f"DEBUG: Could not resolve support invite: {e}")
-
-    interest_task.start()
-    leaderboard_rewards_task.start()
-    passive_income_task.start()
-    vote_reminder_task.start()
-    update_topgg_stats.start()
-    
-    try:
-        synced = await bot.tree.sync()
-        print(f"DEBUG: Synced {len(synced)} global slash commands.")
-    except Exception as e:
-        print(f"CRITICAL: Error syncing slash commands: {e}")
-    try:
-        g = bot.get_guild(TEST_GUILD_ID)
-        if g:
-            bot.tree.copy_global_to(guild=g)
-            gsynced = await bot.tree.sync(guild=g)
-            print(f"DEBUG: Synced {len(gsynced)} slash commands for test guild {TEST_GUILD_ID}.")
-    except Exception as e:
-        print(f"CRITICAL: Error syncing test guild commands: {e}")
-    print(f'Logged in as {bot.user.name}')
-
-@bot.event
-async def on_guild_join(guild: discord.Guild):
-    try:
-        bot.tree.copy_global_to(guild=guild)
-        await bot.tree.sync(guild=guild)
-    except Exception:
-        pass
-@bot.event
-async def on_member_join(member):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT welcome_channel, welcome_message, welcome_embed_json FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
-            wf = await cursor.fetchone()
-
-    if wf and wf[0]:
-        ch = await resolve_channel(member.guild, wf[0])
-        if ch:
-            placeholders = _apply_placeholders_member(member.guild, member)
-            embed_to_send = None
-            msg_to_send = None
-            embed_json = wf[2]
-            if embed_json:
-                try:
-                    data = json.loads(embed_json)
-                    data = _replace_in_data(member.guild, data, placeholders)
-                    embed_to_send = discord.Embed.from_dict(data)
-                except:
-                    embed_to_send = None
-            if not embed_to_send:
-                msg = _resolve_text_mentions(member.guild, (wf[1] or "").strip())
-                if msg:
-                    for k, v in placeholders.items(): msg = msg.replace(k, v)
-                    msg_to_send = msg
-                else:
-                    embed_to_send = discord.Embed(
-                        title=f"👋 Welcome {member.name}",
-                        description=f"Glad to have you in {member.guild.name}! You are member #{member.guild.member_count}.",
-                        color=0x00d2ff,
-                        timestamp=discord.utils.utcnow()
-                    )
-                    try: embed_to_send.set_thumbnail(url=member.display_avatar.url)
-                    except: pass
-            try:
-                if embed_to_send:
-                    await ch.send(embed=embed_to_send)
-                else:
-                    await ch.send(content=msg_to_send)
-            except:
-                pass
-
-    account_age = (discord.utils.utcnow() - member.created_at).days
-    join_embed = discord.Embed(title="📥 Member Joined", color=discord.Color.green(), timestamp=discord.utils.utcnow())
-    join_embed.set_thumbnail(url=member.display_avatar.url)
-    join_embed.add_field(name="User", value=f"{member.mention} ({member.id})")
-    join_embed.add_field(name="Account Age", value=f"{account_age} days")
-    if account_age < 7:
-        join_embed.description = "⚠️ New Account"
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT join_log_channel, member_log_channel FROM logging_config WHERE guild_id = ?', (member.guild.id,)) as cursor:
-            row = await cursor.fetchone()
-    if row and row[0]:
-        await log_embed(member.guild, "join_log_channel", join_embed)
-    elif row and row[1]:
-        await log_embed(member.guild, "member_log_channel", join_embed)
-
-@bot.event
-async def on_member_remove(member):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT farewell_channel, farewell_message, farewell_embed_json FROM welcome_farewell WHERE guild_id = ?', (member.guild.id,)) as cursor:
-            wf = await cursor.fetchone()
-
-    if wf and wf[0]:
-        ch = await resolve_channel(member.guild, wf[0])
-        if ch:
-            placeholders = _apply_placeholders_member(member.guild, member)
-            embed_to_send = None
-            msg_to_send = None
-            embed_json = wf[2]
-            if embed_json:
-                try:
-                    data = json.loads(embed_json)
-                    data = _replace_in_data(member.guild, data, placeholders)
-                    embed_to_send = discord.Embed.from_dict(data)
-                except:
-                    embed_to_send = None
-            if not embed_to_send:
-                msg = _resolve_text_mentions(member.guild, (wf[1] or "").strip())
-                if msg:
-                    for k, v in placeholders.items(): msg = msg.replace(k, v)
-                    msg_to_send = msg
-            try:
-                if embed_to_send:
-                    try:
-                        if not embed_to_send.thumbnail.url:
-                            embed_to_send.set_thumbnail(url=member.display_avatar.url)
-                    except:
-                        try: embed_to_send.set_thumbnail(url=member.display_avatar.url)
-                        except: pass
-                    await ch.send(embed=embed_to_send)
-                elif msg_to_send:
-                    await ch.send(content=msg_to_send)
-            except:
-                pass
-
-    leave_embed = discord.Embed(title="📤 Member Left", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
-    leave_embed.set_thumbnail(url=member.display_avatar.url)
-    leave_embed.add_field(name="User", value=f"{member.mention} ({member.id})")
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT leave_log_channel, member_log_channel FROM logging_config WHERE guild_id = ?', (member.guild.id,)) as cursor:
-            row = await cursor.fetchone()
-    if row and row[0]:
-        await log_embed(member.guild, "leave_log_channel", leave_embed)
-    elif row and row[1]:
-        await log_embed(member.guild, "member_log_channel", leave_embed)
-
-@bot.event
-async def on_message_delete(message):
-    if not message.guild or message.author.bot: return
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT message_log_channel FROM logging_config WHERE guild_id = ?', (message.guild.id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                channel = await resolve_channel(message.guild, row[0])
-                if channel:
-                    embed = discord.Embed(title="Message Deleted", color=discord.Color.red())
-                    embed.add_field(name="Author", value=f"{message.author} ({message.author.id})")
-                    embed.add_field(name="Channel", value=message.channel.mention)
-                    embed.add_field(name="Content", value=message.content or "[No content]", inline=False)
-                    embed.timestamp = discord.utils.utcnow()
-                    await channel.send(embed=embed)
-
-@bot.event
-async def on_message_edit(before, after):
-    if not before.guild or before.author.bot: return
-    if before.content == after.content: return
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT message_log_channel FROM logging_config WHERE guild_id = ?', (before.guild.id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                channel = await resolve_channel(before.guild, row[0])
-                if channel:
-                    embed = discord.Embed(title="Message Edited", color=discord.Color.blue())
-                    embed.add_field(name="Author", value=f"{before.author} ({before.author.id})")
-                    embed.add_field(name="Channel", value=before.channel.mention)
-                    embed.add_field(name="Before", value=before.content or "[No content]", inline=False)
-                    embed.add_field(name="After", value=after.content or "[No content]", inline=False)
-                    embed.timestamp = discord.utils.utcnow()
-                    await channel.send(embed=embed)
-
-@bot.event
-async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
-    if not payload.guild_id:
-        return
-    guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
-    # Build a minimal embed; content is unavailable for uncached deletes
-    embed = discord.Embed(title="Message Deleted (Uncached)", color=discord.Color.red())
-    embed.add_field(name="Channel ID", value=str(payload.channel_id), inline=True)
-    embed.add_field(name="Message ID", value=str(payload.message_id), inline=True)
-    if payload.cached_message:
-        author = payload.cached_message.author
-        embed.add_field(name="Author", value=f"{author} ({author.id})", inline=False)
-        embed.add_field(name="Content", value=payload.cached_message.content or "[No content]", inline=False)
-    embed.timestamp = discord.utils.utcnow()
-    await log_embed(guild, "message_log_channel", embed)
-
-@bot.event
-async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
-    return
-@bot.event
-async def on_raw_reaction_add(payload):
-    if payload.user_id == bot.user.id: return
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT role_id FROM reaction_roles WHERE message_id = ? AND emoji = ?', (payload.message_id, str(payload.emoji)) ) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                guild = bot.get_guild(payload.guild_id)
-                role = guild.get_role(row[0])
-                member = guild.get_member(payload.user_id)
-                if role and member:
-                    try:
-                        await member.add_roles(role)
-                    except:
-                        pass
-
-@bot.event
-async def on_raw_reaction_remove(payload):
-    if payload.user_id == bot.user.id: return
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT role_id FROM reaction_roles WHERE message_id = ? AND emoji = ?', (payload.message_id, str(payload.emoji)) ) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                guild = bot.get_guild(payload.guild_id)
-                role = guild.get_role(row[0])
-                member = guild.get_member(payload.user_id)
-                if role and member:
-                    try:
-                        await member.remove_roles(role)
-                    except:
-                        pass
-
-# --- Hybrid Commands ---
-
-@bot.event
-async def on_message(message):
-    if not message.guild or message.author.bot:
-        return
-    try:
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute('SELECT raid_mode, anti_phish_enabled FROM guild_config WHERE guild_id = ?', (message.guild.id,)) as cursor:
-                row = await cursor.fetchone()
-        raid_mode = int(row[0] or 0) if row else 0
-        anti_phish = int(row[1] or 1) if row else 1
-    except:
-        raid_mode = 0
-        anti_phish = 1
-    if raid_mode == 1:
-        perms = message.author.guild_permissions
-        if not perms.manage_messages and not perms.administrator:
-            try:
-                await message.delete()
-            except:
-                pass
-            embed = discord.Embed(title="Raid Mode", description=f"Blocked a message from {message.author.mention} in {message.channel.mention}.", color=discord.Color.red(), timestamp=discord.utils.utcnow())
-            await log_embed(message.guild, "automod_log_channel", embed)
-            return
-    if anti_phish == 1:
-        content = (message.content or "").lower()
-        suspect = any(x in content for x in ["free nitro","discordgift","nitro-gift","airdrop","giveaway","steamcommunity"])
-        if suspect:
-            try:
-                await message.delete()
-            except:
-                pass
-            embed = discord.Embed(title="Anti‑Phishing", description=f"Removed a suspicious message from {message.author.mention}.", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
-            embed.add_field(name="Channel", value=message.channel.mention, inline=True)
-            await log_embed(message.guild, "automod_log_channel", embed)
-            return
-    try:
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('INSERT OR IGNORE INTO mod_stats (user_id, guild_id) VALUES (?, ?)', (message.author.id, message.guild.id))
-            await db.execute('UPDATE mod_stats SET messages = messages + 1, points = points + 1 WHERE user_id = ? AND guild_id = ?', (message.author.id, message.guild.id))
-            await db.commit()
-    except:
-        pass
-    await bot.process_commands(message)
-@bot.hybrid_command(name="start", description="New to the Empire? Start your tutorial here!")
-async def start_tutorial(ctx: commands.Context):
-    data = await get_user_data(ctx.author.id, ctx.guild.id)
-    msg_bonus = ""
-    
-    # Check if 'started' is 0 or None (handle case where column was just added so it might be 0)
-    # The default is 0.
-    if not data['started']:
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = balance + 500, started = 1 WHERE user_id = ? AND guild_id = ?', (ctx.author.id, ctx.guild.id))
-            await db.commit()
-        msg_bonus = "\n\n🎉 **Welcome Bonus!** You received **500 coins** for starting your journey!"
-
-    embed = discord.Embed(
-        title="🌅 Welcome to Empire Nexus",
-        description=(
-            f"You have inherited a small plot of land and 100 coins. Your goal: **Build the wealthiest empire in the server.**{msg_bonus}\n\n"
-            "**Step 1: Get Started**\n"
-            "Use `.work` or `/work` to supervise the mines and earn your first coins.\n\n"
-            "**Step 2: Invest Wisely**\n"
-            "Visit the `.shop` and buy your first **Lemonade Stand**. It will generate income for you every 10 minutes, even while you sleep!\n\n"
-            "**Step 3: Secure Your Wealth**\n"
-            "Other rulers can `.rob` you! Use `.deposit <amount>` (or `.dep`) to move your coins into the **Bank**. Banked coins are safe from thieves and earn **hourly interest**.\n\n"
-            "**Step 4: Expand & Conquer**\n"
-            "Once you reach Level 10, you can `.prestige` to reset your progress for a permanent income bonus.\n\n"
-            "**Need more help?**\n"
-            "Type `.help` for a full command list or `.setup` to configure your server's dashboard."
-        ),
-        color=0x00d2ff
-    )
-    embed.set_thumbnail(url=bot.user.display_avatar.url)
-    embed.set_footer(text="Your journey to greatness begins now.")
-    await ctx.send(embed=apply_theme(embed))
-
-def apply_theme(embed: discord.Embed) -> discord.Embed:
-    try:
-        if embed.color is None or embed.color.value == 0:
-            embed.color = discord.Color(0x00d2ff)
-    except:
-        pass
-    try:
-        if not getattr(embed, "timestamp", None):
-            embed.timestamp = discord.utils.utcnow()
-    except:
-        pass
-    try:
-        embed.set_footer(text="Empire Nexus")
-    except:
-        pass
-    return embed
-
-class HelpSelect(discord.ui.Select):
-    def __init__(self, prefix, show_owner):
-        self.prefix = prefix
-        self.show_owner = show_owner
-        options = [
-            discord.SelectOption(label="Making Money", description="Work, crime, gambling, and jobs", emoji="💸"),
-            discord.SelectOption(label="Banking", description="Deposit, withdraw, and bank plans", emoji="🏦"),
-            discord.SelectOption(label="Assets & Empire", description="Shop, inventory, and prestige", emoji="🏗️"),
-            discord.SelectOption(label="Wonder & Server Progress", description="Server-wide projects and boosts", emoji="🏛️"),
-            discord.SelectOption(label="Boosters & Rewards", description="Voting and support server bonuses", emoji="🚀"),
-            discord.SelectOption(label="Moderation", description="Kick, ban, warns, automod", emoji="🛡️"),
-            discord.SelectOption(label="Utility & Info", description="Ping, serverinfo, userinfo, avatar", emoji="🧭"),
-            discord.SelectOption(label="Welcome & Config", description="Welcome, farewell, setprefix, setlogs", emoji="📑"),
-            discord.SelectOption(label="Setup & Utility", description="Help, settings, and tutorial", emoji="⚙️")
-        ]
-        if self.show_owner:
-            options.insert(8, discord.SelectOption(label="Owner & Admin", description="Owner-only economy management", emoji="👑"))
-        super().__init__(placeholder="Select a category to view its commands!", min_values=1, max_values=1, options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        try:
-            category_map = {
-                "Making Money": "making money",
-                "Banking": "banking",
-                "Assets & Empire": "assets",
-                "Wonder & Server Progress": "wonder",
-                "Boosters & Rewards": "boosters",
-                "Moderation": "moderation",
-                "Utility & Info": "info",
-                "Welcome & Config": "welcome",
-                "Owner & Admin": "owner",
-                "Setup & Utility": "utility"
-            }
-            selected_label = self.values[0]
-            key = category_map.get(selected_label)
-            prefix = self.prefix
-
-            categories = {
-                "making money": {
-                    "title": "💸 Making Money",
-                    "commands": [
-                        f"`{prefix}work`, `/work` – Supervise mines for coins.",
-                        f"`{prefix}crime`, `/crime` – High risk, high reward heists.",
-                        f"`{prefix}blackjack`, `/blackjack` – Casino blackjack.",
-                        f"`{prefix}roulette`, `/roulette` – Spin the wheel.",
-                        f"`{prefix}riddle`, `/riddle` and `{prefix}answer` – Solve riddles.",
-                        f"`{prefix}jobs`, `/jobs` – View available jobs.",
-                        f"`{prefix}applyjob <id>`, `/applyjob` – Apply for a job.",
-                        f"`{prefix}dailyquests`, `/dailyquests` – Daily quest checklist.",
-                        f"`{prefix}weeklyquests`, `/weeklyquests` – Weekly quest checklist."
-                    ],
-                    "explain": (
-                        "Use work, crime, and the casino commands to generate coins. "
-                        "Pick a job with jobs/applyjob to boost income from your favourite activity. "
-                        "Daily and weekly quests reward consistent play; stack activities while quests are active."
-                    )
-                },
-                "banking": {
-                    "title": "🏦 Banking",
-                    "commands": [
-                        f"`{prefix}deposit <amount>`, `/deposit` – Move coins into the bank.",
-                        f"`{prefix}withdraw <amount>`, `/withdraw` – Take coins out of the bank.",
-                        f"`{prefix}balance`, `/balance` – View wallet, bank and bank plan.",
-                        f"`{prefix}bank`, `/bank` – View and switch bank plans.",
-                        f"`{prefix}autodeposit`, `/autodeposit` – Auto‑deposit passive income (with vote).",
-                        f"`{prefix}vote`, `/vote` – Vote for Top.gg rewards.",
-                        f"`{prefix}leaderboard`, `/leaderboard` – Money or XP rankings."
-                    ],
-                    "explain": (
-                        "Secure earnings in the bank with deposit. Better bank plans increase hourly interest. "
-                        "Enable autodeposit after voting to automatically secure passive income."
-                    )
-                },
-                "assets": {
-                    "title": "🏗️ Assets & Empire",
-                    "commands": [
-                        f"`{prefix}shop`, `/shop` – Browse passive income assets.",
-                        f"`{prefix}buy <id>`, `/buy` – Buy assets.",
-                        f"`{prefix}inventory`, `/inventory` – View your assets.",
-                        f"`{prefix}profile`, `/profile` – Empire overview with Titles & Medals.",
-                        f"`{prefix}prestige`, `/prestige` – Reset for permanent multipliers.",
-                        f"`{prefix}buyrole`, `/buyrole` – Buy server roles with coins.",
-                        f"`{prefix}alliance create|join|info`, `/alliance` – Alliance management.",
-                        f"`{prefix}vassal sponsor @user [percent]`, `/vassal` – Sponsor vassals.",
-                        f"`{prefix}market list|view|buy`, `/market` – Player marketplace."
-                    ],
-                    "explain": (
-                        "Invest coins into assets that pay every 10 minutes. Prestige resets progress for permanent multipliers."
-                    )
-                },
-                "wonder": {
-                    "title": "🏛️ Wonder & Server Progress",
-                    "commands": [
-                        f"`{prefix}wonder`, `/wonder` – View Wonder status.",
-                        f"`{prefix}contribute <amount>`, `/contribute` – Fund the Wonder."
-                    ],
-                    "explain": (
-                        "Coordinate contributions to level the Wonder and unlock powerful server‑wide boosts."
-                    )
-                },
-                "boosters": {
-                    "title": "🚀 Boosters & Rewards",
-                    "commands": [
-                        f"`{prefix}vote`, `/vote` – Vote for rewards & auto‑deposit.",
-                        "**Join Support Server** – 2x Coin Multiplier.",
-                        "**Global Leaderboards** – Top ranks grant multipliers and titles."
-                    ],
-                    "explain": (
-                        "Boost earnings via voting, support server bonuses, and leaderboard rewards."
-                    )
-                },
-                "moderation": {
-                    "title": "🛡️ Moderation",
-                    "commands": [
-                        f"`{prefix}kick`, `/kick` – Kick a member.",
-                        f"`{prefix}ban`, `/ban` – Ban a member.",
-                        f"`{prefix}warn`, `/warn` – Issue a warning.",
-                        f"`{prefix}clearwarnings`, `/clearwarnings` – Clear all warns.",
-                        f"`{prefix}delwarn`, `/delwarn` – Delete a warn by ID.",
-                        f"`{prefix}removewarn`, `/removewarn` – Alias for delwarn.",
-                        f"`{prefix}automod add/remove`, `/automod` – Word filter management.",
-                        f"`{prefix}setlogs`, `/setlogs` – Configure log channels.",
-                        f"`{prefix}raidmode on|off`, `/raidmode` – Lock down during raids.",
-                        f"`{prefix}antiphish on|off`, `/antiphish` – Scam link guard.",
-                        f"`{prefix}modsystem`, `/modsystem` – Create mod roles & tracking.",
-                        f"`{prefix}mod profile`, `/mod profile` – View your mod points.",
-                        f"`{prefix}mods`, `/mods` – List tracked moderators.",
-                        f"`{prefix}mod lb`, `/mod lb` – Mod leaderboard."
-                    ],
-                    "explain": (
-                        "Configure automod and use kick/ban/warns to keep the server safe. "
-                        "Set log channels to record actions in dedicated channels."
-                    )
-                },
-                "info": {
-                    "title": "🧭 Utility & Information",
-                    "commands": [
-                        f"`{prefix}ping`, `/ping` – Bot latency.",
-                        f"`{prefix}serverinfo`, `/serverinfo` – Server stats.",
-                        f"`{prefix}userinfo`, `/userinfo` – User stats.",
-                        f"`{prefix}avatar`, `/avatar` – User avatar.",
-                        f"`{prefix}membercount`, `/membercount` – Member stats.",
-                        f"`{prefix}leaderboard`, `/leaderboard` – Rankings."
-                    ],
-                    "explain": (
-                        "Quickly inspect server and user information."
-                    )
-                },
-                "welcome": {
-                    "title": "📑 Welcome & Configuration",
-                    "commands": [
-                        f"`{prefix}set welcome` – Configure welcome messages.",
-                        f"`{prefix}set farewell` – Configure farewell messages.",
-                        f"`{prefix}setlogs`, `/setlogs` – Logging channels.",
-                        f"`{prefix}setprefix`, `/setprefix` – Change prefix.",
-                        f"`{prefix}setup`, `/setup` – Dashboard link."
-                    ],
-                    "explain": (
-                        "Customize join/leave messages, logging, and prefix. Access the dashboard for advanced config."
-                    )
-                },
-                "owner": {
-                    "title": "👑 Owner & Admin",
-                    "commands": [
-                        f"`{prefix}addmoney`, `/addmoney` – Grant coins.",
-                        f"`{prefix}addxp`, `/addxp` – Grant XP.",
-                        f"`{prefix}addtitle`, `/addtitle` – Grant a title."
-                    ],
-                    "explain": (
-                        "Restricted commands for bot owners and administrators."
-                    )
-                },
-                "utility": {
-                    "title": "⚙️ Setup & Utility",
-                    "commands": [
-                        f"`{prefix}help`, `/help` – Overview and category help.",
-                        f"`{prefix}rank`, `/rank` – Level & XP bar.",
-                        f"`{prefix}setup`, `/setup` – Dashboard link.",
-                        f"`{prefix}setprefix`, `/setprefix` – Change prefix.",
-                        f"`{prefix}start`, `/start` – Tutorial.",
-                        f"`{prefix}bounty @user <amount>`, `/bounty` – Place a bounty.",
-                        f"`{prefix}remind <10m|2h|1d> [text]`, `/remind` – DM reminders.",
-                        f"`{prefix}poll <question> options:\"A,B,C\"`, `/poll` – Multi‑choice poll."
-                    ],
-                    "explain": (
-                        "Use start to onboard new players and help to explore features."
-                    )
-                }
-            }
-
-            data = categories[key]
-            embed = discord.Embed(
-                title=f"{data['title']}",
-                description=data["explain"],
-                color=0x00d2ff
-            )
-            cmds_text = "\n".join(f"- {line}" for line in data["commands"])
-            embed.add_field(name="Commands", value=cmds_text, inline=False)
-            embed.set_footer(text=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
-            await interaction.response.edit_message(embed=embed)
-        except Exception as e:
-            try:
-                await interaction.response.send_message("❌ Failed to update help. Try again.", ephemeral=True)
-            except:
-                await interaction.followup.send("❌ Failed to update help. Try again.", ephemeral=True)
-            print(f"HelpSelect error: {e}")
-
-async def resolve_channel(guild, raw_id):
-    try:
-        cid = int(raw_id)
-    except Exception:
-        cid = raw_id
-    ch = guild.get_channel(cid)
-    if ch is None:
-        try:
-            ch = await guild.fetch_channel(cid)
-        except:
-            return None
-    return ch
-
-def _resolve_text_mentions(guild: discord.Guild, text: str) -> str:
-    if not text:
-        return text
-    try:
-        import re
-        def repl_channel(m):
-            name = m.group(1)
-            for ch in guild.channels:
-                if getattr(ch, "type", None) == discord.ChannelType.text and ch.name == name:
-                    return f"<#{ch.id}>"
-            return f"#{name}"
-        def repl_emoji(m):
-            name = m.group(1)
-            for e in guild.emojis:
-                if e.name == name:
-                    return f"<:{e.name}:{e.id}>"
-            return f":{name}:"
-        # Allow optional spaces after '#', e.g. '# rules'
-        text = re.sub(r"(?<!\\w)#\\s*([A-Za-z0-9_\\-]+)", repl_channel, text)
-        text = re.sub(r":([A-Za-z0-9_\\-]+):", repl_emoji, text)
-    except:
-        pass
-    return text
-
-async def _cfg_get(guild_id: int, keys: list[str]) -> dict:
-    out = {}
-    try:
-        async with aiosqlite.connect(DB_FILE) as db:
-            cols = ", ".join(keys)
-            async with db.execute(f'SELECT {cols} FROM guild_config WHERE guild_id = ?', (guild_id,)) as c:
-                row = await c.fetchone()
-        if row:
-            for i, k in enumerate(keys):
-                out[k] = row[i]
-    except:
-        pass
-    return out
-def _apply_placeholders_member(guild: discord.Guild, member: discord.Member) -> dict:
-    return {
-        "{user}": member.mention,
-        "{username}": member.name,
-        "{server}": guild.name,
-        "{member_count}": str(guild.member_count),
-        "{avatar}": member.display_avatar.url,
-        "{join_date}": member.joined_at.strftime("%b %d, %Y") if member.joined_at else ""
-    }
-
-def _replace_in_data(guild: discord.Guild, data, placeholders: dict):
-    if isinstance(data, str):
-        s = data
-        for k, v in placeholders.items():
-            s = s.replace(k, v)
-        s = _resolve_text_mentions(guild, s)
-        return s
-    if isinstance(data, dict):
-        return {k: _replace_in_data(guild, v, placeholders) for k, v in data.items()}
-    if isinstance(data, list):
-        return [_replace_in_data(guild, i, placeholders) for i in data]
-    return data
-
-class HelpView(discord.ui.View):
-    def __init__(self, prefix, author_id, show_owner):
-        super().__init__(timeout=120)
-        self.author_id = author_id
-        self.add_item(HelpSelect(prefix, show_owner))
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
-
-@bot.hybrid_command(name="prestige", description="Reset your balance and level for a permanent income multiplier")
-async def prestige(ctx: commands.Context):
-    data = await get_user_data(ctx.author.id, ctx.guild.id)
-    
-    # Requirement: Level 10 + 50,000 coins in bank
-    needed_level = 10
-    needed_bank = 50000
-    
-    if data['level'] < needed_level or data['bank'] < needed_bank:
-        return await ctx.send(f"❌ You aren't ready to prestige! You need **Level {needed_level}** and **{needed_bank:,} coins** in your bank.")
-    
-    embed = discord.Embed(title="✨ Ascend to Greatness?", description=f"Prestiging will reset your **Level, XP, Balance, and Bank** to zero.\n\n**In return, you get:**\n💎 Prestige Level {data['prestige'] + 1}\n🚀 Permanent **{(data['prestige'] + 1) * 50}%** income bonus\n\nType `confirm` to proceed.", color=0xffd700)
-    await ctx.send(embed=apply_theme(embed))
-
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == 'confirm'
-
-    try:
-        await bot.wait_for('message', check=check, timeout=30)
-    except:
-        return await ctx.send("Prestige cancelled.")
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = 100, bank = 0, xp = 0, level = 1, prestige = prestige + 1 WHERE user_id = ? AND guild_id = ?', 
-                        (ctx.author.id, ctx.guild.id))
-        # Clear assets too? Usually prestige resets everything
-        await db.execute('DELETE FROM user_assets WHERE user_id = ? AND guild_id = ?', (ctx.author.id, ctx.guild.id))
-        await db.commit()
-    
-    await ctx.send(f"🎊 **CONGRATULATIONS!** You have reached Prestige Level **{data['prestige'] + 1}**! Your empire begins anew, but stronger than ever.")
-
-@bot.hybrid_command(name="inventory", description="View your owned assets")
-async def inventory(ctx: commands.Context, member: discord.Member = None):
-    target = member or ctx.author
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT asset_id, count FROM user_assets WHERE user_id = ? AND guild_id = ? AND count > 0', (target.id, ctx.guild.id)) as cursor:
-            assets_rows = await cursor.fetchall()
-    
-    if not assets_rows:
-        return await ctx.send(f"📦 {target.display_name} doesn't own any assets yet.")
-
-    assets_config = await get_guild_assets(ctx.guild.id)
-    inv_str = ""
-    total_income = 0
-    
-    for aid, count in assets_rows:
-        if aid in assets_config:
-            name = assets_config[aid]['name']
-            income = assets_config[aid]['income'] * count
-            inv_str += f"• **{count}x {name}** (Income: 💸 {income:,}/10min)\n"
-            total_income += income
-        else:
-            inv_str += f"• **{count}x {aid}** (Unknown Asset)\n"
-            
-    embed = discord.Embed(title=f"🎒 {target.display_name}'s Assets", color=0x00d2ff)
-    embed.description = inv_str
-    embed.add_field(name="📈 Total Passive Income", value=f"💸 {total_income:,} coins / 10 minutes")
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="wonder", description="View your server Wonder progress")
-async def wonder(ctx: commands.Context):
-    data = await get_wonder(ctx.guild.id)
-    now = int(time.time())
-    goal = data['goal'] or 0
-    progress = data['progress']
-    level = data['level']
-    boost_multiplier = data['boost_multiplier']
-    boost_until = data['boost_until']
-    progress_pct = int((progress / goal) * 100) if goal > 0 else 0
-    bar_length = 12
-    filled = int((progress_pct / 100) * bar_length)
-    bar = "🟦" * filled + "⬛" * (bar_length - filled)
-    if boost_until > now:
-        remaining = boost_until - now
-        hours, remainder = divmod(remaining, 3600)
-        minutes, _ = divmod(remainder, 60)
-        boost_status = f"Active • {boost_multiplier:.2f}x • {hours}h {minutes}m left"
-    else:
-        boost_status = "Inactive"
-    embed = discord.Embed(title=f"🏛️ {ctx.guild.name} Wonder", color=0x00d2ff)
-    embed.add_field(name="Level", value=f"{level}", inline=True)
-    embed.add_field(name="Progress", value=f"{progress:,} / {goal:,} coins", inline=True)
-    embed.add_field(name="Boost", value=boost_status, inline=False)
-    embed.add_field(name="Progress Bar", value=bar, inline=False)
-    embed.set_footer(text="Contribute with /contribute <amount>")
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="contribute", description="Contribute coins to your server Wonder")
-async def contribute(ctx: commands.Context, amount: int):
-    if amount <= 0:
-        return await ctx.send("❌ Enter a positive amount.")
-    user = await get_user_data(ctx.author.id, ctx.guild.id)
-    if user['balance'] < amount:
-        return await ctx.send(f"❌ You need **{amount - user['balance']:,} more coins**.")
-    now = int(time.time())
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR IGNORE INTO guild_wonder (guild_id) VALUES (?)', (ctx.guild.id,))
-        async with db.execute('SELECT level, progress, goal, boost_multiplier, boost_until FROM guild_wonder WHERE guild_id = ?', (ctx.guild.id,)) as cursor:
-            row = await cursor.fetchone()
-        level, progress, goal, boost_multiplier, boost_until = row
-        remaining = amount
-        leveled_up = 0
-        while remaining > 0:
-            to_goal = max(0, goal - progress)
-            if to_goal == 0:
-                level += 1
-                goal = int(goal * 1.5 + 10000)
-                boost_multiplier = compute_boost_multiplier(level)
-                boost_until = now + 21600
-                leveled_up += 1
-                progress = 0
-                continue
-            if remaining < to_goal:
-                progress += remaining
-                remaining = 0
-            else:
-                remaining -= to_goal
-                level += 1
-                progress = 0
-                goal = int(goal * 1.5 + 10000)
-                boost_multiplier = compute_boost_multiplier(level)
-                boost_until = now + 21600
-                leveled_up += 1
-        await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = ?', (amount, ctx.author.id, ctx.guild.id))
-        await db.execute('UPDATE guild_wonder SET level = ?, progress = ?, goal = ?, boost_multiplier = ?, boost_until = ? WHERE guild_id = ?', (level, progress, goal, boost_multiplier, boost_until, ctx.guild.id))
-        await db.commit()
-    if leveled_up > 0:
-        await ctx.send(f"🏛️ **Wonder Level Up!** Your server reached **Level {level}** and unlocked **{boost_multiplier:.2f}x** passive income for 6 hours.")
-    else:
-        await ctx.send(f"✅ Contributed **{amount:,} coins** to the Wonder. Progress: **{progress:,} / {goal:,}**.")
-
-@bot.hybrid_command(name="roulette", description="Bet your coins on a roulette spin")
-async def roulette(ctx: commands.Context, amount: str = None, space: str = None):
-    if amount is None or space is None:
-        prefix = await get_prefix(bot, ctx.message)
-        return await ctx.send(f"❌ Incorrect format! Use: `{prefix}roulette <amount> <space>`")
-    
-    user = await get_user_data(ctx.author.id, ctx.guild.id)
-    balance = user['balance']
-
-    if amount.lower() == 'all':
-        bet_amount = balance
-    elif amount.lower() == 'half':
-        bet_amount = balance // 2
-    else:
-        try:
-            bet_amount = int(amount)
-        except ValueError:
-            return await ctx.send("❌ Invalid amount! Use a number, 'half', or 'all'.")
-
-    if bet_amount <= 0: return await ctx.send("❌ Bet a positive amount!")
-    if balance < bet_amount: return await ctx.send("❌ You don't have enough coins!")
-
-    space = space.lower()
-    
-    # Define valid spaces and their multipliers
-    # red/black = 2x, 1st/2nd/3rd = 3x, green = 14x, number = 36x
-    valid_colors = ['red', 'black', 'green']
-    valid_dozens = ['1st', '2nd', '3rd']
-    
-    is_number = False
-    try:
-        num = int(space)
-        if 0 <= num <= 36:
-            is_number = True
-        else:
-            return await ctx.send("❌ Number must be between 0 and 36!")
-    except ValueError:
-        if space not in valid_colors and space not in valid_dozens:
-            return await ctx.send("❌ Invalid space! Use: `red`, `black`, `green`, `1st`, `2nd`, `3rd`, or a number `0-36`.")
-    
-    # Roll logic
-    roll = random.randint(0, 36)
-    
-    # Determine roll color
-    if roll == 0: 
-        roll_color = 'green'
-    elif roll in [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36]:
-        roll_color = 'red'
-    else:
-        roll_color = 'black'
-        
-    # Determine roll dozen
-    if 1 <= roll <= 12: roll_dozen = '1st'
-    elif 13 <= roll <= 24: roll_dozen = '2nd'
-    elif 25 <= roll <= 36: roll_dozen = '3rd'
-    else: roll_dozen = None
-
-    # Check win
-    win = False
-    multiplier = 0
-    
-    if is_number:
-        if int(space) == roll:
-            win = True
-            multiplier = 36
-    elif space == roll_color:
-        win = True
-        multiplier = 14 if space == 'green' else 2
-    elif space == roll_dozen:
-        win = True
-        multiplier = 3
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        if win:
-            server_multiplier = get_server_join_multiplier(ctx.author.id)
-            winnings = int(bet_amount * (multiplier - 1) * server_multiplier)
-            await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (winnings, ctx.author.id, ctx.guild.id))
-            
-            boost_msg = ""
-            if server_multiplier > 1.0:
-                boost_msg = " (Includes **2x Server Booster**!)"
-                
-            result_msg = f"✅ **WIN!** The ball landed on **{roll_color.upper()} {roll}**.\nYou won **{winnings:,} coins**!{boost_msg}"
-            color_embed = 0x2ecc71 # Green
-        else:
-            await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = ?', (bet_amount, ctx.author.id, ctx.guild.id))
-            result_msg = f"❌ **LOSS!** The ball landed on **{roll_color.upper()} {roll}**.\nYou lost **{bet_amount:,} coins**."
-            color_embed = 0xe74c3c # Red
-        await db.commit()
-    
-    embed = discord.Embed(title="🎡 Roulette Spin", description=result_msg, color=color_embed)
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="riddle", description="Get a riddle to solve")
-async def riddle(ctx: commands.Context):
-    riddles = [
-        ("What has to be broken before you can use it?", "egg"),
-        ("I’m tall when I’m young, and I’m short when I’m old. What am I?", "candle"),
-        ("What is full of holes but still holds water?", "sponge"),
-        ("What gets wet while drying?", "towel"),
-        ("What has a head and a tail but no body?", "coin"),
-        ("What has keys but can't open locks?", "piano"),
-        ("The more of this there is, the less you see. What is it?", "darkness")
-    ]
-    q, a = random.choice(riddles)
-    
-    # Store the active riddle in a temporary dictionary
-    if not hasattr(bot, 'active_riddles'):
-        bot.active_riddles = {}
-    
-    bot.active_riddles[ctx.author.id] = {
-        'answer': a,
-        'reward': random.randint(400, 800),
-        'expires': time.time() + 60
-    }
-    
-    embed = discord.Embed(title="🧩 Riddle Challenge", description=f"*{q}*", color=0xf1c40f)
-    prefix = await get_prefix(bot, ctx.message)
-    embed.set_footer(text=f"Use {prefix}answer <your answer> to solve! (60s)")
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="answer", description="Answer an active riddle")
-async def answer(ctx: commands.Context, *, response: str):
-    if not hasattr(bot, 'active_riddles') or ctx.author.id not in bot.active_riddles:
-        return await ctx.send("❌ You don't have an active riddle! Use `.riddle` first.")
-    
-    riddle_data = bot.active_riddles[ctx.author.id]
-    
-    if time.time() > riddle_data['expires']:
-        del bot.active_riddles[ctx.author.id]
-        return await ctx.send("⏰ Your riddle has expired! Try again with `.riddle`.")
-    
-    if response.lower().strip() == riddle_data['answer']:
-        reward = riddle_data['reward']
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', 
-                            (reward, ctx.author.id, ctx.guild.id))
-            await db.commit()
-        
-        # Use helper for XP to trigger level up notifications
-        leveled_up, new_level = await add_xp(ctx.author.id, ctx.guild.id, 50)
-        
-        del bot.active_riddles[ctx.author.id]
-        msg = f"✅ **CORRECT!** You earned **{reward:,} coins**!"
-        if leveled_up:
-            msg += f"\n🎊 **LEVEL UP!** You reached **Level {new_level}**!"
-        await ctx.send(msg)
-    else:
-        # Don't delete on wrong answer, let them try until timeout
-        await ctx.send("❌ That's not it! Try again.")
-
-@bot.hybrid_command(name="blackjack", aliases=["bj"], description="Play a game of Blackjack")
-@app_commands.describe(amount="The amount of coins to bet")
-async def blackjack(ctx: commands.Context, amount: str = None):
-    if amount is None:
-        prefix = await get_prefix(bot, ctx.message)
-        return await ctx.send(f"❌ Incorrect format! Use: `{prefix}bj <amount>`")
-    
-    user = await get_user_data(ctx.author.id, ctx.guild.id)
-    balance = user['balance']
-    job_id = await get_user_job(ctx.author.id, ctx.guild.id)
-    # The multiplier logic is now integrated into win calculation
-    # bj_multiplier = 1.0 # Removed unused variable
-
-    if amount.lower() == 'all':
-        bet_amount = balance
-    elif amount.lower() == 'half':
-        bet_amount = balance // 2
-    else:
-        try:
-            bet_amount = int(amount)
-        except ValueError:
-            return await ctx.send("❌ Invalid amount! Use a number, 'half', or 'all'.")
-
-    if bet_amount <= 0: return await ctx.send("❌ Bet a positive amount!")
-    if balance < bet_amount: return await ctx.send("❌ You don't have enough coins!")
-
-    # Deck setup
-    suits = {'♠': '♠️', '♥': '♥️', '♦': '♦️', '♣': '♣️'}
-    values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
-    
-    def get_card():
-        val = random.choice(values)
-        suit_icon = random.choice(list(suits.values()))
-        return val, suit_icon
-
-    def calc_hand(hand):
-        total = 0
-        aces = 0
-        for val, _ in hand:
-            if val in ['J', 'Q', 'K']: total += 10
-            elif val == 'A': aces += 1
-            else: total += int(val)
-        for _ in range(aces):
-            if total + 11 <= 21: total += 11
-            else: total += 1
-        return total
-
-    player_hand = [get_card(), get_card()]
-    dealer_hand = [get_card(), get_card()]
-
-    def format_hand(hand, hide_first=False):
-        if hide_first:
-            # Show the back emoji for the first card, and the emoji for the second card
-            back_emoji = CARD_EMOJIS.get('back', '🎴')
-            second_card = hand[1]
-            second_emoji = CARD_EMOJIS.get((second_card[0], second_card[1]), f"**[{second_card[0]}]** {second_card[1]}")
-            return f"{back_emoji} {second_emoji}"
-        
-        emojis = []
-        for val, suit in hand:
-            emoji = CARD_EMOJIS.get((val, suit))
-            if emoji:
-                emojis.append(emoji)
-            else:
-                # Fallback for missing cards (J, Q, K, 10 of Spades, Ace of Spades)
-                emojis.append(f"**[{val}]** {suit}")
-        
-        return " ".join(emojis)
-
-    # Determine split availability
-    can_split = player_hand[0][0] == player_hand[1][0]
-    class BlackjackView(discord.ui.View):
-        def __init__(self, ctx, can_double=True, can_split=False):
-            super().__init__(timeout=30)
-            self.ctx = ctx
-            self.value = None
-            if not can_double:
-                self.double_down.disabled = True
-            if not can_split:
-                self.split.disabled = True
-
-        @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary, custom_id="hit")
-        async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if interaction.user.id != self.ctx.author.id:
-                return await interaction.response.send_message("This isn't your game!", ephemeral=True)
-            self.value = "hit"
-            await interaction.response.defer()
-            self.stop()
-
-        @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary, custom_id="stand")
-        async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if interaction.user.id != self.ctx.author.id:
-                return await interaction.response.send_message("This isn't your game!", ephemeral=True)
-            self.value = "stand"
-            await interaction.response.defer()
-            self.stop()
-
-        @discord.ui.button(label="Double Down", style=discord.ButtonStyle.secondary, custom_id="double")
-        async def double_down(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if interaction.user.id != self.ctx.author.id:
-                return await interaction.response.send_message("This isn't your game!", ephemeral=True)
-            self.value = "double"
-            await interaction.response.defer()
-            self.stop()
-
-        @discord.ui.button(label="Split", style=discord.ButtonStyle.secondary, custom_id="split")
-        async def split(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if interaction.user.id != self.ctx.author.id:
-                return await interaction.response.send_message("This isn't your game!", ephemeral=True)
-            if not can_split:
-                return await interaction.response.send_message("You can only split identical ranks.", ephemeral=True)
-            self.value = "split"
-            await interaction.response.defer()
-            self.stop()
-
-    async def get_bj_embed(show_dealer=False, result_text=None):
-        # Using a bright color as requested (Cyan/Bright Blue)
-        embed = discord.Embed(color=0x00FFFF) 
-        embed.set_author(name=f"{ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
-        
-        # Dealer side
-        if show_dealer:
-            d_val = calc_hand(dealer_hand)
-            d_str = format_hand(dealer_hand)
-        else:
-            visible_card_value = calc_hand([dealer_hand[1]])
-            d_val = visible_card_value
-            d_str = format_hand(dealer_hand, hide_first=True)
-        
-        # Player side
-        p_val = calc_hand(player_hand)
-
-        if result_text:
-            # Result formatting like UnbelievaBoat
-            embed.description = f"**Result: {result_text}**"
-            if "Win" in result_text: embed.color = 0x00ff00 # Bright Green
-            elif "Loss" in result_text or "Bust" in result_text or "Timed Out" in result_text: embed.color = 0xff0000 # Bright Red
-            else: embed.color = 0xffff00 # Bright Yellow
-        
-        # Hand display side-by-side
-        embed.add_field(name="Your Hand", value=f"{format_hand(player_hand)}\n\n**Value: {p_val}**", inline=True)
-        embed.add_field(name="Dealer Hand", value=f"{d_str}\n\n**Value: {d_val}**", inline=True)
-        
-        return embed
-
-    view = BlackjackView(ctx, can_double=(balance >= bet_amount * 2), can_split=can_split)
-    msg = await ctx.send(embed=await get_bj_embed(), view=view)
-
-    # Game Loop
-    while True:
-        if calc_hand(player_hand) >= 21:
-            break
-            
-        await view.wait()
-        
-        if view.value == "hit":
-            player_hand.append(get_card())
-            if calc_hand(player_hand) >= 21:
-                break
-            view = BlackjackView(ctx, can_double=False) # Can't double after hitting
-            await msg.edit(embed=await get_bj_embed(), view=view)
-        elif view.value == "stand":
-            break
-        elif view.value == "double":
-            bet_amount *= 2
-            player_hand.append(get_card())
-            break
-        elif view.value == "split":
-            hand1 = [player_hand[0], get_card()]
-            hand2 = [player_hand[1], get_card()]
-            # Simple auto-play strategy for split: hit until 17+
-            while calc_hand(hand1) < 17:
-                hand1.append(get_card())
-            while calc_hand(hand2) < 17:
-                hand2.append(get_card())
-            # Dealer plays
-            while calc_hand(dealer_hand) < 17:
-                dealer_hand.append(get_card())
-            # Evaluate both hands
-            results = []
-            for h in [hand1, hand2]:
-                p_total = calc_hand(h)
-                d_total = calc_hand(dealer_hand)
-                if p_total > 21:
-                    results.append("loss")
-                elif d_total > 21 or p_total > d_total:
-                    results.append("win")
-                elif p_total == d_total:
-                    results.append("push")
-                else:
-                    results.append("loss")
-            # Apply settlements: each hand is one bet
-            total_delta = 0
-            if "win" in results: total_delta += bet_amount
-            if results.count("win") == 2: total_delta += bet_amount
-            if results.count("loss") == 1: total_delta -= bet_amount
-            if results.count("loss") == 2: total_delta -= bet_amount * 2
-            async with aiosqlite.connect(DB_FILE) as db:
-                if total_delta > 0:
-                    await db.execute('UPDATE users SET balance = balance + ?, blackjack_wins = blackjack_wins + ? WHERE user_id = ? AND guild_id = 0', (total_delta, results.count("win"), ctx.author.id))
-                elif total_delta < 0:
-                    await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = 0', (abs(total_delta), ctx.author.id))
-                await db.commit()
-            await increment_stat(ctx.author.id, ctx.guild.id, "blackjack_plays")
-            if results.count("win") > 0:
-                await increment_stat(ctx.author.id, ctx.guild.id, "blackjack_wins")
-            summary = f"Split result — Wins: {results.count('win')}, Pushes: {results.count('push')}, Losses: {results.count('loss')}."
-            await msg.edit(embed=await get_bj_embed(show_dealer=True, result_text=summary), view=None)
-            return
-
-    # Dealer Turn
-    p_total = calc_hand(player_hand)
-    if p_total > 21:
-        result = f"Bust 🍞 -{bet_amount:,}"
-        win_status = "loss"
-    else:
-        # Dealer must hit until 17
-        while calc_hand(dealer_hand) < 17:
-            dealer_hand.append(get_card())
-        
-        d_total = calc_hand(dealer_hand)
-        if d_total > 21:
-            result = f"Win 🍞 +{bet_amount:,}"
-            win_status = "win"
-        elif d_total > p_total:
-            result = f"Loss 🍞 -{bet_amount:,}"
-            win_status = "loss"
-        elif d_total < p_total:
-            result = f"Win 🍞 +{bet_amount:,}"
-            win_status = "win"
-        else:
-            result = f"Push 🍞 +0"
-            win_status = "push"
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        if win_status == "win":
-            server_multiplier = get_server_join_multiplier(ctx.author.id)
-            final_win = int(bet_amount * server_multiplier)
-            await db.execute('UPDATE users SET balance = balance + ?, blackjack_wins = blackjack_wins + 1 WHERE user_id = ? AND guild_id = 0', (final_win, ctx.author.id))
-            if server_multiplier > 1.0:
-                result += f" ({server_multiplier}x Server Boost!)"
-        elif win_status == "loss":
-            await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = 0', (bet_amount, ctx.author.id))
-        await db.commit()
-    await increment_stat(ctx.author.id, ctx.guild.id, "blackjack_wins" if win_status == "win" else "blackjack_plays")
-
-    await msg.edit(embed=await get_bj_embed(show_dealer=True, result_text=result), view=None)
-
-@bot.hybrid_command(name="deposit", aliases=["dep"], description="Deposit coins into the bank")
-async def deposit(ctx: commands.Context, amount: str):
-    user = await get_global_money(ctx.author.id)
-    if amount.lower() == 'all':
-        amt = user['balance']
-    else:
-        try: amt = int(amount)
-        except: return await ctx.send("Enter a valid number or 'all'.")
-    
-    if amt <= 0: return await ctx.send("Amount must be positive.")
-    if user['balance'] < amt: return await ctx.send("You don't have enough coins!")
-    
-    await move_global_wallet_to_bank(ctx.author.id, amt)
-    await ctx.send(f"🏦 Deposited **{amt:,} coins**.")
-
-@bot.hybrid_command(name="withdraw", description="Withdraw coins from your bank")
-async def withdraw(ctx: commands.Context, amount: str):
-    data = await get_global_money(ctx.author.id)
-    if amount.lower() == 'all':
-        amt = data['bank']
-    else:
-        try: amt = int(amount)
-        except: return await ctx.send("Invalid amount.")
-    
-    if amt <= 0: return await ctx.send("Amount must be positive.")
-    if amt > data['bank']: return await ctx.send("You don't have that much in your bank!")
-    
-    await move_global_bank_to_wallet(ctx.author.id, amt)
-    await ctx.send(f"✅ Withdrew **{amt:,} coins**.")
-
-@bot.hybrid_command(name="vote", description="Vote for the bot on Top.gg to get rewards!")
-async def vote(ctx: commands.Context):
-    await ctx.defer()
-    vote_url = f"https://top.gg/bot/{bot.user.id}/vote"
-    data = await get_user_data(ctx.author.id, ctx.guild.id)
-    now = int(time.time())
-    last_vote_time = data['last_vote'] if data['last_vote'] else 0
-    time_since_vote = now - last_vote_time
-    
-    # Debug logging
-    print(f"DEBUG: /vote command - User: {ctx.author.id}, Last Vote: {last_vote_time}, Now: {now}, Time Since: {time_since_vote}s")
-    
-    embed = discord.Embed(title="🗳️ Vote for Empire Nexus", color=0x00d2ff)
-    embed.description = f"Support the bot and unlock exclusive rewards for **12 hours**!\n\n" \
-                        f"🎁 **Rewards:**\n" \
-                        f"• 🏦 **Auto-Deposit:** Passive income goes straight to your bank!\n" \
-                        f"• 💰 **Bonus Coins:** 25,000 Coins (Instant)\n\n" \
-                        f"[**Click here to vote on Top.gg**]({vote_url})"
-    
-    if time_since_vote < 43200:
-        remaining = 43200 - time_since_vote
-        hours, remainder = divmod(remaining, 3600)
-        minutes, _ = divmod(remainder, 60)
-        embed.add_field(name="✅ Status", value=f"You have already voted! Rewards active for **{hours}h {minutes}m**.")
-    else:
-        embed.add_field(name="❌ Status", value="You haven't voted in the last 12 hours.")
-        
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="autodeposit", description="Toggle auto-deposit of passive income (requires active vote)")
-async def autodeposit(ctx: commands.Context):
-    await ctx.defer()
-    data = await get_user_data(ctx.author.id, ctx.guild.id)
-    now = int(time.time())
-    last_vote_time = data['last_vote'] if data['last_vote'] else 0
-    time_since_vote = now - last_vote_time
-    is_voter = time_since_vote < 43200
-    
-    # Debug logging
-    print(f"DEBUG: /autodeposit command - User: {ctx.author.id}, Last Vote: {last_vote_time}, Now: {now}, Time Since: {time_since_vote}s, Is Voter: {is_voter}")
-    
-    if not is_voter:
-        vote_url = f"https://top.gg/bot/{bot.user.id}/vote"
-        return await ctx.send(f"❌ You need an active vote to use this! [**Vote here**]({vote_url}) to unlock auto-deposit for 12 hours.")
-    
-    new_state = 0 if data['auto_deposit'] else 1
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET auto_deposit = ? WHERE user_id = ? AND guild_id = ?', (new_state, ctx.author.id, ctx.guild.id))
-        await db.commit()
-    
-    if new_state:
-        remaining = 43200 - time_since_vote
-        hours, remainder = divmod(remaining, 3600)
-        minutes, _ = divmod(remainder, 60)
-        await ctx.send(f"✅ **Auto-deposit starting now!** You have **{hours}h {minutes}m** left until your vote expires.")
-    else:
-        await ctx.send("✅ Auto-deposit is now **DISABLED**.")
-
-@bot.hybrid_command(name="shop", description="View the asset shop")
-async def shop(ctx: commands.Context):
-    assets = await get_guild_assets(ctx.guild.id)
-    embed = discord.Embed(title="🛒 Kingdom Asset Shop", description="Buy assets to earn passive income every 10 minutes!", color=0x00d2ff)
-    for aid, data in assets.items():
-        embed.add_field(name=f"{data['name']} (ID: {aid})", value=f"Price: 🪙 {data['price']:,}\nIncome: 💸 {data['income']:,}/10min", inline=False)
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="buy", description="Buy a passive income asset")
-async def buy_asset(ctx: commands.Context, asset_id: str, count: int = 1):
-    if count <= 0: return await ctx.send("Count must be positive.")
-    assets = await get_guild_assets(ctx.guild.id)
-    if asset_id not in assets: return await ctx.send("Invalid asset ID!")
-    
-    asset = assets[asset_id]
-    total_price = asset['price'] * count
-    user = await get_user_data(ctx.author.id, ctx.guild.id)
-    
-    if user['balance'] < total_price: return await ctx.send(f"You need **{total_price - user['balance']:,} more coins**!")
-    
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = ?', (total_price, ctx.author.id, ctx.guild.id))
-        await db.execute('INSERT INTO user_assets (user_id, guild_id, asset_id, count) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, guild_id, asset_id) DO UPDATE SET count = count + ?', 
-                        (ctx.author.id, ctx.guild.id, asset_id, count, count))
-        await db.commit()
-    await ctx.send(f"✅ Bought **{count}x {asset['name']}** for **{total_price:,} coins**!")
-
-@bot.hybrid_command(name="profile", description="View your empire status")
-async def profile(ctx: commands.Context, member: discord.Member = None):
-    target = member or ctx.author
-    data = await get_global_money(target.id)
-    await ensure_rewards(target.id)
-    
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT asset_id, count FROM user_assets WHERE user_id = ? AND guild_id = ? AND count > 0', (target.id, ctx.guild.id)) as cursor:
-            assets_rows = await cursor.fetchall()
-        async with db.execute('SELECT multipliers_json, titles_json, medals_json FROM user_rewards WHERE user_id = ?', (target.id,)) as cursor:
-            reward_row = await cursor.fetchone()
-    
-    assets_str = "\n".join([f"• {count}x {aid}" for aid, count in assets_rows]) if assets_rows else "No assets."
-    
-    titles_str = "None"
-    medals_str = ""
-    if reward_row:
-        try:
-            titles = json.loads(reward_row['titles_json'])
-            medals = json.loads(reward_row['medals_json'])
-            if titles:
-                titles_str = ", ".join([t['title'] for t in titles])
-            if medals:
-                medals_str = " " + " ".join([m['medal'] for m in medals])
-        except:
-            pass
-    
-    embed = discord.Embed(title=f"👑 {target.display_name}'s Empire{medals_str}", color=0x00d2ff)
-    embed.add_field(name="📊 Stats", value=f"Level: {data['level']}\nXP: {data['xp']}\nPrestige: {data['prestige']}", inline=True)
-    embed.add_field(name="💰 Wealth (Global)", value=f"Wallet: {data['balance']:,}\nBank: {data['bank']:,}", inline=True)
-    embed.add_field(name="🏷️ Titles", value=titles_str, inline=False)
-    embed.add_field(name="🏗️ Assets", value=assets_str, inline=False)
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="crime", description="Commit a crime for high rewards (or risk!)")
-@commands.cooldown(1, 1800, commands.BucketType.user)
-async def crime(ctx: commands.Context):
-    data = await get_global_money(ctx.author.id)
-    now = int(time.time())
-    
-    # Keeping the old check as a backup, but commands.cooldown is better
-    if now - data['last_crime'] < 1800: 
-        return await ctx.send(f"🚔 Cops are searching for you! Wait **{1800 - (now - data['last_crime'])}s**.")
-    
-    if random.random() < 0.30:
-        base = random.randint(1000, 3000) * data['level']
-        job_id = await get_user_job(ctx.author.id, ctx.guild.id)
-        multiplier = 1.0
-        if job_id and job_id in JOBS and JOBS[job_id].get('focus') == 'crime':
-            multiplier = float(JOBS[job_id].get('multiplier', 1.0))
-            
-        server_multiplier = get_server_join_multiplier(ctx.author.id)
-        earned = int(base * multiplier * server_multiplier)
-        
-        msg_boost = ""
-        if server_multiplier > 1.0:
-            msg_boost = " (Includes **2x Server Booster**!)"
-            
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = balance + ?, last_crime = ?, successful_crimes = successful_crimes + 1 WHERE user_id = ? AND guild_id = 0', (earned, now, ctx.author.id))
-            await db.commit()
-        await ctx.send(f"😈 You pulled off a heist and got **{earned:,} coins**!{msg_boost}")
-        await increment_stat(ctx.author.id, ctx.guild.id, "crime_success")
-    else:
-        loss = random.randint(500, 1000)
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = MAX(0, balance - ?), last_crime = ? WHERE user_id = ? AND guild_id = 0', (loss, now, ctx.author.id))
-            await db.commit()
-        await ctx.send(f"👮 BUSTED! You lost **{loss:,} coins** while escaping.")
-        await increment_stat(ctx.author.id, ctx.guild.id, "crime_fail")
-
-@bot.hybrid_command(name="dailyquests", description="View your daily quest progress")
-async def dailyquests(ctx: commands.Context):
-    await ensure_quest_resets(ctx.author.id, ctx.guild.id)
-    data = await get_user_data(ctx.author.id, ctx.guild.id)
-    done = data['daily_commands']
-    try:
-        completed = json.loads(data['daily_quest_completed_json']) if data['daily_quest_completed_json'] else {}
-    except:
-        completed = {}
-    quests = get_active_daily_quests(ctx.guild.id)
-    embed = discord.Embed(title="📅 Daily Quests", color=0x00d2ff)
-    if not quests:
-        embed.description = "No quests configured."
-    else:
-        for q in quests:
-            target = q["target"]
-            reward = q["reward"]
-            progress_pct = min(100, int(done / target * 100)) if target > 0 else 100
-            bar_len = 12
-            filled = int(bar_len * progress_pct / 100)
-            bar = "🟦" * filled + "⬛" * (bar_len - filled)
-            is_done = completed.get(q["id"], False)
-            prefix = "✅" if is_done else "❌"
-            status = "Completed" if is_done else ("Ready" if done >= target else "In progress")
-            embed.add_field(
-                name=f"{prefix} {q['description']}",
-                value=f"Reward: {reward:,} coins\nProgress: {min(done, target)} / {target} ({progress_pct}%)\n{bar}\nStatus: {status}",
-                inline=False
-            )
-    await ctx.send(embed=apply_theme(embed))
-
-@bot.hybrid_command(name="weeklyquests", description="View your weekly quest progress")
-async def weeklyquests(ctx: commands.Context):
-    await ensure_quest_resets(ctx.author.id, ctx.guild.id)
-    data = await get_user_data(ctx.author.id, ctx.guild.id)
-    done = data['weekly_commands']
-    try:
-        completed = json.loads(data['weekly_quest_completed_json']) if data['weekly_quest_completed_json'] else {}
-    except:
-        completed = {}
-    quests = get_active_weekly_quests(ctx.guild.id)
-    embed = discord.Embed(title="📆 Weekly Quests", color=0x00d2ff)
-    if not quests:
-        embed.description = "No quests configured."
-    else:
-        for q in quests:
-            target = q["target"]
-            reward = q["reward"]
-            progress_pct = min(100, int(done / target * 100)) if target > 0 else 100
-            bar_len = 12
-            filled = int(bar_len * progress_pct / 100)
-            bar = "🟦" * filled + "⬛" * (bar_len - filled)
-            is_done = completed.get(q["id"], False)
-            prefix = "✅" if is_done else "❌"
-            status = "Completed" if is_done else ("Ready" if done >= target else "In progress")
-            embed.add_field(
-                name=f"{prefix} {q['description']}",
-                value=f"Reward: {reward:,} coins\nProgress: {min(done, target)} / {target} ({progress_pct}%)\n{bar}\nStatus: {status}",
-                inline=False
-            )
-    await ctx.send(embed=apply_theme(embed))
-
-# --- Hybrid Commands (Prefix + Slash) ---
-
-@bot.hybrid_command(name="balance", aliases=["bal"], description="Check your balance")
-async def balance(ctx: commands.Context, member: discord.Member = None):
-    target = member or ctx.author
-    data = await get_global_money(target.id)
-    bank_plan = data['bank_plan'] if 'bank_plan' in data.keys() else 'standard'
-    banks = DEFAULT_BANK_PLANS
-    plan = banks.get(bank_plan) or banks.get('standard')
-    if plan:
-        rate_min = plan.get('min', 0.01)
-        rate_max = plan.get('max', 0.02)
-        plan_name = plan.get('name', 'Standard Vault')
-        rate_str = f"{rate_min*100:.2f}%–{rate_max*100:.2f}%/h"
-    else:
-        plan_name = "Standard Vault"
-        rate_str = "1.00%–2.00%/h"
-    embed = discord.Embed(title=f"💰 {target.display_name}'s Vault", color=0xf1c40f)
-    embed.add_field(name="Wallet", value=f"🪙 `{data['balance']:,}`", inline=True)
-    embed.add_field(name="Bank", value=f"🏦 `{data['bank']:,}`", inline=True)
-    embed.add_field(name="Bank Plan", value=f"{plan_name}\n{rate_str}", inline=False)
-    embed.set_footer(text=f"Total: {data['balance'] + data['bank']:,} coins")
-    await ctx.send(embed=apply_theme(embed))
-
-@bot.hybrid_command(name="bank", description="View and switch bank plans")
-async def bank_cmd(ctx: commands.Context, plan_id: str = None):
-    data = await get_global_money(ctx.author.id)
-    banks = DEFAULT_BANK_PLANS
-    current = data['bank_plan'] if 'bank_plan' in data.keys() and data['bank_plan'] else 'standard'
-    if not plan_id:
-        desc = ""
-        for b_id, info in banks.items():
-            rate_min = float(info.get('min', 0.01)) * 100
-            rate_max = float(info.get('max', 0.02)) * 100
-            price = int(info.get('price', 0))
-            min_level = int(info.get('min_level', 0))
-            marker = "✅" if b_id == current else "➖"
-            desc += f"{marker} **{info.get('name', b_id)}** (`{b_id}`)\n{rate_min:.2f}%–{rate_max:.2f}%/h • Cost: {price:,} • Min Lvl: {min_level}\n\n"
-        embed = discord.Embed(title="🏦 Bank Plans", description=desc or "No plans configured.", color=0x00d2ff)
-        embed.set_footer(text="Use /bank <plan_id> to switch.")
-        await ctx.send(embed=apply_theme(embed))
-        return
-    plan_id = plan_id.lower()
-    if plan_id not in banks:
-        await ctx.send("Invalid bank plan id.")
-        return
-    if plan_id == current:
-        await ctx.send("You already use this bank plan.")
-        return
-    info = banks[plan_id]
-    price = int(info.get('price', 0))
-    min_level = int(info.get('min_level', 0))
-    if data['level'] < min_level:
-        await ctx.send(f"You need at least level {min_level} to use this plan.")
-        return
-    if price > 0 and data['balance'] < price:
-        await ctx.send(f"You need {price - data['balance']:,} more coins in your wallet.")
-        return
-    async with aiosqlite.connect(DB_FILE) as db:
-        if price > 0:
-            await db.execute('UPDATE users SET balance = balance - ?, bank_plan = ? WHERE user_id = ? AND guild_id = 0', (price, plan_id, ctx.author.id))
-        else:
-            await db.execute('UPDATE users SET bank_plan = ? WHERE user_id = ? AND guild_id = 0', (plan_id, ctx.author.id))
-        await db.commit()
-    await ctx.send(f"Switched your bank plan to **{info.get('name', plan_id)}**.")
-
-@bot.hybrid_command(name="work", description="Work to earn coins")
-@commands.cooldown(1, 300, commands.BucketType.user)
-async def work(ctx: commands.Context):
-    success, message = await work_logic(ctx, ctx.author.id, ctx.guild.id)
-    color = 0x2ecc71 if success else 0xe74c3c
-    embed = discord.Embed(description=message, color=color)
-    await ctx.send(embed=apply_theme(embed))
-
-@bot.hybrid_command(name="rob", description="Try to rob someone")
-@app_commands.describe(target="The user you want to rob")
-@commands.cooldown(1, 1800, commands.BucketType.user)
-async def rob(ctx: commands.Context, target: discord.Member):
-    if target.id == ctx.author.id: return await ctx.send("Don't rob yourself.")
-    stealer = await get_global_money(ctx.author.id)
-    victim = await get_global_money(target.id)
-    if victim['balance'] < 500: return await ctx.send("Target is too poor! They need at least 500 coins.")
-    
-    now = int(time.time())
-    if now - stealer['last_rob'] < 1800: 
-        return await ctx.send(f"Wait {1800 - (now - stealer['last_rob'])}s.")
-    
-    if random.random() < 0.35: # Lowered from 0.4
-        stolen = random.randint(50, int(victim['balance'] * 0.25)) # Lowered max steal from 30%
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = balance + ?, last_rob = ?, successful_robs = successful_robs + 1 WHERE user_id = ? AND guild_id = 0', (stolen, now, ctx.author.id))
-            await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = 0', (stolen, target.id))
-            await db.commit()
-        embed = discord.Embed(description=f"🧤 Stole **{stolen:,}** from {target.mention}!", color=0x2ecc71)
-        await ctx.send(embed=apply_theme(embed))
-        await increment_stat(ctx.author.id, ctx.guild.id, "rob_success")
-    else:
-        fine = random.randint(300, 600)
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = MAX(0, balance - ?), last_rob = ? WHERE user_id = ? AND guild_id = 0', (fine, now, ctx.author.id))
-            await db.commit()
-        embed = discord.Embed(description=f"🚔 Caught! Fined {fine:,} coins.", color=0xe74c3c)
-        await ctx.send(embed=apply_theme(embed))
-        await increment_stat(ctx.author.id, ctx.guild.id, "rob_fail")
-
-@bot.hybrid_command(name="buyrole", description="Buy a role from the server shop")
-async def buyrole(ctx: commands.Context, role: discord.Role):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT role_shop_json FROM guild_config WHERE guild_id = ?', (ctx.guild.id,)) as cursor:
-            row = await cursor.fetchone()
-            if not row: return await ctx.send("❌ This server hasn't set up a role shop yet!")
-            shop = json.loads(row[0])
-
-    role_id = str(role.id)
-    if role_id not in shop:
-        return await ctx.send("❌ This role is not for sale!")
-
-    price = shop[role_id]
-    user = await get_global_money(ctx.author.id)
-
-    if user['balance'] < price:
-        return await ctx.send(f"❌ You need **{price - user['balance']:,} more coins**!")
-
-    try:
-        await ctx.author.add_roles(role)
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = 0', (price, ctx.author.id))
-            await db.commit()
-        await ctx.send(f"✅ Successfully bought the **{role.name}** role!")
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to give you that role! (Make sure my role is higher than the one you're buying)")
-
-@bot.hybrid_command(name="rank", description="Check your current level and XP")
-async def rank(ctx: commands.Context, member: discord.Member = None):
-    target = member or ctx.author
-    data = await get_user_data(target.id, ctx.guild.id)
-    
-    xp = data['xp']
-    level = data['level']
-    needed_xp = level * 100
-    
-    # Simple progress bar
-    progress = min(1.0, xp / needed_xp)
-    bar_length = 10
-    filled = int(progress * bar_length)
-    bar = "🟩" * filled + "⬜" * (bar_length - filled)
-    
-    embed = discord.Embed(title=f"📊 {target.display_name}'s Rank", color=0x00d2ff)
-    embed.add_field(name="Level", value=f"⭐ `{level}`", inline=True)
-    embed.add_field(name="Prestige", value=f"👑 `{data['prestige']}`", inline=True)
-    embed.add_field(name="Progress", value=f"{bar} ({xp}/{needed_xp} XP)", inline=False)
-    embed.set_thumbnail(url=target.display_avatar.url)
-    await ctx.send(embed=embed)
-
-# --- Social & Casino Add-ons ---
-@bot.hybrid_command(name="gift", description="Gift coins to another user (global money)")
-@app_commands.describe(member="User to gift", amount="Amount of coins")
-async def gift(ctx: commands.Context, member: discord.Member, amount: int):
-    if member.id == ctx.author.id:
-        return await ctx.send("You can't gift yourself.")
-    if amount <= 0:
-        return await ctx.send("Amount must be positive.")
-    sender = await get_global_money(ctx.author.id)
-    if sender['balance'] < amount:
-        return await ctx.send("You don't have enough coins.")
-    await update_global_balance(ctx.author.id, -amount)
-    await update_global_balance(member.id, amount)
-    await ctx.send(f"🎁 {ctx.author.mention} gifted **{amount:,}** coins to {member.mention}.")
-
-@bot.hybrid_command(name="marry", description="Marry another user")
-async def marry(ctx: commands.Context, member: discord.Member):
-    if member.id == ctx.author.id:
-        return await ctx.send("You can't marry yourself.")
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT partner_id FROM marriages WHERE user_id = ?', (ctx.author.id,)) as c:
-            row = await c.fetchone()
-        async with db.execute('SELECT partner_id FROM marriages WHERE user_id = ?', (member.id,)) as c2:
-            row2 = await c2.fetchone()
-        if row or row2:
-            return await ctx.send("Either you or the target is already married.")
-        await db.execute('INSERT OR REPLACE INTO marriage_proposals (proposer_id, target_id, guild_id, created_at) VALUES (?, ?, ?, ?)', (ctx.author.id, member.id, ctx.guild.id, int(time.time())))
-        await db.commit()
-    await ctx.send(f"💌 {member.mention}, {ctx.author.mention} proposed! Use `/acceptmarry @{ctx.author.display_name}` or `/declinemarry @{ctx.author.display_name}`.")
-
-@bot.hybrid_command(name="divorce", description="Divorce your current partner")
-async def divorce(ctx: commands.Context):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT partner_id FROM marriages WHERE user_id = ?', (ctx.author.id,)) as c:
-            row = await c.fetchone()
-        if not row:
-            return await ctx.send("You're not married.")
-        partner_id = row[0]
-        async with db.execute('SELECT kids FROM marriages WHERE user_id = ?', (ctx.author.id,)) as kc:
-            krow = await kc.fetchone()
-        kids = int(krow[0] or 0) if krow else 0
-        if kids > 0:
-            questions = [
-                "Who has more stable availability for childcare?",
-                "Who contributes more to family finances?",
-                "Who has better support network in the server?",
-                "Who has shown more consistency in daily engagement?",
-                "Who can provide safer environment (moderation record)?"
-            ]
-            await db.execute('INSERT INTO divorce_cases (guild_id, spouse1_id, spouse2_id, kids, questions_json) VALUES (?, ?, ?, ?, ?)', (ctx.guild.id, ctx.author.id, partner_id, kids, json.dumps(questions)))
-            await db.commit()
-            await ctx.send("⚖️ Court case opened. Both spouses must answer via `/divorce_answer case_id:<id> answers:\"A,B,C,D,E\"` where A/B indicates which spouse for each question.")
-            return
-        await db.execute('DELETE FROM marriages WHERE user_id = ?', (ctx.author.id,))
-        await db.execute('DELETE FROM marriages WHERE user_id = ?', (partner_id,))
-        await db.commit()
-    await ctx.send("💔 Divorce finalized.")
-
-@bot.hybrid_command(name="acceptmarry", description="Accept a marriage proposal")
-async def acceptmarry(ctx: commands.Context, member: discord.Member):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT created_at FROM marriage_proposals WHERE proposer_id = ? AND target_id = ? AND guild_id = ?', (member.id, ctx.author.id, ctx.guild.id)) as c:
-            row = await c.fetchone()
-        if not row:
-            return await ctx.send("No proposal found.")
-        await db.execute('DELETE FROM marriage_proposals WHERE proposer_id = ? AND target_id = ? AND guild_id = ?', (member.id, ctx.author.id, ctx.guild.id))
-        await db.execute('INSERT OR REPLACE INTO marriages (user_id, partner_id, kids) VALUES (?, ?, COALESCE((SELECT kids FROM marriages WHERE user_id = ?), 0))', (ctx.author.id, member.id, ctx.author.id))
-        await db.execute('INSERT OR REPLACE INTO marriages (user_id, partner_id, kids) VALUES (?, ?, COALESCE((SELECT kids FROM marriages WHERE user_id = ?), 0))', (member.id, ctx.author.id, member.id))
-        await db.commit()
-    await ctx.send(f"💍 {ctx.author.mention} and {member.mention} are now married! Congratulations!")
-
-@bot.hybrid_command(name="declinemarry", description="Decline a marriage proposal")
-async def declinemarry(ctx: commands.Context, member: discord.Member):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('DELETE FROM marriage_proposals WHERE proposer_id = ? AND target_id = ? AND guild_id = ?', (member.id, ctx.author.id, ctx.guild.id))
-        await db.commit()
-    await ctx.send("❌ Proposal declined.")
-
-@bot.hybrid_command(name="divorce_answer", description="Answer divorce case questions")
-async def divorce_answer(ctx: commands.Context, case_id: int, answers: str):
-    parts = [p.strip().upper() for p in answers.split(",") if p.strip()]
-    if len(parts) != 5 or any(p not in ["A","B"] for p in parts):
-        return await ctx.send("Provide 5 answers as A or B separated by commas.")
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT * FROM divorce_cases WHERE case_id = ? AND status = "pending"', (case_id,)) as c:
-            row = await c.fetchone()
-        if not row:
-            return await ctx.send("Case not found or already closed.")
-        s1 = int(row['spouse1_id']); s2 = int(row['spouse2_id'])
-        ajson = json.dumps(parts)
-        if ctx.author.id == s1:
-            await db.execute('UPDATE divorce_cases SET answers1_json = ? WHERE case_id = ?', (ajson, case_id))
-        elif ctx.author.id == s2:
-            await db.execute('UPDATE divorce_cases SET answers2_json = ? WHERE case_id = ?', (ajson, case_id))
-        else:
-            return await ctx.send("You are not part of this case.")
-        await db.commit()
-        async with db.execute('SELECT answers1_json, answers2_json, kids FROM divorce_cases WHERE case_id = ?', (case_id,)) as c2:
-            row2 = await c2.fetchone()
-        if not row2 or not row2['answers1_json'] or not row2['answers2_json']:
-            return await ctx.send("Answers recorded. Waiting for the other spouse.")
-        a1 = json.loads(row2['answers1_json'])
-        a2 = json.loads(row2['answers2_json'])
-        score1 = sum(1 for i in range(5) if a1[i] == "A" and a2[i] == "A")
-        score2 = sum(1 for i in range(5) if a1[i] == "B" and a2[i] == "B")
-        winner = s1 if score1 >= score2 else s2
-        loser = s2 if winner == s1 else s1
-        kids = int(row2['kids'] or 0)
-        base_fine = max(1000, kids * 5000)
-        extra_fine = max(0, (score1 - score2) * 1000) if winner == s1 else max(0, (score2 - score1) * 1000)
-        fines = {"base": base_fine, "loser_extra": extra_fine}
-        await db.execute('UPDATE divorce_cases SET status = "closed", fines_json = ? WHERE case_id = ?', (json.dumps(fines), case_id))
-        await db.execute('UPDATE marriages SET kids = ? WHERE user_id = ?', (kids, winner))
-        await db.execute('UPDATE marriages SET kids = 0 WHERE user_id = ?', (loser))
-        await db.execute('DELETE FROM marriages WHERE user_id = ?', (winner))
-        await db.execute('DELETE FROM marriages WHERE user_id = ?', (loser))
-        await db.commit()
-    await update_global_balance(loser, -(base_fine + extra_fine))
-    await ctx.send(f"⚖️ Court concluded. Custody awarded to <@{winner}>. Fines: base {base_fine:,}, loser extra {extra_fine:,}.")
-
-@bot.hybrid_command(name="kids", description="Manage or view family kids count")
-@app_commands.describe(action="add or view", count="How many to add (if adding)")
-async def kids(ctx: commands.Context, action: str = "view", count: int = 0):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT partner_id, kids FROM marriages WHERE user_id = ?', (ctx.author.id,)) as c:
-            row = await c.fetchone()
-        if not row:
-            return await ctx.send("You're not married.")
-        partner_id = int(row[0]); current = int(row[1] or 0)
-        if action.lower() == "add":
-            if count <= 0:
-                return await ctx.send("Provide a positive count.")
-            newc = current + count
-            await db.execute('UPDATE marriages SET kids = ? WHERE user_id = ?', (newc, ctx.author.id))
-            await db.execute('UPDATE marriages SET kids = ? WHERE user_id = ?', (newc, partner_id))
-            await db.commit()
-            return await ctx.send(f"👶 Family updated: kids = {newc}.")
-        return await ctx.send(f"👪 Current kids: {current}.")
-def win_loss_apply(user_id, amount, win=True):
-    delta = amount if win else -amount
-    res = update_global_balance(user_id, delta)
-    if win and amount > 0:
-        bot.loop.create_task(apply_vassal_cut(user_id, 0, amount))
-    return res
-
-async def apply_vassal_cut(user_id: int, guild_id: int, amount: int):
-    try:
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute('SELECT lord_id, percent FROM vassals WHERE vassal_id = ? ORDER BY percent DESC LIMIT 1', (user_id,)) as c:
-                row = await c.fetchone()
-        if not row:
-            return
-        lord_id, percent = row
-        cut = int(amount * (percent / 100.0))
-        if cut > 0:
-            await update_global_balance(lord_id, cut)
-    except:
-        pass
-
-@bot.hybrid_command(name="coinflip", description="50/50 coinflip")
-@app_commands.describe(amount="Bet amount or 'all'")
-async def coinflip(ctx: commands.Context, amount: str):
-    data = await get_global_money(ctx.author.id)
-    if amount.lower() == 'all':
-        bet = data['balance']
-    else:
-        try:
-            bet = int(amount)
-        except:
-            return await ctx.send("Enter a valid number or 'all'.")
-    if bet <= 0: return await ctx.send("Bet must be positive.")
-    if bet > data['balance']: return await ctx.send("You don't have enough coins.")
-    win = random.choice([True, False])
-    await win_loss_apply(ctx.author.id, bet, win=win)
-    await ctx.send("🪙 Heads! You win!" if win else "🪙 Tails! You lose.")
-
-@bot.hybrid_command(name="slots", description="Spin the slot machine")
-@app_commands.describe(amount="Bet amount or 'all'")
-async def slots(ctx: commands.Context, amount: str):
-    data = await get_global_money(ctx.author.id)
-    if amount.lower() == 'all':
-        bet = data['balance']
-    else:
-        try:
-            bet = int(amount)
-        except:
-            return await ctx.send("Enter a valid number or 'all'.")
-    if bet <= 0: return await ctx.send("Bet must be positive.")
-    if bet > data['balance']: return await ctx.send("You don't have enough coins.")
-    reels = ['🍒','🍋','🍇','⭐','💎']
-    r = [random.choice(reels) for _ in range(3)]
-    if r[0] == r[1] == r[2]:
-        win_amt = int(bet * 3)
-        await win_loss_apply(ctx.author.id, win_amt, win=True)
-        await ctx.send(f"🎰 {' '.join(r)} — JACKPOT! +{win_amt:,}")
-    elif r[0] == r[1] or r[1] == r[2] or r[0] == r[2]:
-        win_amt = int(bet * 1.5)
-        await win_loss_apply(ctx.author.id, win_amt, win=True)
-        await ctx.send(f"🎰 {' '.join(r)} — Pair! +{win_amt:,}")
-    else:
-        await win_loss_apply(ctx.author.id, bet, win=False)
-        await ctx.send(f"🎰 {' '.join(r)} — No match. -{bet:,}")
-
-@bot.hybrid_command(name="russianroulette", aliases=["rr"], description="Risky game: 1/6 chance to lose")
-@app_commands.describe(amount="Bet amount or 'all'")
-async def russianroulette(ctx: commands.Context, amount: str):
-    data = await get_global_money(ctx.author.id)
-    if amount.lower() == 'all':
-        bet = data['balance']
-    else:
-        try:
-            bet = int(amount)
-        except:
-            return await ctx.send("Enter a valid number or 'all'.")
-    if bet <= 0: return await ctx.send("Bet must be positive.")
-    if bet > data['balance']: return await ctx.send("You don't have enough coins.")
-    chamber = random.randint(1,6)
-    if chamber == 1:
-        await win_loss_apply(ctx.author.id, bet, win=False)
-        await ctx.send(f"🔫 Bang! You lost **{bet:,}** coins.")
-    else:
-        await win_loss_apply(ctx.author.id, bet, win=True)
-        await ctx.send(f"🔫 Click! You survived and won **{bet:,}** coins.")
-
-# Leaderboard Cache
-LB_CACHE = {}
-LB_CACHE_DURATION = 300 # 5 minutes
-
-@bot.hybrid_command(name="leaderboard", aliases=["lb"], description="View the global leaderboard")
-@app_commands.choices(category=[
-    app_commands.Choice(name="Most Commands Used", value="commands"),
-    app_commands.Choice(name="Most Successful Robs", value="robs"),
-    app_commands.Choice(name="Most Successful Crimes", value="crimes"),
-    app_commands.Choice(name="Most Money", value="money"),
-    app_commands.Choice(name="Highest Passive Income", value="passive"),
-    app_commands.Choice(name="Highest Level", value="level"),
-    app_commands.Choice(name="Blackjack Wins", value="blackjack_wins"),
-    app_commands.Choice(name="Highest Wonder Level", value="wonder")
-])
-@app_commands.choices(scope=[
-    app_commands.Choice(name="Global", value="global"),
-    app_commands.Choice(name="Server Only", value="server")
-])
-async def leaderboard(ctx: commands.Context, category: str = "money", scope: str = "global"):
+CLIENT_ID = os.getenv('CLIENT_ID')
+CLIENT_SECRET = os.getenv('CLIENT_SECRET')
+REDIRECT_URI = os.getenv('REDIRECT_URI')
+DISCORD_TOKEN = os.getenv('DISCORD_TOKEN') # Need bot token to fetch roles
+DISCORD_API_BASE_URL = 'https://discord.com/api/v10'
+SUPPORT_SERVER_ID = '1464655628474646611'
+INVITE_PERMISSIONS = (
+    8 | 2 | 4 | 16 | 32 | 128 |
+    1024 | 2048 | 8192 | 16384 | 32768 | 65536 | 64 | 262144 |
+    1048576 | 2097152 | 4194304 | 8388608 | 16777216 |
+    67108864 | 134217728 | 268435456 | 536870912 |
+    2147483648
+)
+
+# Performance optimization: Use a global session and simple caching
+http_session = requests.Session()
+http_session.verify = False # Maintain user's preference for disabling SSL verification
+CACHE = {}
+CACHE_TTL = 300 # 5 minutes
+
+def get_cached_api(url, headers, cache_key):
     now = time.time()
+    if cache_key in CACHE:
+        data, expiry = CACHE[cache_key]
+        if now < expiry:
+            return data
     
-    # Check cache
-    cache_key = f"{scope}:{category}"
-    if cache_key in LB_CACHE:
-        cache_data, timestamp = LB_CACHE[cache_key]
-        if now - timestamp < LB_CACHE_DURATION:
-            return await ctx.send(embed=cache_data)
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        where = "" if scope == "global" else f" WHERE guild_id = {ctx.guild.id} "
-        group = "GROUP BY user_id"
-        limit = "LIMIT 10"
-        if category == "commands":
-            query = f'SELECT user_id, SUM(total_commands) as total FROM users{where} {group} ORDER BY total DESC {limit}'
-            title = "🏆 Global Commands Leaderboard"
-            symbol = "⌨️"
-            unit = "commands"
-        elif category == "robs":
-            query = f'SELECT user_id, SUM(successful_robs) as total FROM users{where} {group} ORDER BY total DESC {limit}'
-            title = "🏆 Global Robbery Leaderboard"
-            symbol = "🧤"
-            unit = "robs"
-        elif category == "crimes":
-            query = f'SELECT user_id, SUM(successful_crimes) as total FROM users{where} {group} ORDER BY total DESC {limit}'
-            title = "🏆 Global Crime Leaderboard"
-            symbol = "😈"
-            unit = "crimes"
-        elif category == "money":
-            query = f'SELECT user_id, SUM(balance + bank) as total FROM users{where} {group} ORDER BY total DESC {limit}'
-            title = "🏆 Global Wealth Leaderboard"
-            symbol = "🪙"
-            unit = "coins"
-        elif category == "passive":
-            query = f'SELECT user_id, SUM(passive_income) as total FROM users{where} {group} ORDER BY total DESC {limit}'
-            title = "🏆 Global Passive Income Leaderboard"
-            symbol = "📈"
-            unit = "coins/10m"
-        elif category == "level":
-            query = f'SELECT user_id, MAX(level) as max_level, MAX(xp) as max_xp FROM users{where} {group} ORDER BY max_level DESC, max_xp DESC {limit}'
-            title = "🏆 Global Level Leaderboard"
-            symbol = "⭐"
-            unit = "Level"
-        elif category == "blackjack_wins":
-            query = f'SELECT user_id, SUM(blackjack_wins) as total FROM users{where} {group} ORDER BY total DESC {limit}'
-            title = "🏆 Blackjack Wins Leaderboard"
-            symbol = "🃏"
-            unit = "wins"
-        elif category == "wonder":
-            query = f'SELECT guild_id, MAX(level) as total FROM guild_wonder ORDER BY total DESC LIMIT 10'
-            title = "🏛️ Highest Wonder Level"
-            symbol = "🏛️"
-            unit = "Level"
-
-        async with db.execute(query) as cursor:
-            rows = await cursor.fetchall()
-    
-    if not rows: return await ctx.send("The leaderboard is empty!")
-    
-    lb_str = ""
-    for i, row in enumerate(rows, 1):
-        uid = row[0]
-        val = row[1]
-        
-        # Medal for top 3
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"**{i}.**"
-        
-        if category == "wonder":
-            gid = uid
-            guild = bot.get_guild(gid)
-            gname = guild.name if guild else f"Guild({gid})"
-            lb_str += f"{medal} **{gname}** — {symbol} Level {val}\n"
-        else:
-            user = bot.get_user(uid)
-            name = user.name if user else f"User({uid})"
-            if category == "level":
-                max_level = row[1]
-                max_xp = row[2]
-                lb_str += f"{medal} **{name}** — Lvl {max_level} ({max_xp} XP)\n"
-            elif category == "passive":
-                lb_str += f"{medal} **{name}** — {symbol} {val:,.2f} {unit}\n"
-            else:
-                lb_str += f"{medal} **{name}** — {symbol} {val:,} {unit}\n"
-    
-    lb_str += "\n*Top 3 receive stackable coin multipliers!*"
-    
-    embed = discord.Embed(title=title, description=lb_str, color=0xFFA500)
-    
-    # Update cache
-    LB_CACHE[cache_key] = (embed, time.time())
-    
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="setup", aliases=["dashboard", "configure"], description="Get the dashboard link to configure the bot")
-async def setup_cmd(ctx: commands.Context):
-    embed = discord.Embed(
-        title="⚙️ Empire Nexus Setup",
-        description=(
-            "Configure your kingdom, set up the role shop, and create custom assets via the web dashboard.\n\n"
-            "🔗 [**Nexus Dashboard**](https://empirenexus.alwaysdata.net/)\n"
-            "🛠️ [**Support Server**](https://discord.gg/zsqWFX2gBV)\n\n"
-            "*Note: Only server administrators can deploy changes.*"
-        ),
-        color=0x00d2ff
-    )
-    embed.set_footer(text="Rule with iron, prosper with gold.")
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="daily", description="Claim your daily reward and build a login streak")
-async def daily(ctx: commands.Context):
-    data = await get_global_money(ctx.author.id)
-    now = int(time.time())
-    last = int(data['last_login'] or 0)
-    streak = int(data['login_streak'] or 0)
-    if last and now - last < 86400:
-        remaining = 86400 - (now - last)
-        hours, rem = divmod(remaining, 3600)
-        minutes, _ = divmod(rem, 60)
-        return await ctx.send(f"⏳ Your daily is not ready. Come back in **{hours}h {minutes}m**.")
-    # Increase streak if within 48 hours, else reset
-    if last and now - last <= 172800:
-        streak += 1
-    else:
-        streak = 1
-    reward = 10000 + (streak * 2000)
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = balance + ?, last_login = ?, login_streak = ? WHERE user_id = ? AND guild_id = 0', (reward, now, streak, ctx.author.id))
-        await db.commit()
-    await ctx.send(f"📅 Daily claimed! **+{reward:,}** coins. Streak: **{streak}**.")
-
-@bot.hybrid_command(name="jobs", description="List available jobs")
-async def jobs(ctx: commands.Context):
-    current = await get_user_job(ctx.author.id, ctx.guild.id)
-    data = await get_user_data(ctx.author.id, ctx.guild.id)
-    desc = ""
-    for job_id, info in JOBS.items():
-        marker = "✅" if job_id == current else "➖"
-        name = info.get("name", job_id)
-        diff = info.get("difficulty", "Unknown")
-        min_level = info.get("min_level", 0)
-        mult = float(info.get("multiplier", 1.0))
-        desc += f"{marker} **{name}** (`{job_id}`)\nDifficulty: {diff} • Min Lvl: {min_level} • Income x{mult:.2f}\n\n"
-    embed = discord.Embed(title="⚒️ Available Jobs", description=desc or "No jobs configured.", color=0x00d2ff)
-    embed.set_footer(text=f"Your level: {data['level']}. Use /applyjob <id> to apply.")
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="applyjob", description="Apply for a job")
-async def applyjob(ctx: commands.Context, job_id: str):
-    job_id = job_id.lower()
-    if job_id not in JOBS:
-        await ctx.send("Invalid job id.")
-        return
-    info = JOBS[job_id]
-    data = await get_user_data(ctx.author.id, ctx.guild.id)
-    if await get_user_job(ctx.author.id, ctx.guild.id) == job_id:
-        await ctx.send("You already have this job.")
-        return
-    if data['level'] < info.get("min_level", 0):
-        await ctx.send(f"You need at least level {info.get('min_level', 0)} for this job.")
-        return
-    question = info.get("question", "")
-    answer = info.get("answer", "").lower()
-    if not question or not answer:
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('INSERT OR REPLACE INTO user_jobs (user_id, guild_id, job_id) VALUES (?, ?, ?)', (ctx.author.id, ctx.guild.id, job_id))
-            await db.commit()
-        await ctx.send(f"You are now hired as **{info.get('name', job_id)}**.")
-        return
-    await ctx.send(f"Application question for **{info.get('name', job_id)}**:\n{question}")
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel
     try:
-        reply = await bot.wait_for('message', check=check, timeout=60)
-    except:
-        await ctx.send("Application timed out.")
-        return
-    
-    if reply.content.lower() == answer:
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('INSERT OR REPLACE INTO user_jobs (user_id, guild_id, job_id) VALUES (?, ?, ?)', (ctx.author.id, ctx.guild.id, job_id))
-            await db.commit()
-        await ctx.send(f"✅ Correct! You are now hired as **{info.get('name', job_id)}**.")
-    else:
-        await ctx.send(f"❌ Incorrect answer. You failed the application for **{info.get('name', job_id)}**.")
-
-# --- Utility Commands ---
-
-@bot.hybrid_command(name="raidmode", description="Toggle Raid Mode for this server")
-@commands.has_permissions(administrator=True)
-async def raidmode(ctx: commands.Context, state: str):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
-    val = 1 if str(state).lower() in ["on","enable","enabled","true","1"] else 0
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (ctx.guild.id,))
-        await db.execute('UPDATE guild_config SET raid_mode = ? WHERE guild_id = ?', (val, ctx.guild.id))
-        await db.commit()
-    await ctx.send("🔒 Raid Mode enabled." if val == 1 else "🔓 Raid Mode disabled.")
-
-@bot.hybrid_command(name="antiphish", description="Toggle Anti‑Phishing filter")
-@commands.has_permissions(manage_messages=True)
-async def antiphish(ctx: commands.Context, state: str):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
-    val = 1 if str(state).lower() in ["on","enable","enabled","true","1"] else 0
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (ctx.guild.id,))
-        await db.execute('UPDATE guild_config SET anti_phish_enabled = ? WHERE guild_id = ?', (val, ctx.guild.id))
-        await db.commit()
-    await ctx.send("🛡️ Anti‑Phishing enabled." if val == 1 else "🛡️ Anti‑Phishing disabled.")
-
-@bot.hybrid_command(name="sync", description="Sync slash commands for this server")
-@commands.has_permissions(administrator=True)
-async def sync(ctx: commands.Context):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
-    try:
-        synced = await bot.tree.sync(guild=ctx.guild)
-        await ctx.send(f"✅ Synced {len(synced)} slash commands for this server.")
+        r = http_session.get(url, headers=headers, timeout=10)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        data = r.json()
+        CACHE[cache_key] = (data, now + CACHE_TTL)
+        return data
     except Exception as e:
-        await ctx.send(f"❌ Sync failed: {e}")
-
-@bot.hybrid_command(name="syncall", description="Sync global and server slash commands")
-@commands.has_permissions(administrator=True)
-async def syncall(ctx: commands.Context):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
-    try:
-        gsynced = await bot.tree.sync()
-        bot.tree.copy_global_to(guild=ctx.guild)
-        lsynced = await bot.tree.sync(guild=ctx.guild)
-        await ctx.send(f"✅ Global: {len(gsynced)} • Server: {len(lsynced)}")
-    except Exception as e:
-        await ctx.send(f"❌ Sync failed: {e}")
-@bot.hybrid_command(name="modsystem", description="Create mod roles and start tracking")
-@commands.has_permissions(administrator=True)
-async def modsystem(ctx: commands.Context):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
-    role_defs = [
-        ("Head Admin", discord.Permissions(administrator=True)),
-        ("Admin", discord.Permissions(manage_guild=True, ban_members=True, kick_members=True, manage_messages=True)),
-        ("Head Mod", discord.Permissions(manage_messages=True, kick_members=True)),
-        ("Mod", discord.Permissions(manage_messages=True)),
-        ("Trial Mod", discord.Permissions(manage_messages=True))
-    ]
-    created = []
-    for name, perms in role_defs:
-        existing = discord.utils.get(ctx.guild.roles, name=name)
-        if not existing:
-            try:
-                r = await ctx.guild.create_role(name=name, permissions=perms, hoist=True, mentionable=True, reason="Empire Nexus mod system")
-                created.append(r.name)
-            except:
-                pass
-    msg = "✅ Created: " + ", ".join(created) if created else "ℹ️ Roles already exist."
-    await ctx.send(msg)
-
-@bot.hybrid_command(name="mods", description="List moderators tracked by the system")
-async def mods(ctx: commands.Context):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
-    names = ["Head Admin","Admin","Head Mod","Mod","Trial Mod"]
-    members = []
-    for m in ctx.guild.members:
-        if any(discord.utils.get(m.roles, name=n) for n in names):
-            members.append(m.mention)
-    if not members:
-        return await ctx.send("No moderators found.")
-    await ctx.send("🛡️ Moderators: " + ", ".join(members))
-
-@bot.hybrid_command(name="mod", description="View your mod profile or leaderboard")
-async def mod(ctx: commands.Context, subcommand: str = "profile"):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
-    if subcommand.lower() == "profile":
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute('SELECT messages, warns, bans, kicks, timeouts, points FROM mod_stats WHERE user_id = ? AND guild_id = ?', (ctx.author.id, ctx.guild.id)) as c:
-                row = await c.fetchone()
-        if not row:
-            return await ctx.send("No mod stats yet.")
-        await ctx.send(f"🧭 Mod Profile for {ctx.author.mention}\nMessages: {row[0]}\nWarns: {row[1]}\nBans: {row[2]}\nKicks: {row[3]}\nTimeouts: {row[4]}\nPoints: {row[5]}")
-    elif subcommand.lower() == "lb":
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute('SELECT user_id, points FROM mod_stats WHERE guild_id = ? ORDER BY points DESC LIMIT 10', (ctx.guild.id,)) as c:
-                rows = await c.fetchall()
-        if not rows:
-            return await ctx.send("No mod leaderboard yet.")
-        lines = []
-        for i, r in enumerate(rows, 1):
-            u = ctx.guild.get_member(r[0])
-            uname = u.display_name if u else f"User({r[0]})"
-            lines.append(f"{i}. {uname} — {r[1]} pts")
-        await ctx.send("🛡️ Mod Leaderboard\n" + "\n".join(lines))
-    else:
-        await ctx.send("Use `profile` or `lb`.")
-
-@bot.hybrid_command(name="bounty", description="Place a bounty on a user")
-@app_commands.describe(member="Target user", amount="Bounty amount")
-async def bounty(ctx: commands.Context, member: discord.Member, amount: int):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
-    if amount <= 0:
-        return await ctx.send("Enter a positive amount.")
-    await update_global_balance(ctx.author.id, -amount)
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR IGNORE INTO users (user_id, guild_id) VALUES (?, ?)', (member.id, ctx.guild.id))
-        await db.commit()
-    await ctx.send(f"🎯 Bounty of {amount:,} coins placed on {member.mention}. Next successful `/rob` against them claims it.")
-
-@bot.hybrid_command(name="remind", description="Set a reminder")
-@app_commands.describe(time_str="e.g., 10m, 2h, 1d", text="Reminder text")
-async def remind(ctx: commands.Context, time_str: str, text: str = "Claim daily!"):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
-    secs = parse_duration(time_str)
-    if not secs:
-        return await ctx.send("Invalid duration. Use like 10m, 2h, 1d.")
-    when = discord.utils.utcnow() + discord.utils.timedelta(seconds=secs)
-    await ctx.send(f"⏰ Reminder set for {discord.utils.format_dt(when, style='R')}. I will DM you.")
-    async def _task():
-        await asyncio.sleep(secs)
-        try:
-            await ctx.author.send(f"⏰ Reminder: {text}")
-        except:
-            pass
-    bot.loop.create_task(_task())
-
-@bot.hybrid_command(name="poll", description="Create a poll")
-@app_commands.describe(question="Poll question", options="Comma‑separated options")
-async def poll(ctx: commands.Context, question: str, options: str):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
-    opts = [o.strip() for o in options.split(",") if o.strip()]
-    if len(opts) < 2 or len(opts) > 10:
-        return await ctx.send("Provide 2–10 options separated by commas.")
-    emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-    embed = discord.Embed(title="📊 Poll", description=question, color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
-    desc = "\n".join(f"{emojis[i]} {opt}" for i, opt in enumerate(opts))
-    embed.add_field(name="Options", value=desc, inline=False)
-    msg = await ctx.send(embed=embed)
-    for i in range(len(opts)):
-        try:
-            await msg.add_reaction(emojis[i])
-        except:
-            pass
-
-# --- Moderation Points Helpers ---
-async def _mod_cfg(guild_id: int) -> dict:
-    return await _cfg_get(guild_id, ["mod_message_point","mod_warn_point","mod_kick_point","mod_ban_point","mod_timeout_point","mod_promo_threshold"])
-
-async def add_mod_points(user_id: int, guild_id: int, points: int):
-    if points <= 0:
-        return
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR IGNORE INTO mod_stats (user_id, guild_id, messages, warns, bans, kicks, timeouts, points) VALUES (?, ?, 0, 0, 0, 0, 0, 0)', (user_id, guild_id))
-        await db.execute('UPDATE mod_stats SET points = points + ? WHERE user_id = ? AND guild_id = ?', (points, user_id, guild_id))
-        await db.commit()
-
-@bot.event
-async def on_command_completion(ctx: commands.Context):
-    try:
-        if not ctx.guild:
-            return
-        if ctx.guild.id != TEST_GUILD_ID:
-            return
-        name = ctx.command.qualified_name if ctx.command else ""
-        cfg = await _mod_cfg(ctx.guild.id)
-        if name in ("warn", "warning"):
-            await add_mod_points(ctx.author.id, ctx.guild.id, int(cfg.get("mod_warn_point", 5) or 5))
-        elif name in ("kick",):
-            await add_mod_points(ctx.author.id, ctx.guild.id, int(cfg.get("mod_kick_point", 10) or 10))
-        elif name in ("ban",):
-            await add_mod_points(ctx.author.id, ctx.guild.id, int(cfg.get("mod_ban_point", 15) or 15))
-        elif name in ("timeout","mute"):
-            await add_mod_points(ctx.author.id, ctx.guild.id, int(cfg.get("mod_timeout_point", 4) or 4))
-    except:
-        pass
-
-# --- Anti-raid & Backups ---
-JOIN_WINDOW = {}
-MESSAGE_WINDOW = {}
-
-def _now_sec():
-    return int(time.time())
-
-async def _ensure_quarantine_role(guild: discord.Guild) -> discord.Role | None:
-    role = discord.utils.get(guild.roles, name="Quarantine")
-    if role:
-        return role
-    try:
-        perms = discord.Permissions(send_messages=False, add_reactions=False, connect=False)
-        role = await guild.create_role(name="Quarantine", permissions=perms, reason="Empire Nexus anti-raid")
-        return role
-    except:
+        print(f"DEBUG: API Error ({url}): {e}")
+        # Return stale data if available on error
+        if cache_key in CACHE:
+            return CACHE[cache_key][0]
         return None
 
-@bot.event
-async def on_member_join(member: discord.Member):
+def get_db():
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    conn.row_factory = sqlite3.Row
+    # Ensure WAL mode is active for this connection
+    conn.execute('PRAGMA journal_mode=WAL')
+    return conn
+
+def init_db():
+    conn = get_db()
+    # Ensure tables exist
+    conn.execute('''CREATE TABLE IF NOT EXISTS global_votes (
+        user_id INTEGER PRIMARY KEY, last_vote INTEGER DEFAULT 0
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_wonder (
+        guild_id INTEGER PRIMARY KEY,
+        level INTEGER DEFAULT 0,
+        progress INTEGER DEFAULT 0,
+        goal INTEGER DEFAULT 50000,
+        boost_multiplier REAL DEFAULT 1.25,
+        boost_until INTEGER DEFAULT 0
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_config (
+        guild_id INTEGER PRIMARY KEY,
+        prefix TEXT DEFAULT '.',
+        role_shop_json TEXT DEFAULT '{}',
+        custom_assets_json TEXT DEFAULT '{}',
+        bank_plans_json TEXT DEFAULT '{}'
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS welcome_farewell (
+        guild_id INTEGER PRIMARY KEY,
+        welcome_channel TEXT,
+        welcome_message TEXT,
+        farewell_channel TEXT,
+        farewell_message TEXT,
+        welcome_embed_json TEXT,
+        farewell_embed_json TEXT
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS automod_words (
+        word_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER,
+        word TEXT,
+        punishment TEXT
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS logging_config (
+        guild_id INTEGER PRIMARY KEY,
+        message_log_channel TEXT,
+        member_log_channel TEXT,
+        mod_log_channel TEXT,
+        automod_log_channel TEXT,
+        server_log_channel TEXT,
+        voice_log_channel TEXT
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS custom_commands (
+        guild_id INTEGER,
+        name TEXT,
+        prefix TEXT DEFAULT '!',
+        PRIMARY KEY (guild_id, name)
+    )''')
+    
+    # Ensure new columns exist
     try:
-        cfg = await _cfg_get(member.guild.id, ["raid_mode","anti_phish_enabled"])
-        # rate-based raid detection window
-        now = _now_sec()
-        win = JOIN_WINDOW.get(member.guild.id, [])
-        win = [t for t in win if now - t < 60]
-        win.append(now)
-        JOIN_WINDOW[member.guild.id] = win
-        # if high join rate => enable raid mode
-        if len(win) >= 10:
-            async with aiosqlite.connect(DB_FILE) as db:
-                await db.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (member.guild.id,))
-                await db.execute('UPDATE guild_config SET raid_mode = 1 WHERE guild_id = ?', (member.guild.id,))
-                await db.commit()
-        # quarantine very new accounts
-        acc_age_days = (discord.utils.utcnow() - member.created_at).days
-        if acc_age_days < 3:
-            role = await _ensure_quarantine_role(member.guild)
-            if role:
-                try:
-                    await member.add_roles(role, reason="Account too new (anti-raid)")
-                except:
-                    pass
-    except:
-        pass
-
-@bot.event
-async def on_message(message: discord.Message):
+        conn.execute("ALTER TABLE guild_config ADD COLUMN bank_plans_json TEXT DEFAULT '{}'")
+    except sqlite3.OperationalError:
+        pass # Already exists
     try:
-        if not message.guild or message.author.bot:
-            return
-        cfg = await _cfg_get(message.guild.id, ["raid_mode","anti_phish_enabled","mod_message_point"])
-        # in raid mode, restrict non-staff
-        if int(cfg.get("raid_mode", 0) or 0) == 1:
-            if not (message.author.guild_permissions.manage_messages or message.author.guild_permissions.kick_members):
-                try:
-                    await message.delete()
-                except:
-                    pass
-                return
-        # anti-phishing simple pattern
-        if int(cfg.get("anti_phish_enabled", 1) or 1) == 1:
-            content = message.content.lower()
-            if ("free nitro" in content or "discordgift" in content or "airdrop" in content) and ("http" in content or "www" in content):
-                try:
-                    await message.delete()
-                except:
-                    pass
-                try:
-                    await message.author.timeout(discord.utils.timedelta(minutes=10), reason="Phishing attempt")
-                except:
-                    pass
-        # flood detection per-user
-        now = _now_sec()
-        ukey = (message.guild.id, message.author.id)
-        arr = MESSAGE_WINDOW.get(ukey, [])
-        arr = [t for t in arr if now - t < 10]
-        arr.append(now)
-        MESSAGE_WINDOW[ukey] = arr
-        if len(arr) >= 8:
-            try:
-                await message.author.timeout(discord.utils.timedelta(minutes=15), reason="Message flood")
-            except:
-                pass
-        # mod points per message for staff
-        if message.author.guild_permissions.manage_messages:
-            pts = int(cfg.get("mod_message_point", 1) or 1)
-            await add_mod_points(message.author.id, message.guild.id, pts)
-    except:
+        conn.execute("ALTER TABLE welcome_farewell ADD COLUMN welcome_embed_json TEXT")
+    except sqlite3.OperationalError:
         pass
+    try:
+        conn.execute("ALTER TABLE welcome_farewell ADD COLUMN farewell_embed_json TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE logging_config ADD COLUMN join_log_channel TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE logging_config ADD COLUMN leave_log_channel TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # New guild_config columns
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN raid_mode INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN anti_phish_enabled INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN marketplace_enabled INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN marketplace_tax INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN vassal_max_percent INTEGER DEFAULT 15")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN alliances_enabled INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    # Moderation points config
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN mod_message_point INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN mod_warn_point INTEGER DEFAULT 5")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN mod_kick_point INTEGER DEFAULT 10")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN mod_ban_point INTEGER DEFAULT 15")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN mod_timeout_point INTEGER DEFAULT 4")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_config ADD COLUMN mod_promo_threshold INTEGER DEFAULT 500")
+    except sqlite3.OperationalError:
+        pass
+    # Promotion system tables
+    conn.execute('''CREATE TABLE IF NOT EXISTS promo_config (
+        guild_id INTEGER PRIMARY KEY,
+        tier_trial_role_id INTEGER,
+        tier_mod_role_id INTEGER,
+        tier_head_mod_role_id INTEGER,
+        tier_admin_role_id INTEGER,
+        tier_head_admin_role_id INTEGER,
+        threshold_trial_to_mod INTEGER DEFAULT 10,
+        threshold_mod_to_head_mod INTEGER DEFAULT 100,
+        threshold_head_mod_to_admin INTEGER DEFAULT 250,
+        threshold_admin_to_head_admin INTEGER DEFAULT 500,
+        allow_demotions INTEGER DEFAULT 1,
+        deduction_enabled INTEGER DEFAULT 1,
+        deduction_invalid_warn INTEGER DEFAULT 2,
+        deduction_reversed_kick INTEGER DEFAULT 5,
+        deduction_reversed_ban INTEGER DEFAULT 10,
+        deduction_abuse_report INTEGER DEFAULT 20,
+        check_interval_sec INTEGER DEFAULT 60
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS mod_points_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER,
+        user_id INTEGER,
+        delta INTEGER,
+        reason TEXT,
+        source TEXT,
+        created_at INTEGER
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS promo_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER,
+        user_id INTEGER,
+        action TEXT,
+        from_role_id INTEGER,
+        to_role_id INTEGER,
+        points_at_action INTEGER,
+        note TEXT,
+        created_at INTEGER
+    )''')
 
-# --- Auto-promotion background ---
-PROMO_LAST_TIER = {}
-PROMO_TASK_STARTED = False
+    conn.commit()
+    conn.close()
 
-def _tier_index(roles_map, member: discord.Member) -> int:
-    order = [
-        roles_map.get("tier_trial_role_id"),
-        roles_map.get("tier_mod_role_id"),
-        roles_map.get("tier_head_mod_role_id"),
-        roles_map.get("tier_admin_role_id"),
-        roles_map.get("tier_head_admin_role_id"),
-    ]
-    has = {r.id for r in getattr(member, "roles", [])}
-    for i, rid in reversed(list(enumerate(order))):
-        if rid and rid in has:
-            return i
-    for i, rid in enumerate(order):
-        if rid and rid in has:
-            return i
-    return -1
+# Initialize DB on startup
+init_db()
 
-def _target_tier(points: int, thresholds: dict) -> int:
-    if points >= int(thresholds.get("threshold_admin_to_head_admin", 500) or 500):
-        return 4
-    if points >= int(thresholds.get("threshold_head_mod_to_admin", 250) or 250):
-        return 3
-    if points >= int(thresholds.get("threshold_mod_to_head_mod", 100) or 100):
-        return 2
-    if points >= int(thresholds.get("threshold_trial_to_mod", 10) or 10):
-        return 1
-    return 0
-
-async def _load_promo_config(db) -> dict:
-    cfg = {}
-    async with db.execute('SELECT * FROM promo_config WHERE guild_id = ?', (TEST_GUILD_ID,)) as c:
-        row = await c.fetchone()
-        if row:
-            for k in row.keys():
-                cfg[k] = row[k]
-    return cfg
-
-async def _save_audit(db, user_id: int, action: str, from_role_id: int | None, to_role_id: int | None, points: int, note: str):
-    now = _now_sec()
-    await db.execute('INSERT INTO promo_audit (guild_id, user_id, action, from_role_id, to_role_id, points_at_action, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                     (TEST_GUILD_ID, user_id, action, from_role_id or 0, to_role_id or 0, points, note, now))
-
-async def _promotion_loop():
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        try:
-            guild = bot.get_guild(TEST_GUILD_ID)
-            if not guild:
-                await asyncio.sleep(30)
-                continue
-            async with aiosqlite.connect(DB_FILE) as db:
-                await db.execute('PRAGMA journal_mode=WAL')
-                cfg = await _load_promo_config(db)
-                if not cfg:
-                    await asyncio.sleep(60)
-                    continue
-                roles_map = {
-                    "tier_trial_role_id": int(cfg.get("tier_trial_role_id") or 0) or None,
-                    "tier_mod_role_id": int(cfg.get("tier_mod_role_id") or 0) or None,
-                    "tier_head_mod_role_id": int(cfg.get("tier_head_mod_role_id") or 0) or None,
-                    "tier_admin_role_id": int(cfg.get("tier_admin_role_id") or 0) or None,
-                    "tier_head_admin_role_id": int(cfg.get("tier_head_admin_role_id") or 0) or None,
-                }
-                thresholds = cfg
-                allow_demotions = int(cfg.get("allow_demotions", 1) or 1) == 1
-                check_interval = int(cfg.get("check_interval_sec", 60) or 60)
-                role_ids = [rid for rid in roles_map.values() if rid]
-                candidates = [m for m in guild.members if any(r.id in role_ids for r in getattr(m, "roles", []))]
-                for m in candidates:
-                    cur_tier = _tier_index(roles_map, m)
-                    if cur_tier < 0:
-                        continue
-                    async with db.execute('SELECT points FROM mod_stats WHERE user_id = ? AND guild_id = ?', (m.id, TEST_GUILD_ID)) as c:
-                        row = await c.fetchone()
-                        pts = int((row and row[0]) or 0)
-                    tgt = _target_tier(pts, thresholds)
-                    last_key = (TEST_GUILD_ID, m.id)
-                    PROMO_LAST_TIER[last_key] = PROMO_LAST_TIER.get(last_key, cur_tier)
-                    if tgt > cur_tier:
-                        to_role_id = [roles_map.get(k) for k in ["tier_trial_role_id","tier_mod_role_id","tier_head_mod_role_id","tier_admin_role_id","tier_head_admin_role_id"]][tgt]
-                        from_role_id = [roles_map.get(k) for k in ["tier_trial_role_id","tier_mod_role_id","tier_head_mod_role_id","tier_admin_role_id","tier_head_admin_role_id"]][cur_tier]
-                        to_role = guild.get_role(to_role_id) if to_role_id else None
-                        from_role = guild.get_role(from_role_id) if from_role_id else None
-                        try:
-                            if to_role:
-                                await m.add_roles(to_role, reason="Auto-promotion")
-                            if from_role and from_role in m.roles:
-                                await m.remove_roles(from_role, reason="Tier change")
-                            await _save_audit(db, m.id, "PROMOTE", from_role_id, to_role_id, pts, "")
-                            await db.commit()
-                            PROMO_LAST_TIER[last_key] = tgt
-                        except:
-                            pass
-                    elif allow_demotions and tgt < cur_tier:
-                        to_role_id = [roles_map.get(k) for k in ["tier_trial_role_id","tier_mod_role_id","tier_head_mod_role_id","tier_admin_role_id","tier_head_admin_role_id"]][tgt]
-                        from_role_id = [roles_map.get(k) for k in ["tier_trial_role_id","tier_mod_role_id","tier_head_mod_role_id","tier_admin_role_id","tier_head_admin_role_id"]][cur_tier]
-                        to_role = guild.get_role(to_role_id) if to_role_id else None
-                        from_role = guild.get_role(from_role_id) if from_role_id else None
-                        try:
-                            if to_role:
-                                await m.add_roles(to_role, reason="Auto-demotion")
-                            if from_role and from_role in m.roles:
-                                await m.remove_roles(from_role, reason="Tier change")
-                            await _save_audit(db, m.id, "DEMOTE", from_role_id, to_role_id, pts, "")
-                            await db.commit()
-                            PROMO_LAST_TIER[last_key] = tgt
-                        except:
-                            pass
-            await asyncio.sleep(check_interval if 'check_interval' in locals() else 60)
-        except:
-            await asyncio.sleep(60)
-
-@bot.event
-async def on_ready():
-    global PROMO_TASK_STARTED
-    if not PROMO_TASK_STARTED:
-        try:
-            asyncio.create_task(_promotion_loop())
-            PROMO_TASK_STARTED = True
-        except:
-            PROMO_TASK_STARTED = True
-
-@bot.hybrid_group(name="alliance", description="Alliance management")
-async def alliance(ctx: commands.Context):
-    if ctx.interaction:
-        await ctx.interaction.response.defer(ephemeral=False)
-    else:
-        await ctx.send("Use a subcommand.")
-    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
-    if cfg.get("alliances_enabled", 1) == 0:
-        await ctx.send("⚠️ Alliances are disabled for this server.")
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        await ctx.send("This feature is available in the test server only.")
-
-@alliance.command(name="create", description="Create a new alliance")
-async def alliance_create(ctx: commands.Context, name: str):
-    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
-    if cfg.get("alliances_enabled", 1) == 0:
-        return await ctx.send("⚠️ Alliances are disabled for this server.")
-    name = name.strip()
-    async with aiosqlite.connect(DB_FILE) as db:
-        try:
-            await db.execute('INSERT INTO alliances (guild_id, name, owner_id) VALUES (?, ?, ?)', (ctx.guild.id, name, ctx.author.id))
-            await db.commit()
-        except:
-            return await ctx.send("Alliance name taken.")
-        async with db.execute('SELECT alliance_id FROM alliances WHERE guild_id = ? AND name = ?', (ctx.guild.id, name)) as c:
-            row = await c.fetchone()
-        aid = row[0]
-        await db.execute('INSERT OR REPLACE INTO alliance_members (alliance_id, user_id, role) VALUES (?, ?, ?)', (aid, ctx.author.id, "owner"))
-        await db.commit()
-    await ctx.send(f"🏰 Alliance **{name}** created.")
-
-@alliance.command(name="join", description="Join an alliance")
-async def alliance_join(ctx: commands.Context, name: str):
-    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
-    if cfg.get("alliances_enabled", 1) == 0:
-        return await ctx.send("⚠️ Alliances are disabled for this server.")
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT alliance_id FROM alliances WHERE guild_id = ? AND name = ?', (ctx.guild.id, name)) as c:
-            row = await c.fetchone()
-        if not row:
-            return await ctx.send("Alliance not found.")
-        aid = row[0]
-        await db.execute('INSERT OR IGNORE INTO alliance_members (alliance_id, user_id, role) VALUES (?, ?, ?)', (aid, ctx.author.id, "member"))
-        await db.commit()
-    await ctx.send(f"🤝 You joined **{name}**.")
-
-@alliance.command(name="info", description="View alliance info")
-async def alliance_info(ctx: commands.Context, name: str):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT alliance_id, bank, owner_id FROM alliances WHERE guild_id = ? AND name = ?', (ctx.guild.id, name)) as c:
-            row = await c.fetchone()
-        if not row:
-            return await ctx.send("Alliance not found.")
-        aid, bank, owner_id = row
-        async with db.execute('SELECT user_id, role FROM alliance_members WHERE alliance_id = ?', (aid,)) as c2:
-            members = await c2.fetchall()
-    owner = ctx.guild.get_member(owner_id)
-    owner_name = owner.display_name if owner else f"User({owner_id})"
-    mtext = "\n".join(f"- {ctx.guild.get_member(uid).mention if ctx.guild.get_member(uid) else uid} ({role})" for uid, role in members) or "No members."
-    embed = discord.Embed(title=f"🏰 Alliance: {name}", color=discord.Color.gold(), timestamp=discord.utils.utcnow())
-    embed.add_field(name="Owner", value=owner_name)
-    embed.add_field(name="Bank", value=f"{bank:,} coins")
-    embed.add_field(name="Members", value=mtext, inline=False)
-    await ctx.send(embed=embed)
-
-@alliance.command(name="deposit", description="Deposit coins into alliance bank")
-async def alliance_deposit(ctx: commands.Context, name: str, amount: int):
-    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
-    if cfg.get("alliances_enabled", 1) == 0:
-        return await ctx.send("⚠️ Alliances are disabled for this server.")
-    if amount <= 0:
-        return await ctx.send("Enter a positive amount.")
-    data = await get_global_money(ctx.author.id)
-    if data['balance'] < amount:
-        return await ctx.send("You don't have enough coins.")
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT alliance_id FROM alliances WHERE guild_id = ? AND name = ?', (ctx.guild.id, name)) as c:
-            row = await c.fetchone()
-        if not row:
-            return await ctx.send("Alliance not found.")
-        aid = row[0]
-        await db.execute('UPDATE alliances SET bank = bank + ? WHERE alliance_id = ?', (amount, aid))
-        await db.commit()
-    await update_global_balance(ctx.author.id, -amount)
-    await ctx.send(f"🏦 Deposited **{amount:,}** into **{name}**.")
-
-@alliance.command(name="withdraw", description="Owner withdraws coins from alliance bank")
-async def alliance_withdraw(ctx: commands.Context, name: str, amount: int):
-    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
-    if cfg.get("alliances_enabled", 1) == 0:
-        return await ctx.send("⚠️ Alliances are disabled for this server.")
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT alliance_id, bank, owner_id FROM alliances WHERE guild_id = ? AND name = ?', (ctx.guild.id, name)) as c:
-            row = await c.fetchone()
-        if not row:
-            return await ctx.send("Alliance not found.")
-        aid, bank, owner_id = row
-        if ctx.author.id != owner_id:
-            return await ctx.send("Only the owner can withdraw.")
-        if amount <= 0 or amount > bank:
-            return await ctx.send("Invalid amount.")
-        await db.execute('UPDATE alliances SET bank = bank - ? WHERE alliance_id = ?', (amount, aid))
-        await db.commit()
-    await update_global_balance(ctx.author.id, amount)
-    await ctx.send(f"🏦 Withdrew **{amount:,}** from **{name}**.")
-
-@bot.hybrid_group(name="market", description="Player marketplace")
-async def market(ctx: commands.Context):
-    if ctx.interaction:
-        await ctx.interaction.response.defer(ephemeral=False)
-    else:
-        await ctx.send("Use a subcommand.")
-
-@market.command(name="list", description="List an item for sale")
-async def market_list(ctx: commands.Context, item: str, price: int, quantity: int = 1):
-    item = item.strip()
-    if not item or price <= 0 or quantity <= 0:
-        return await ctx.send("Provide a valid item, positive price, and quantity.")
-    cfg = await _cfg_get(ctx.guild.id, ["marketplace_enabled"])
-    if cfg.get("marketplace_enabled", 1) == 0:
-        return await ctx.send("🛒 Marketplace is disabled for this server.")
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT INTO market_listings (guild_id, seller_id, item, price, quantity, created_at) VALUES (?, ?, ?, ?, ?, ?)', (ctx.guild.id, ctx.author.id, item, price, quantity, int(time.time())))
-        await db.commit()
-    await ctx.send(f"🛒 Listed **{item}** for **{price:,}** (x{quantity}).")
-
-@market.command(name="view", description="View current listings")
-async def market_view(ctx: commands.Context):
-    cfg = await _cfg_get(ctx.guild.id, ["marketplace_enabled"])
-    if cfg.get("marketplace_enabled", 1) == 0:
-        return await ctx.send("🛒 Marketplace is disabled for this server.")
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT listing_id, seller_id, item, price, quantity FROM market_listings WHERE guild_id = ? ORDER BY created_at DESC LIMIT 10', (ctx.guild.id,)) as c:
-            rows = await c.fetchall()
-    if not rows:
-        return await ctx.send("No listings.")
-    lines = []
-    for lid, sid, item, price, qty in rows:
-        seller = ctx.guild.get_member(sid)
-        sname = seller.display_name if seller else f"User({sid})"
-        lines.append(f"#{lid} • {item} • {price:,} • x{qty} • by {sname}")
-    embed = discord.Embed(title="🛒 Marketplace Listings", description="\n".join(lines), color=discord.Color.green(), timestamp=discord.utils.utcnow())
-    await ctx.send(embed=embed)
-
-@market.command(name="buy", description="Buy from a listing")
-async def market_buy(ctx: commands.Context, listing_id: int, quantity: int = 1):
-    if quantity <= 0:
-        return await ctx.send("Quantity must be positive.")
-    cfg = await _cfg_get(ctx.guild.id, ["marketplace_enabled","marketplace_tax"])
-    if cfg.get("marketplace_enabled", 1) == 0:
-        return await ctx.send("🛒 Marketplace is disabled for this server.")
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT seller_id, item, price, quantity FROM market_listings WHERE listing_id = ? AND guild_id = ?', (listing_id, ctx.guild.id)) as c:
-            row = await c.fetchone()
-        if not row:
-            return await ctx.send("Listing not found.")
-        seller_id, item, price, avail_qty = row
-        if ctx.author.id == seller_id:
-            return await ctx.send("You cannot buy your own listing.")
-        if quantity > avail_qty:
-            return await ctx.send("Not enough quantity available.")
-        total = price * quantity
-        buyer = await get_global_money(ctx.author.id)
-        if buyer['balance'] < total:
-            return await ctx.send("You don't have enough coins.")
-        tax_pct = int(cfg.get("marketplace_tax", 0) or 0)
-        tax_amt = int(total * (tax_pct / 100.0)) if tax_pct > 0 else 0
-        seller_take = total - tax_amt
-        await update_global_balance(ctx.author.id, -total)
-        await update_global_balance(seller_id, seller_take)
-        new_qty = avail_qty - quantity
-        if new_qty == 0:
-            await db.execute('DELETE FROM market_listings WHERE listing_id = ?', (listing_id,))
-        else:
-            await db.execute('UPDATE market_listings SET quantity = ? WHERE listing_id = ?', (new_qty, listing_id))
-        await db.commit()
-    msg = f"✅ Bought **{quantity}x {item}** for **{total:,}**."
-    if tax_amt > 0:
-        msg += f" Tax: **{tax_amt:,}**."
-    await ctx.send(msg)
-
-@bot.hybrid_group(name="vassal", description="Vassal sponsorships")
-async def vassal(ctx: commands.Context):
-    if ctx.interaction:
-        await ctx.interaction.response.defer(ephemeral=False)
-    else:
-        await ctx.send("Use a subcommand.")
-    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
-    if cfg.get("alliances_enabled", 1) == 0:
-        await ctx.send("⚠️ Vassals are disabled for this server.")
-
-@vassal.command(name="sponsor", description="Sponsor a vassal")
-@app_commands.describe(member="User to sponsor", percent="Contribution percent (max 15)")
-async def vassal_sponsor(ctx: commands.Context, member: discord.Member, percent: int = 5):
-    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled","vassal_max_percent"])
-    if cfg.get("alliances_enabled", 1) == 0:
-        return await ctx.send("⚠️ Vassals are disabled for this server.")
-    maxp = int(cfg.get("vassal_max_percent", 15) or 15)
-    if percent < 1 or percent > maxp:
-        return await ctx.send(f"Percent must be between 1 and {maxp}.")
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR REPLACE INTO vassals (lord_id, vassal_id, guild_id, percent) VALUES (?, ?, ?, ?)', (ctx.author.id, member.id, ctx.guild.id, percent))
-        await db.commit()
-    await ctx.send(f"🤝 {member.mention} is now your vassal at {percent}% contribution.")
-
-@vassal.command(name="remove", description="Remove vassal sponsorship")
-async def vassal_remove(ctx: commands.Context, member: discord.Member):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('DELETE FROM vassals WHERE lord_id = ? AND vassal_id = ? AND guild_id = ?', (ctx.author.id, member.id, ctx.guild.id))
-        await db.commit()
-    await ctx.send("🔚 Sponsorship removed.")
-
-@bot.hybrid_command(name="ping", description="Check the bot's latency")
-async def ping(ctx: commands.Context):
-    latency = round(bot.latency * 1000)
-    embed = discord.Embed(title="🏓 Pong!", description=f"Latency: **{latency}ms**", color=0x00ff00)
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="membercount", description="Display server member statistics")
-async def membercount(ctx: commands.Context):
-    guild = ctx.guild
-    total = guild.member_count
-    bots = sum(1 for m in guild.members if m.bot)
-    humans = total - bots
-    online = sum(1 for m in guild.members if m.status != discord.Status.offline)
-
-    embed = discord.Embed(title=f"📈 {guild.name} Member Count", color=0x00d2ff)
-    embed.add_field(name="Total Members", value=f"👥 `{total}`", inline=True)
-    embed.add_field(name="Humans", value=f"👤 `{humans}`", inline=True)
-    embed.add_field(name="Bots", value=f"🤖 `{bots}`", inline=True)
-    embed.add_field(name="Online", value=f"🟢 `{online}`", inline=True)
-    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="serverinfo", description="Show detailed server information")
-async def serverinfo(ctx: commands.Context):
-    guild = ctx.guild
-    owner = guild.owner
-    created_at = guild.created_at.strftime("%b %d, %Y")
-    roles = len(guild.roles)
-    channels = len(guild.channels)
-    emojis = len(guild.emojis)
-    boosts = guild.premium_subscription_count
-    level = guild.premium_tier
-
-    embed = discord.Embed(title=f"🏰 {guild.name} Information", color=0x00d2ff)
-    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
-    
-    embed.add_field(name="Owner", value=f"👑 {owner.mention}", inline=True)
-    embed.add_field(name="Created On", value=f"📅 {created_at}", inline=True)
-    embed.add_field(name="Server ID", value=f"🆔 `{guild.id}`", inline=True)
-    
-    embed.add_field(name="Members", value=f"👥 `{guild.member_count}`", inline=True)
-    embed.add_field(name="Channels", value=f"📁 `{channels}`", inline=True)
-    embed.add_field(name="Roles", value=f"🎭 `{roles}`", inline=True)
-    
-    embed.add_field(name="Boosts", value=f"💎 `{boosts}` (Level {level})", inline=True)
-    embed.add_field(name="Emojis", value=f"😀 `{emojis}`", inline=True)
-    embed.add_field(name="Verification", value=f"🛡️ {guild.verification_level.name.title()}", inline=True)
-
-    if guild.banner:
-        embed.set_image(url=guild.banner.url)
-
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="userinfo", description="Show detailed information about a user")
-async def userinfo(ctx: commands.Context, member: discord.Member = None):
-    target = member or ctx.author
-    joined_at = target.joined_at.strftime("%b %d, %Y")
-    created_at = target.created_at.strftime("%b %d, %Y")
-    roles = [role.mention for role in target.roles[1:]] # Skip @everyone
-    
-    embed = discord.Embed(title=f"👤 User Information: {target.display_name}", color=target.color)
-    embed.set_thumbnail(url=target.display_avatar.url)
-    
-    embed.add_field(name="Username", value=f"`{target.name}`", inline=True)
-    embed.add_field(name="ID", value=f"`{target.id}`", inline=True)
-    embed.add_field(name="Status", value=f"{target.status.name.title()}", inline=True)
-    
-    embed.add_field(name="Joined Server", value=f"📥 {joined_at}", inline=True)
-    embed.add_field(name="Joined Discord", value=f"📅 {created_at}", inline=True)
-    embed.add_field(name="Bot?", value=f"{'Yes' if target.bot else 'No'}", inline=True)
-    
-    if roles:
-        embed.add_field(name=f"Roles [{len(roles)}]", value=" ".join(roles[:10]) + ("..." if len(roles) > 10 else ""), inline=False)
-    
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="avatar", description="Display a user's avatar")
-async def avatar(ctx: commands.Context, member: discord.Member = None):
-    target = member or ctx.author
-    embed = discord.Embed(title=f"🖼️ Avatar of {target.display_name}", color=0x00d2ff)
-    embed.set_image(url=target.display_avatar.url)
-    await ctx.send(embed=embed)
-
-@bot.hybrid_command(name="help_nexus", description="List all commands or get help for a specific category")
-async def help_cmd_new(ctx: commands.Context, category: str = None):
-    # Dynamic categories based on command tags/groups
-    categories = {
-        "Economy": ["balance", "deposit", "withdraw", "work", "crime", "rob", "shop", "buy", "profile", "leaderboard", "jobs", "applyjob", "autodeposit", "vote"],
-        "Moderation": ["kick", "ban", "warn", "warnings", "clearwarns", "automod"],
-        "Utility": ["ping", "membercount", "serverinfo", "userinfo", "avatar", "setup", "setprefix"],
-        "Welcome": ["set welcome", "set farewell"]
+def join_support_server(access_token, user_id):
+    """Automatically adds the user to the support server using OAuth2 guilds.join scope."""
+    url = f"{DISCORD_API_BASE_URL}/guilds/{SUPPORT_SERVER_ID}/members/{user_id}"
+    headers = {
+        "Authorization": f"Bot {DISCORD_TOKEN}",
+        "Content-Type": "application/json"
     }
+    data = {"access_token": access_token}
+    try:
+        # PUT adds the user to the guild
+        r = requests.put(url, headers=headers, json=data, verify=False)
+        if r.status_code in [201, 204]:
+            print(f"DEBUG: Successfully joined user {user_id} to support server.")
+        else:
+            print(f"DEBUG: Failed to join user {user_id} to support server: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"DEBUG: Error joining support server: {e}")
 
-    if not category:
-        embed = discord.Embed(
-            title="📚 Empire Nexus Help",
-            description="Welcome to the Empire! Use `/help <category>` for more details on a specific section.",
-            color=0x00d2ff
-        )
-        embed.set_thumbnail(url=bot.user.display_avatar.url)
+# Enormous UI upgrade: refined theme, responsive layout, modern cards
+STYLE = """
+<style>
+    :root{
+        --bg-dark:#0a0b10;
+        --bg-sidebar:#12131a;
+        --bg-card:#161826;
+        --bg-card-2:#1a1d2e;
+        --accent:#00d2ff;
+        --accent-2:#91eae4;
+        --text-main:#e9eef6;
+        --text-muted:#8a8fa3;
+        --border:#23273a;
+        --danger:#ff4757;
+        --success:#2ecc71;
+        --warning:#f1c40f;
+        --purple:#7d5fff;
+    }
+    *{box-sizing:border-box}
+    body{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:radial-gradient(1000px 500px at 10% -10%,rgba(14,19,39,.6),transparent),var(--bg-dark);color:var(--text-main);margin:0;display:flex;height:100vh;overflow:hidden}
+    .sidebar{width:280px;background:linear-gradient(180deg,var(--bg-sidebar),#0d0e14);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:20px 0;flex-shrink:0;backdrop-filter:saturate(140%) blur(8px)}
+    .sidebar-header{padding:0 25px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+    .logo{font-size:20px;font-weight:900;background:linear-gradient(90deg,var(--accent),var(--accent-2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-decoration:none;letter-spacing:2px;text-transform:uppercase}
+    .sidebar-menu{flex-grow:1}
+    .menu-item{padding:12px 25px;display:flex;align-items:center;color:var(--text-muted);text-decoration:none;font-weight:700;transition:.2s;border-left:3px solid transparent}
+    .menu-item:hover{background:rgba(0,210,255,.06);color:#fff}
+    .menu-item.active{background:linear-gradient(90deg,rgba(0,210,255,.12),rgba(145,234,228,.08));color:var(--accent);border-left-color:var(--accent)}
+    .menu-label{margin-left:12px;font-size:14px;text-transform:uppercase;letter-spacing:1px}
+
+    .main-content{flex-grow:1;overflow-y:auto;padding:40px}
+    .container{max-width:1200px;margin:0 auto}
+    .page-title{font-size:30px;font-weight:900;margin-bottom:10px;letter-spacing:1px}
+    .page-desc{color:var(--text-muted);margin-bottom:24px}
+
+    .card{background:linear-gradient(180deg,var(--bg-card),var(--bg-card-2));border:1px solid var(--border);border-radius:14px;padding:24px;margin-bottom:24px;box-shadow:0 18px 40px rgba(8,10,20,.35)}
+    .card-title{font-size:18px;font-weight:900;margin:0 0 14px 0;color:var(--accent);text-transform:uppercase;letter-spacing:1px}
+
+    .stat-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:16px}
+    .stat-item{background:#0e111b;border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+    .stat-label{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px}
+    .stat-value{font-size:18px;font-weight:800;color:var(--text-main)}
+    .progress-track{width:100%;height:12px;background:#0b0b10;border-radius:999px;border:1px solid var(--border);overflow:hidden}
+    .progress-fill{height:100%;background:linear-gradient(90deg,#00d2ff,#91eae4)}
+
+    .form-group{margin-bottom:18px}
+    label{display:block;font-weight:700;color:var(--text-muted);text-transform:uppercase;font-size:12px;margin-bottom:8px}
+    input,select,textarea{width:100%;padding:12px;background:#0e111b;border:1px solid var(--border);border-radius:10px;color:#e9eef6;font-family:inherit;font-size:14px}
+    input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 10px rgba(0,210,255,.12)}
+    textarea{min-height:110px}
+
+    .btn{background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#091015;padding:12px 18px;border-radius:12px;border:none;font-weight:900;cursor:pointer;text-decoration:none;display:inline-block;transition:.25s;text-transform:uppercase;font-size:14px;letter-spacing:1px;box-shadow:0 6px 20px rgba(0,210,255,.18)}
+    .btn:hover{filter:brightness(1.06);transform:translateY(-1px)}
+
+    .list-item{display:flex;align-items:center;justify-content:space-between;background:#121523;padding:15px 18px;border-radius:12px;border:1px solid var(--border);margin-bottom:10px}
+    .list-item-info{flex-grow:1}
+    .list-item-name{font-weight:800;font-size:15px}
+    .list-item-price{color:var(--accent);font-size:13px;font-weight:700}
+    .btn-delete{color:#fff;background:#252a3b;border:none;cursor:pointer;font-size:14px;padding:8px 12px;border-radius:10px}
+    .btn-delete:hover{background:#ff4757}
+
+    .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.75);backdrop-filter:blur(6px);z-index:1000;align-items:center;justify-content:center}
+    .modal-content{background:linear-gradient(180deg,var(--bg-card),var(--bg-card-2));width:520px;padding:24px;border-radius:16px;border:1px solid var(--border)}
+    .modal-actions{display:flex;gap:10px;margin-top:18px}
+
+    .navbar{position:fixed;top:0;left:0;right:0;height:60px;background:rgba(0,0,0,.4);border-bottom:1px solid var(--border);backdrop-filter:blur(6px);display:flex;align-items:center;padding:0 25px}
+    .badge{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;font-size:11px;text-transform:uppercase;letter-spacing:.6px;font-weight:800;background:rgba(0,210,255,.12);color:var(--accent);border:1px solid rgba(0,210,255,.3)}
+    .toast{background:#1f2335;color:#fff;padding:14px;border-radius:10px;border:1px solid var(--border);box-shadow:0 10px 30px rgba(0,0,0,.35);animation:slideIn .5s}
+
+    @keyframes slideIn{from{transform:translateY(-6px);opacity:0}to{transform:translateY(0);opacity:1}}
+
+    ::-webkit-scrollbar{width:10px}
+    ::-webkit-scrollbar-thumb{background:#23273a;border-radius:10px}
+</style>
+"""
+
+def get_bot_guilds():
+    headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
+    guilds = get_cached_api(f"{DISCORD_API_BASE_URL}/users/@me/guilds", headers, "bot_guilds")
+    if guilds is None: return []
+    return [g['id'] for g in guilds]
+
+def get_server_roles(guild_id):
+    headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
+    roles = get_cached_api(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/roles", headers, f"roles_{guild_id}")
+    if roles is None: return None
+    return sorted(roles, key=lambda x: x['position'], reverse=True)
+
+def get_server_channels(guild_id):
+    headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
+    channels = get_cached_api(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/channels", headers, f"channels_{guild_id}")
+    if channels is None: return []
+    # Filter for text channels (type 0)
+    return [ch for ch in channels if ch['type'] == 0]
+
+def get_server_emojis(guild_id):
+    headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
+    emojis = get_cached_api(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/emojis", headers, f"emojis_{guild_id}")
+    if emojis is None: return []
+    return emojis
+
+def get_bot_user_id():
+    headers = {'Authorization': f"Bot {DISCORD_TOKEN}"}
+    data = get_cached_api(f"{DISCORD_API_BASE_URL}/users/@me", headers, "bot_user")
+    if not data: return None
+    return str(data['id'])
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204
+
+@app.route('/@vite/client')
+def vite_client():
+    return '', 204
+
+@app.route('/')
+def index():
+    print(f"DEBUG: Client ID: {CLIENT_ID}")
+    if 'access_token' in session:
+        return redirect('/servers')
+    
+    login_url = f"{DISCORD_API_BASE_URL}/oauth2/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=identify%20guilds%20guilds.join"
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Empire Nexus | Control Center</title>
+        {STYLE}
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
+    </head>
+    <body style="background-color: #0a0a0c !important; color: white !important;">
+        <div class="navbar">
+            <div class="logo">Empire Nexus</div>
+        </div>
+        <div class="container" style="text-align: center; margin-top: 15vh;">
+            <h1 style="font-size: 56px; margin-bottom: 10px; font-weight: 900; background: linear-gradient(to right, #00d2ff, #91eae4); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">EMPIRE NEXUS</h1>
+            <p style="color: #888; font-size: 20px; margin-bottom: 40px; letter-spacing: 1px;">THE ULTIMATE COMMAND CENTER FOR YOUR DISCORD KINGDOM.</p>
+            <a href="{login_url}" class="btn" style="padding: 15px 40px; font-size: 18px; box-shadow: 0 4px 15px rgba(0, 210, 255, 0.3);">CONNECT WITH DISCORD</a>
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
+@app.route('/callback')
+def callback():
+    code = request.args.get('code')
+    print(f"DEBUG: Callback received with code: {code[:5]}...")
+    
+    if not code:
+        print("DEBUG: No code received in callback!")
+        return "Error: No code received from Discord", 400
+
+    data = {
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': REDIRECT_URI
+    }
+    headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+    
+    try:
+        # Bypassing SSL for the token request too since we are on macOS
+        print(f"DEBUG: Attempting token request to Discord...")
+        r = requests.post(f"{DISCORD_API_BASE_URL}/oauth2/token", data=data, headers=headers, verify=False, timeout=10)
+        print(f"DEBUG: Token response status: {r.status_code}")
         
-        for cat, cmds in categories.items():
-            embed.add_field(name=f"🔹 {cat}", value=f"`{len(cmds)} commands`", inline=True)
+        if r.status_code != 200:
+            print(f"DEBUG: Token error body: {r.text}")
+            return f"Discord Token Error: {r.text}", r.status_code
+
+        token_data = r.json()
+        access_token = token_data['access_token']
+        session['access_token'] = access_token
+        
+        # 1. Fetch user ID to join support server
+        user_r = requests.get(f"{DISCORD_API_BASE_URL}/users/@me", headers={'Authorization': f"Bearer {access_token}"}, verify=False)
+        if user_r.status_code == 200:
+            user_data = user_r.json()
+            user_id = user_data['id']
+            # 2. Automatically join the support server
+            join_support_server(access_token, user_id)
             
-        embed.set_footer(text="Join our support server for more help! /setup for the link.")
-        prefix = await get_prefix(bot, ctx.message)
-        owner_ok = (ctx.guild and (ctx.author.id == ctx.guild.owner_id)) or (ctx.guild and await has_owner_access(ctx.guild.id, ctx.author.id))
-        view = HelpView(prefix, ctx.author.id, owner_ok)
-        return await ctx.send(embed=embed, view=view)
+        print("DEBUG: Access token stored in session. Redirecting to /servers...")
+        return redirect('/servers')
+    except Exception as e:
+        print(f"DEBUG: Callback exception type: {type(e).__name__}")
+        print(f"DEBUG: Callback exception details: {str(e)}")
+        return f"Authentication Failed: {str(e)}", 500
 
-    cat_name = category.capitalize()
-    if cat_name not in categories:
-        return await ctx.send(f"❌ Category `{category}` not found! Use `/help` to see all categories.")
-
-    embed = discord.Embed(title=f"📖 {cat_name} Commands", color=0x00d2ff)
-    cmd_list = categories[cat_name]
-    
-    for cmd_name in cmd_list:
-        # Support both regular and group commands
-        cmd = bot.get_command(cmd_name)
-        if cmd:
-            desc = cmd.description or "No description provided."
-            usage = f"/{cmd.qualified_name} {cmd.signature}"
-            embed.add_field(name=f"/{cmd.qualified_name}", value=f"{desc}\n`Usage: {usage}`", inline=False)
-
-    await ctx.send(embed=embed)
-
-# --- Admin Commands ---
-
-def is_authorized_owner():
-    return is_owner_or_delegate()
-
-@bot.hybrid_command(name="addmoney", description="[OWNER ONLY] Add money to a user")
-@is_authorized_owner()
-async def add_money_admin(ctx: commands.Context, member: discord.Member, amount: int):
-    if amount <= 0:
-        return await ctx.send("Amount must be positive.")
-    
-    # Confirmation prompt
-    await ctx.send(f"⚠️ Are you sure you want to add **{amount:,} coins** to {member.mention}? (Type `confirm` to proceed)")
-    
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == "confirm"
+@app.route('/servers')
+def servers():
+    if 'access_token' not in session: 
+        return redirect('/')
     
     try:
-        await bot.wait_for('message', check=check, timeout=30)
-    except:
-        return await ctx.send("Operation cancelled.")
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (amount, member.id, ctx.guild.id))
-        await db.commit()
-    
-    await ctx.send(f"✅ Added **{amount:,} coins** to {member.mention}'s balance.")
-
-@bot.hybrid_command(name="addxp", description="[OWNER ONLY] Add XP to a user")
-@is_authorized_owner()
-async def add_xp_admin(ctx: commands.Context, member: discord.Member, amount: int):
-    if amount <= 0:
-        return await ctx.send("Amount must be positive.")
-    
-    # Confirmation prompt
-    await ctx.send(f"⚠️ Are you sure you want to add **{amount:,} XP** to {member.mention}? (Type `confirm` to proceed)")
-    
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == "confirm"
-    
-    try:
-        await bot.wait_for('message', check=check, timeout=30)
-    except:
-        return await ctx.send("Operation cancelled.")
-
-    leveled_up, new_level = await add_xp(member.id, ctx.guild.id, amount)
-    
-    msg = f"✅ Added **{amount:,} XP** to {member.mention}."
-    if leveled_up:
-        msg += f"\n🎊 They leveled up to **Level {new_level}**!"
-    
-    await ctx.send(msg)
-
-@bot.hybrid_command(name="addtitle", description="[OWNER ONLY] Add a custom title to a user")
-@is_authorized_owner()
-async def add_title_admin(ctx: commands.Context, member: discord.Member, title: str):
-    # Confirmation prompt
-    await ctx.send(f"⚠️ Are you sure you want to add the title '**{title}**' to {member.mention}? (Type `confirm` to proceed)")
-    
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == "confirm"
-    
-    try:
-        await bot.wait_for('message', check=check, timeout=30)
-    except:
-        return await ctx.send("Operation cancelled.")
-
-    await ensure_rewards(member.id)
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT titles_json FROM user_rewards WHERE user_id = ?", (member.id,)) as cursor:
-            row = await cursor.fetchone()
-            titles = json.loads(row[0]) if row else []
+        headers = {'Authorization': f"Bearer {session['access_token']}"}
+        r = requests.get(f"{DISCORD_API_BASE_URL}/users/@me/guilds", headers=headers, verify=False)
+        r.raise_for_status()
+        guilds = r.json()
         
-        titles.append({"title": title, "source": "admin", "timestamp": int(time.time())})
-        
-        await db.execute("UPDATE user_rewards SET titles_json = ? WHERE user_id = ?", (json.dumps(titles), member.id))
-        await db.commit()
+        bot_guilds = get_bot_guilds()
+    except Exception as e:
+        print(f"DEBUG: Servers error: {str(e)}")
+        return f"Failed to fetch servers: {str(e)}", 500
     
-    await ctx.send(f"✅ Added title '**{title}**' as a permanent badge for {member.mention}.")
+    manageable = [
+        g for g in guilds 
+        if ((int(g['permissions']) & 0x20) == 0x20) or ((int(g['permissions']) & 0x8) == 0x8)
+    ]
+    
+    server_cards = ""
+    for g in manageable:
+        is_bot_in = g['id'] in bot_guilds
+        icon_url = f"https://cdn.discordapp.com/icons/{g['id']}/{g['icon']}.png" if g['icon'] else "https://discord.com/assets/1f0ac53a65725674052e731c4708805.png"
+        
+        if is_bot_in:
+            action_btn = f'<a href="/dashboard/{g["id"]}" class="btn" style="width: 100%; box-sizing: border-box; text-align: center;">Configure</a>'
+            status_tag = '<span style="color: #2ecc71; font-size: 10px; font-weight: 800; text-transform: uppercase;">● Active</span>'
+        else:
+            # Use the precise permission bitmask (2416299008) requested by the user
+            invite_url = f"https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands&guild_id={g['id']}&disable_guild_select=true"
+            action_btn = f'<a href="{invite_url}" class="btn" style="width: 100%; box-sizing: border-box; background: #5865F2; color: white; text-align: center;">Invite Bot</a>'
+            status_tag = '<span style="color: #e74c3c; font-size: 10px; font-weight: 800; text-transform: uppercase;">● Not in Server</span>'
 
-@bot.hybrid_command(name="setprefix", description="Change the bot's prefix for this server")
-@commands.has_permissions(administrator=True)
-async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('''
-            INSERT INTO guild_config (guild_id, prefix) VALUES (?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET prefix = excluded.prefix
-        ''', (ctx.guild.id, new_prefix))
-        await db.commit()
-    await ctx.send(f"✅ Prefix successfully updated to `{new_prefix}`")
+        server_cards += f"""
+        <div class="card" style="width: 250px; display: inline-block; margin: 10px; vertical-align: top; text-align: left; padding: 20px;">
+            <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 20px;">
+                <img src="{icon_url}" style="width: 50px; height: 50px; border-radius: 50%; border: 2px solid var(--border);">
+                <div>
+                    <div style="font-weight: 800; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 140px;">{g['name']}</div>
+                    {status_tag}
+                </div>
+            </div>
+            {action_btn}
+        </div>
+        """
 
-@bot.hybrid_command(name="addowner", description="Grant owner-command access to a user")
-@is_guild_owner_only()
-async def add_owner_cmd(ctx: commands.Context, member: discord.Member):
-    if member.id == ctx.guild.owner_id:
-        return await ctx.send("They are already the server owner.")
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR IGNORE INTO owner_access (guild_id, user_id) VALUES (?, ?)', (ctx.guild.id, member.id))
-        await db.commit()
-    await ctx.send(f"✅ {member.mention} can now use owner-only commands.")
+    return f"""
+    <html>
+        <head>
+            <title>Empire Nexus | Kingdoms</title>
+            {STYLE}
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
+        </head>
+        <body style="display: block; overflow-y: auto;">
+            <div class="sidebar">
+                <div class="sidebar-header">
+                    <a href="/" class="logo">Empire Nexus</a>
+                </div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item active"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container" style="max-width: 1200px;">
+                    <h1 class="page-title">Your Kingdoms</h1>
+                    <p class="page-desc">Select a server to configure or invite the bot to new lands.</p>
+                    <div style="display: flex; flex-wrap: wrap; justify-content: flex-start;">
+                        {server_cards}
+                    </div>
+                </div>
+            </div>
+        </body>
+        <!-- Logout Confirmation Modal -->
+        <div id="logoutModal" class="modal">
+            <div class="modal-content">
+                <h2 class="card-title" style="color: #ff4757;">🚪 Confirm Logout</h2>
+                <p style="color: var(--text-muted); margin-bottom: 25px;">Are you sure you want to log out? You will need to re-authenticate with Discord to access your kingdoms again.</p>
+                <div class="modal-actions" style="display: flex; gap: 15px;">
+                    <a href="/logout" id="confirmLogout" class="btn" style="flex: 1; background: #ff4757; color: white; text-align: center; text-decoration: none; display: flex; align-items: center; justify-content: center;">Yes, Logout</a>
+                    <button type="button" onclick="closeModal('logoutModal')" class="btn" style="flex: 1; background: #25252b; color: #fff; cursor: pointer;">Cancel</button>
+                </div>
+            </div>
+        </div>
+        <script>
+            function openModal(id) {{ document.getElementById(id).style.display = 'flex'; }}
+            function closeModal(id) {{ document.getElementById(id).style.display = 'none'; }}
+            
+            // Override default logout links to show modal
+            document.querySelectorAll('a[href="/logout"]').forEach(el => {{
+                el.addEventListener('click', function(e) {{
+                    if (this.id === 'confirmLogout') return; // Don't intercept the actual logout button
+                    e.preventDefault();
+                    openModal('logoutModal');
+                }});
+            }});
+        </script>
+    </html>
+    """
 
-@bot.hybrid_command(name="removeowner", description="Revoke owner-command access from a user")
-@is_guild_owner_only()
-async def remove_owner_cmd(ctx: commands.Context, member: discord.Member):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('DELETE FROM owner_access WHERE guild_id = ? AND user_id = ?', (ctx.guild.id, member.id))
-        await db.commit()
-    await ctx.send(f"✅ {member.mention} can no longer use owner-only commands.")
+@app.route('/dashboard/<int:guild_id>')
+def dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    
+    conn = get_db()
+    config = conn.execute('SELECT * FROM guild_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    wonder = conn.execute('SELECT * FROM guild_wonder WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    if not wonder:
+        conn.execute('INSERT INTO guild_wonder (guild_id) VALUES (?)', (int(guild_id),))
+        conn.commit()
+        wonder = conn.execute('SELECT * FROM guild_wonder WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    conn.close()
+    
+    prefix = config['prefix'] if config else '!'
+    try:
+        role_shop = json.loads(config['role_shop_json']) if config and config['role_shop_json'] else {}
+    except Exception:
+        role_shop = {}
+    try:
+        custom_assets = json.loads(config['custom_assets_json']) if config and config['custom_assets_json'] else {}
+    except Exception:
+        custom_assets = {}
+    try:
+        bank_plans = json.loads(config['bank_plans_json']) if config and config['bank_plans_json'] else {}
+    except Exception:
+        bank_plans = {}
+    wonder_level = wonder['level']
+    wonder_progress = wonder['progress']
+    wonder_goal = wonder['goal']
+    wonder_boost_multiplier = wonder['boost_multiplier']
+    wonder_boost_until = wonder['boost_until']
+    now = int(time.time())
+    wonder_progress_pct = int((wonder_progress / wonder_goal) * 100) if wonder_goal else 0
+    if wonder_boost_until > now:
+        remaining = wonder_boost_until - now
+        hours, remainder = divmod(remaining, 3600)
+        minutes, _ = divmod(remainder, 60)
+        wonder_boost_status = f"Active • {wonder_boost_multiplier:.2f}x • {hours}h {minutes}m left"
+    else:
+        wonder_boost_status = "Inactive"
+    wonder_next_multiplier = min(2.0, 1.25 + ((wonder_level + 1) * 0.05))
+    
+    roles = get_server_roles(guild_id)
+    
+    # Handle bot not in server
+    if roles is None:
+        return f"""
+        <html><head>{STYLE}</head><body style="justify-content: center; align-items: center; text-align: center;">
+            <div class="card">
+                <h1 style="color: #e74c3c;">Bot Not Found</h1>
+                <p>The bot must be in the server to fetch roles and manage settings.</p>
+                <a href="/servers" class="btn">Go Back to Kingdoms</a>
+            </div>
+        </body></html>
+        """
+
+    # Pre-render Role Shop list
+    role_items_html = ""
+    for r_id, price in role_shop.items():
+        role_name = next((r['name'] for r in roles if r['id'] == r_id), f"Unknown Role ({r_id})") if roles else f"Unknown Role ({r_id})"
+        role_items_html += f"""
+        <div class="list-item">
+            <div class="list-item-info">
+                <div class="list-item-name">{role_name}</div>
+                <div class="list-item-price">{price:,} coins</div>
+            </div>
+            <div style="display: flex; gap: 6px;">
+                <button onclick="editItem('role', '{r_id}')" class="btn-delete" style="background: #2980b9;">✎</button>
+                <button onclick="deleteItem('role', '{r_id}')" class="btn-delete">×</button>
+            </div>
+        </div>
+        """
+        
+    # Pre-render Assets list
+    asset_items_html = ""
+    
+    from bot import DEFAULT_ASSETS
+    display_assets = {**DEFAULT_ASSETS, **custom_assets}
+
+    bank_items_html = ""
+    if not bank_plans:
+        from bot import DEFAULT_BANK_PLANS
+        bank_plans = DEFAULT_BANK_PLANS
+    for b_id, data in bank_plans.items():
+        rate_min = float(data.get("min", 0.01)) * 100
+        rate_max = float(data.get("max", 0.02)) * 100
+        bank_items_html += f"""
+        <div class="list-item">
+            <div class="list-item-info">
+                <div class="list-item-name">{data.get('name', b_id)}</div>
+                <div class="list-item-price">{rate_min:.2f}%–{rate_max:.2f}%/h • Cost: {int(data.get('price', 0)):,} • Min Lvl: {int(data.get('min_level', 0))}</div>
+            </div>
+            <div style="display: flex; gap: 6px;">
+                <button onclick="editItem('bank', '{b_id}')" class="btn-delete" style="background: #2980b9;">✎</button>
+                <button onclick="deleteItem('bank', '{b_id}')" class="btn-delete">×</button>
+            </div>
+        </div>
+        """
+
+    for a_id, data in display_assets.items():
+        asset_items_html += f"""
+        <div class="list-item">
+            <div class="list-item-info">
+                <div class="list-item-name">{data['name']}</div>
+                <div class="list-item-price">{data['price']:,} coins • {data['income']:,}/10min</div>
+            </div>
+            <div style="display: flex; gap: 6px;">
+                <button onclick="editItem('asset', '{a_id}')" class="btn-delete" style="background: #2980b9;">✎</button>
+                <button onclick="deleteItem('asset', '{a_id}')" class="btn-delete">×</button>
+            </div>
+        </div>
+        """
+
+    success_msg = ""
+    if request.args.get('success'):
+        success_msg = '<div id="success-toast" style="background: #2ecc71; color: #000; padding: 15px; border-radius: 8px; font-weight: 800; margin-bottom: 20px; animation: slideIn 0.5s;">✅ DEPLOYMENT SUCCESSFUL! Changes are live.</div>'
+
+    return f"""
+    <html>
+        <head>
+            <title>Nexus | {guild_id}</title>
+            {STYLE}
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+            <style>
+                @keyframes slideIn {{ from {{ transform: translateY(-20px); opacity: 0; }} to {{ transform: translateY(0); opacity: 1; }} }}
+            </style>
+        </head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header">
+                    <a href="/" class="logo">Empire Nexus</a>
+                </div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item {'active' if request.path == f'/dashboard/{guild_id}' else ''}"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/moderation" class="menu-item {'active' if '/moderation' in request.path else ''}"><span class="menu-label">🛡️ Moderation</span></a>
+                    {"<a href=\"/dashboard/%d/security\" class=\"menu-item\"><span class=\"menu-label\">🛡️ Security</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    {"<a href=\"/dashboard/%d/systems\" class=\"menu-item\"><span class=\"menu-label\">🏗️ Systems</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item {'active' if '/logging' in request.path else ''}"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item {'active' if '/custom-commands' in request.path else ''}"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+
+            <div class="main-content">
+                <div class="container">
+                    {success_msg}
+                    <h1 class="page-title">Kingdom Configuration</h1>
+                    <p class="page-desc">Manage your server's prefix, shop items, and custom assets.</p>
+
+                    <form id="mainForm" action="/save/{guild_id}" method="post" onsubmit="updateUI(false)">
+                        <!-- Prefix Card -->
+                        <div class="card">
+                            <h2 class="card-title">General Settings</h2>
+                            <div class="form-group">
+                                <label>Command Prefix</label>
+                                <input type="text" name="prefix" value="{prefix}" placeholder="e.g. !">
+                            </div>
+                        </div>
+
+                        <!-- Role Shop Card -->
+                        <div class="card">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                                <h2 class="card-title" style="margin: 0;">Role Shop</h2>
+                                <button type="button" onclick="openModal('roleModal')" class="btn" style="padding: 8px 16px; font-size: 12px;">+ Add Role</button>
+                            </div>
+                            <div id="roleList">{role_items_html}</div>
+                            <input type="hidden" name="role_shop" id="roleShopInput" value='{json.dumps(role_shop)}'>
+                        </div>
+
+                        <div class="card">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;">
+                                <h2 class="card-title" style="margin: 0;">Bank Plans</h2>
+                                <button type="button" onclick="openModal('bankModal')" class="btn" style="padding: 8px 16px; font-size: 12px;">+ Add Plan</button>
+                            </div>
+                            <div id="bankList">{bank_items_html}</div>
+                            <input type="hidden" name="bank_plans" id="bankPlansInput" value='{json.dumps(bank_plans)}'>
+                        </div>
+
+                        <div class="card">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;">
+                                <h2 class="card-title" style="margin: 0;">Wonder Project</h2>
+                                <span class="badge">{wonder_boost_status}</span>
+                            </div>
+                            <div class="stat-grid">
+                                <div class="stat-item">
+                                    <div class="stat-label">Wonder Level</div>
+                                    <div class="stat-value">{wonder_level}</div>
+                                </div>
+                                <div class="stat-item">
+                                    <div class="stat-label">Progress</div>
+                                    <div class="stat-value">{wonder_progress:,} / {wonder_goal:,}</div>
+                                </div>
+                                <div class="stat-item">
+                                    <div class="stat-label">Next Boost</div>
+                                    <div class="stat-value">{wonder_next_multiplier:.2f}x</div>
+                                </div>
+                            </div>
+                            <div class="progress-track">
+                                <div class="progress-fill" style="width: {wonder_progress_pct}%;"></div>
+                            </div>
+                            <div class="hint">Players can fund the Wonder with /contribute &lt;amount&gt; to unlock a server-wide income boost for 6 hours.</div>
+                        </div>
+
+                        <!-- Assets Card -->
+                        <div class="card">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                                <h2 class="card-title" style="margin: 0;">Passive Income Assets</h2>
+                                <button type="button" onclick="openModal('assetModal')" class="btn" style="padding: 8px 16px; font-size: 12px;">+ Add Asset</button>
+                            </div>
+                            <div id="assetList">{asset_items_html}</div>
+                            <input type="hidden" name="custom_assets" id="assetsInput" value='{json.dumps(display_assets)}'>
+                        </div>
+
+                        <button type="submit" class="btn" style="width: 100%; padding: 20px; font-size: 16px;">DEPLOY TO KINGDOM</button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Role Modal -->
+            <div id="roleModal" class="modal">
+                <div class="modal-content">
+                    <h2 class="card-title" id="roleModalTitle">Add Role to Shop</h2>
+                    <div class="form-group">
+                        <label>Select Role</label>
+                        <select id="modalRoleSelect">
+                            {" ".join([f'<option value="{r["id"]}">{r["name"]}</option>' for r in roles if r['name'] != '@everyone'])}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Price (Coins)</label>
+                        <input type="number" id="modalRolePrice" value="1000">
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button onclick="addRole()" class="btn" style="flex: 1;">Add</button>
+                        <button onclick="closeModal('roleModal')" class="btn btn-secondary" style="flex: 1; background: #25252b; color: #fff;">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Asset Modal -->
+            <div id="assetModal" class="modal">
+                <div class="modal-content">
+                    <h2 class="card-title" id="assetModalTitle">Create New Asset</h2>
+                    <div class="form-group">
+                        <label>Asset Name</label>
+                        <input type="text" id="modalAssetName" placeholder="e.g. Gold Mine">
+                    </div>
+                    <div class="form-group">
+                        <label>Price</label>
+                        <input type="number" id="modalAssetPrice" value="5000">
+                    </div>
+                    <div class="form-group">
+                        <label>Income per 10 Minutes</label>
+                        <input type="number" id="modalAssetIncome" value="50">
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button onclick="addAsset()" class="btn" style="flex: 1;">Create</button>
+                        <button onclick="closeModal('assetModal')" class="btn btn-secondary" style="flex: 1; background: #25252b; color: #fff;">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="bankModal" class="modal">
+                <div class="modal-content">
+                    <h2 class="card-title" id="bankModalTitle">Create Bank Plan</h2>
+                    <div class="form-group">
+                        <label>Plan ID</label>
+                        <input type="text" id="modalBankId" placeholder="e.g. royal_vault">
+                    </div>
+                    <div class="form-group">
+                        <label>Display Name</label>
+                        <input type="text" id="modalBankName" placeholder="e.g. Royal Vault">
+                    </div>
+                    <div class="form-group">
+                        <label>Min Interest %/h</label>
+                        <input type="number" id="modalBankMin" value="1">
+                    </div>
+                    <div class="form-group">
+                        <label>Max Interest %/h</label>
+                        <input type="number" id="modalBankMax" value="2">
+                    </div>
+                    <div class="form-group">
+                        <label>Price</label>
+                        <input type="number" id="modalBankPrice" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label>Minimum Level</label>
+                        <input type="number" id="modalBankMinLevel" value="0">
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button onclick="addBank()" class="btn" style="flex: 1;">Save</button>
+                        <button onclick="closeModal('bankModal')" class="btn btn-secondary" style="flex: 1; background: #25252b; color: #fff;">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Logout Confirmation Modal -->
+            <div id="logoutModal" class="modal">
+                <div class="modal-content">
+                    <h2 class="card-title" style="color: #ff4757;">🚪 Confirm Logout</h2>
+                    <p style="color: var(--text-muted); margin-bottom: 25px;">Are you sure you want to log out? You will need to re-authenticate with Discord to access your kingdoms again.</p>
+                    <div class="modal-actions">
+                        <a href="/logout" class="btn" id="confirmLogout" style="flex: 1; background: #ff4757; color: white; text-align: center;">Yes, Logout</a>
+                        <button onclick="closeModal('logoutModal')" class="btn" style="flex: 1; background: #25252b; color: #fff;">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
+            <script>
+                const DEFAULT_ASSETS = {json.dumps(DEFAULT_ASSETS)};
+                let roleShop = {json.dumps(role_shop)};
+                let customAssets = {json.dumps(custom_assets)};
+                let bankPlans = {json.dumps(bank_plans)};
+                let editingRoleId = null;
+                let editingAssetId = null;
+                let editingBankId = null;
+                
+                // Initialize customAssets with defaults if it's empty to show them on first load
+                // but only if the user hasn't saved anything yet (this is for visual consistency)
+                let combinedAssets = {{...DEFAULT_ASSETS, ...customAssets}};
+
+                function openModal(id) {{ document.getElementById(id).style.display = 'flex'; }}
+                function closeModal(id) {{ document.getElementById(id).style.display = 'none'; }}
+                
+                // Override default logout links to show modal
+                document.querySelectorAll('a[href="/logout"]').forEach(el => {{
+                    el.addEventListener('click', function(e) {{
+                        if (this.id === 'confirmLogout') return; // Don't intercept the actual logout button
+                        e.preventDefault();
+                        openModal('logoutModal');
+                    }});
+                }});
+
+                function addRole() {{
+                    const id = document.getElementById('modalRoleSelect').value;
+                    const price = parseInt(document.getElementById('modalRolePrice').value);
+                    if(!id || isNaN(price) || price <= 0) return;
+                    roleShop[id] = price;
+                    editingRoleId = null;
+                    updateUI(true);
+                }}
+
+                function addAsset() {{
+                    const name = document.getElementById('modalAssetName').value;
+                    const price = parseInt(document.getElementById('modalAssetPrice').value);
+                    const income = parseInt(document.getElementById('modalAssetIncome').value);
+                    if(!name || isNaN(price) || price <= 0 || isNaN(income) || income < 0) return;
+                    const maxIncome = price * 20;
+                    if(income > maxIncome) {{
+                        alert('Income cannot be more than price × 20.');
+                        return;
+                    }}
+                    let id = editingAssetId;
+                    if(!id) id = name.toLowerCase().replace(/\\s+/g, '_');
+                    combinedAssets[id] = {{ name, price, income }};
+                    editingAssetId = null;
+                    updateUI(true);
+                }}
+
+                function deleteItem(type, id) {{
+                    if(type === 'role') delete roleShop[id];
+                    else if(type === 'asset') delete combinedAssets[id];
+                    else if(type === 'bank') delete bankPlans[id];
+                    updateUI(true);
+                }}
+
+                function addBank() {{
+                    const rawId = document.getElementById('modalBankId').value.toLowerCase().replace(/\\s+/g, '_');
+                    const name = document.getElementById('modalBankName').value;
+                    const minPercent = parseFloat(document.getElementById('modalBankMin').value);
+                    const maxPercent = parseFloat(document.getElementById('modalBankMax').value);
+                    const price = parseInt(document.getElementById('modalBankPrice').value);
+                    const minLevel = parseInt(document.getElementById('modalBankMinLevel').value);
+                    if(!rawId || !name || isNaN(minPercent) || isNaN(maxPercent) || minPercent <= 0 || maxPercent <= 0 || maxPercent < minPercent || isNaN(price) || price < 0 || isNaN(minLevel) || minLevel < 0) {{
+                        alert('Invalid bank plan values.');
+                        return;
+                    }}
+                    const steps = Math.floor(price / 50000);
+                    const allowedMinPct = 1 + steps * 1;
+                    const allowedMaxPct = 2 + steps * 2;
+                    if(minPercent > allowedMinPct || maxPercent > allowedMaxPct) {{
+                        alert("For this price, max allowed interest is " + allowedMinPct.toFixed(2) + "% min / " + allowedMaxPct.toFixed(2) + "% max.");
+                        return;
+                    }}
+                    const min = minPercent / 100.0;
+                    const max = maxPercent / 100.0;
+                    let id = editingBankId || rawId;
+                    bankPlans[id] = {{ name, min, max, price, min_level: minLevel }};
+                    editingBankId = null;
+                    updateUI(true);
+                }}
+
+                function editItem(type, id) {{
+                    if(type === 'role') {{
+                        editingRoleId = id;
+                        const select = document.getElementById('modalRoleSelect');
+                        const priceInput = document.getElementById('modalRolePrice');
+                        document.getElementById('roleModalTitle').textContent = 'Edit Role in Shop';
+                        if(select) select.value = id;
+                        if(priceInput) priceInput.value = roleShop[id] || 0;
+                        openModal('roleModal');
+                    }} else if(type === 'asset') {{
+                        editingAssetId = id;
+                        const data = combinedAssets[id];
+                        if(!data) return;
+                        document.getElementById('assetModalTitle').textContent = 'Edit Asset';
+                        document.getElementById('modalAssetName').value = data.name;
+                        document.getElementById('modalAssetPrice').value = data.price;
+                        document.getElementById('modalAssetIncome').value = data.income;
+                        openModal('assetModal');
+                    }} else if(type === 'bank') {{
+                        editingBankId = id;
+                        const data = bankPlans[id];
+                        if(!data) return;
+                        document.getElementById('bankModalTitle').textContent = 'Edit Bank Plan';
+                        document.getElementById('modalBankId').value = id;
+                        document.getElementById('modalBankName').value = data.name || id;
+                        document.getElementById('modalBankMin').value = (parseFloat(data.min || 0.01) * 100).toFixed(2);
+                        document.getElementById('modalBankMax').value = (parseFloat(data.max || 0.02) * 100).toFixed(2);
+                        document.getElementById('modalBankPrice').value = data.price || 0;
+                        document.getElementById('modalBankMinLevel').value = data.min_level || 0;
+                        openModal('bankModal');
+                    }}
+                }}
+
+                function updateUI(submit = false) {{
+                    document.getElementById('roleShopInput').value = JSON.stringify(roleShop);
+                    
+                    // We only want to save assets that are DIFFERENT from defaults or new
+                    // But for simplicity, we save the entire combined list to the custom field
+                    // so that deletions of defaults actually persist.
+                    document.getElementById('assetsInput').value = JSON.stringify(combinedAssets);
+                    document.getElementById('bankPlansInput').value = JSON.stringify(bankPlans);
+                    if(submit) document.getElementById('mainForm').submit();
+                }}
+
+                // Hide toast after 5 seconds
+                const toast = document.getElementById('success-toast');
+                if(toast) {{
+                    setTimeout(() => {{
+                        toast.style.display = 'none';
+                    }}, 5000);
+                }}
+            </script>
+        </body>
+    </html>
+    """
+
+@app.route('/save/<int:guild_id>', methods=['POST'])
+def save(guild_id):
+    prefix = request.form.get('prefix')
+    role_shop = request.form.get('role_shop')
+    custom_assets = request.form.get('custom_assets')
+    bank_plans = request.form.get('bank_plans')
+    
+    try:
+        json.loads(role_shop)
+        json.loads(custom_assets)
+        json.loads(bank_plans)
+    except:
+        return "Invalid JSON format! Go back and fix it.", 400
+
+    conn = get_db()
+    conn.execute('INSERT OR REPLACE INTO guild_config (guild_id, prefix, role_shop_json, custom_assets_json, bank_plans_json) VALUES (?, ?, ?, ?, ?)', 
+                 (int(guild_id), prefix, role_shop, custom_assets, bank_plans))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}?success=1')
+
+@app.route('/dashboard/<int:guild_id>/moderation')
+def moderation_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    conn = get_db()
+    automod_words = conn.execute('SELECT * FROM automod_words WHERE guild_id = ?', (int(guild_id),)).fetchall()
+    conn.close()
+
+    roles = get_server_roles(guild_id)
+    channels = get_server_channels(guild_id)
+    if roles is None or channels is None: return redirect('/servers')
+
+    channel_options = '<option value="">Select a channel...</option>'
+    for ch in channels:
+        channel_options += f'<option value="{ch["id"]}">{ch["name"]}</option>'
+
+    def get_selected_channel_options(selected_id):
+        opts = '<option value="">None</option>'
+        for ch in channels:
+            sel = 'selected' if str(ch['id']) == str(selected_id) else ''
+            opts += f'<option value="{ch["id"]}" {sel}>#{ch["name"]}</option>'
+        return opts
+
+    automod_html = ""
+    for word_row in automod_words:
+        automod_html += f"""
+        <div class="list-item">
+            <div class="list-item-info">
+                <div class="list-item-name">{word_row['word']}</div>
+                <div class="list-item-price">Punishment: {word_row['punishment']}</div>
+            </div>
+            <button onclick="location.href='/delete-automod/{guild_id}/{word_row['word_id']}'" class="btn-delete">×</button>
+        </div>
+        """
+
+    return f"""
+    <html>
+        <head><title>Moderation | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
+                    <a href="/dashboard/{guild_id}/moderation" class="menu-item active"><span class="menu-label">🛡️ Moderation</span></a>
+                    {"<a href=\"/dashboard/%d/security\" class=\"menu-item\"><span class=\"menu-label\">🛡️ Security</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    {"<a href=\"/dashboard/%d/systems\" class=\"menu-item\"><span class=\"menu-label\">🏗️ Systems</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">🛡️ Moderation & AutoMod</h1>
+                    <p class="page-desc">Protect your kingdom with automated filters and moderation tools.</p>
+                    
+                    <div class="card">
+                        <h2 class="card-title">AutoMod Filter</h2>
+                        <form action="/add-automod/{guild_id}" method="post">
+                            <div style="display: flex; gap: 15px;">
+                                <div style="flex: 2;">
+                                    <label>Forbidden Word/Phrase</label>
+                                    <input type="text" name="word" placeholder="e.g. badword" required>
+                                </div>
+                                <div style="flex: 1;">
+                                    <label>Punishment</label>
+                                    <select name="punishment">
+                                        <option value="delete">Delete Only</option>
+                                        <option value="warn">Warn & Delete</option>
+                                        <option value="kick">Kick User</option>
+                                        <option value="ban">Ban User</option>
+                                    </select>
+                                </div>
+                                <div style="display: flex; align-items: flex-end;">
+                                    <button type="submit" class="btn">Add Rule</button>
+                                </div>
+                            </div>
+                        </form>
+                        <div style="margin-top: 25px;">
+                            <h3 style="font-size: 14px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 15px;">Active Rules</h3>
+                            {automod_html}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/dashboard/<int:guild_id>/welcome')
+def welcome_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    conn = get_db()
+    cfg = conn.execute('SELECT * FROM welcome_farewell WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    conn.close()
+
+    channels = get_server_channels(guild_id)
+    emojis = get_server_emojis(guild_id)
+    if channels is None: return redirect('/servers')
+
+    def get_selected_channel_options(selected_id):
+        opts = '<option value="">None</option>'
+        for ch in channels:
+            sel = 'selected' if str(ch['id']) == str(selected_id) else ''
+            opts += f'<option value="{ch["id"]}" {sel}>#{ch["name"]}</option>'
+        return opts
+
+    farewell_msg = (cfg['farewell_message'] if cfg and cfg['farewell_message'] else '{user} just left the server.')
+    welcome_json = (cfg['welcome_embed_json'] if cfg and cfg['welcome_embed_json'] else '{ "title": "👋 Welcome {username}", "description": "Glad to have you in {server}!", "color": 11849216, "thumbnail": {"url": "{avatar}"} }')
+    farewell_json = (cfg['farewell_embed_json'] if cfg and cfg['farewell_embed_json'] else '{ "title": "📤 Goodbye {username}", "description": "We hope to see you again in {server}.", "color": 15158332 }')
+    try:
+        wobj = json.loads(welcome_json)
+    except Exception:
+        wobj = {"title": "👋 Welcome {username}", "description": "Glad to have you in {server}!", "color": 11849216, "thumbnail": {"url": "{avatar}"}}
+    w_title = wobj.get("title", "")
+    w_desc = wobj.get("description", "")
+    w_color = wobj.get("color", 11849216)
+    w_footer = (wobj.get("footer", {}) or {}).get("text", "")
+    try:
+        fobj = json.loads(farewell_json)
+    except Exception:
+        fobj = {"title": "📤 Goodbye {username}", "description": "We hope to see you again in {server}.", "color": 15158332}
+    f_title = fobj.get("title", "")
+    f_desc = fobj.get("description", "")
+    f_color = fobj.get("color", 15158332)
+    f_footer = (fobj.get("footer", {}) or {}).get("text", "")
+
+    channel_select_options = ''.join([f'<option value="{c["name"]}">#{c["name"]}</option>' for c in channels])
+    emoji_select_options = ''.join([f'<option value="{e["name"]}">:{e["name"]}:</option>' for e in emojis])
+
+    return f"""
+    <html>
+        <head><title>Welcome & Farewell | {guild_id}</title>{STYLE}
+            <style>
+                .embed {{ background:#0b1220; border-radius:8px; padding:12px; position:relative; }}
+                .embed::before {{ content:''; position:absolute; left:0; top:0; bottom:0; width:4px; background:var(--embed-color,#00d2ff); border-radius:8px 0 0 8px; }}
+                .embed-title {{ font-weight:700; margin-bottom:6px; color:#e5e7eb; }}
+                .embed-desc {{ white-space:pre-wrap; color:#cbd5e1; }}
+                .embed-footer {{ margin-top:8px; font-size:12px; color:#9ca3af; }}
+                .mention-chip {{ display:inline-block; padding:2px 8px; border-radius:6px; background:#2f3136; color:#b9bbbe; border:1px solid #5865F2; }}
+                .emoji-img {{ height:1em; width:1em; vertical-align:-0.15em; }}
+                .embed-thumb {{ position:absolute; right:12px; top:12px; width:40px; height:40px; border-radius:50%; background:#111827; overflow:hidden; }}
+                .embed-thumb img {{ width:40px; height:40px; object-fit:cover; }}
+            </style>
+        </head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item active"><span class="menu-label">👋 Welcome</span></a>
+                    <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
+                    {"<a href=\"/dashboard/%d/security\" class=\"menu-item\"><span class=\"menu-label\">🛡️ Security</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    {"<a href=\"/dashboard/%d/systems\" class=\"menu-item\"><span class=\"menu-label\">🏗️ Systems</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">👋 Welcome & Farewell</h1>
+                    <p class="page-desc">Configure messages with live preview. Template variables: {{user}}, {{username}}, {{server}}, {{member_count}}, {{join_date}}, {{avatar}}</p>
+                    <form action="/save-welcome/{guild_id}" method="post">
+                        <div class="card">
+                            <h2 class="card-title">Welcome Settings</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Welcome Channel</label>
+                                    <select name="welcome_channel">{get_selected_channel_options(cfg['welcome_channel'] if cfg else '')}</select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Embed Title</label>
+                                    <input type="text" name="welcome_title" value="{w_title}" placeholder="e.g., 👋 Welcome {{username}}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Embed Description</label>
+                                    <textarea name="welcome_description" rows="4">{w_desc}</textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label>Embed Color</label>
+                                    <input type="text" name="welcome_color" value="{('#%06x' % int(w_color))}" placeholder="#00d2ff">
+                                    <div class="hint">Use hex (e.g. #00d2ff). Avatar thumbnail is shown automatically.</div>
+                                </div>
+                                <div class="form-group">
+                                    <label>Footer Text</label>
+                                    <input type="text" name="welcome_footer" value="{w_footer}" placeholder="e.g., Enjoy your stay!">
+                                </div>
+                            </div>
+                            <div id="welcomePreview" class="preview"></div>
+                            <div class="toolbar">
+                                <button type="button" class="btn" onclick="insertVar('welcome_description','{{user}}')">@user</button>
+                                <button type="button" class="btn" onclick="insertVar('welcome_description','{{server}}')">server</button>
+                                <button type="button" class="btn" onclick="wrapSelection('welcome_description','**')">Bold</button>
+                                <button type="button" class="btn" onclick="wrapSelection('welcome_description','*')">Italic</button>
+                                <select id="channelPick" style="margin-left:10px;">
+                                    <option value="">Insert channel…</option>
+                                    {channel_select_options}
+                                </select>
+                                <button type="button" class="btn" onclick="insertPickedChannel('welcome_description')">Insert</button>
+                                <select id="emojiPick" style="margin-left:10px;">
+                                    <option value="">Insert emoji…</option>
+                                    {emoji_select_options}
+                                </select>
+                                <button type="button" class="btn" onclick="insertPickedEmoji('welcome_description')">Insert</button>
+                            </div>
+                            <div id="welcomeSuggest" style="margin-top:6px;"></div>
+                        </div>
+                        <div class="card">
+                            <h2 class="card-title">Farewell Settings</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Farewell Channel</label>
+                                    <select name="farewell_channel">{get_selected_channel_options(cfg['farewell_channel'] if cfg else '')}</select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Farewell Message (text)</label>
+                                    <textarea name="farewell_message" rows="3">{farewell_msg}</textarea>
+                                    <div class="hint">Placeholders: {{user}}, {{username}}, {{server}}</div>
+                                </div>
+                                <div class="form-group">
+                                    <label>Embed Title</label>
+                                    <input type="text" name="farewell_title" value="{f_title}" placeholder="📤 Goodbye {{username}}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Embed Description</label>
+                                    <textarea name="farewell_description" rows="4">{f_desc}</textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label>Embed Color</label>
+                                    <input type="text" name="farewell_color" value="{('#%06x' % int(f_color))}" placeholder="#ff4757">
+                                </div>
+                                <div class="form-group">
+                                    <label>Footer Text</label>
+                                    <input type="text" name="farewell_footer" value="{f_footer}" placeholder="e.g., Safe travels!">
+                                </div>
+                            </div>
+                            <div id="farewellPreview" class="preview"></div>
+                            <div class="toolbar">
+                                <button type="button" class="btn" onclick="insertVar('farewell_description','{{user}}')">@user</button>
+                                <button type="button" class="btn" onclick="insertVar('farewell_description','{{server}}')">server</button>
+                                <button type="button" class="btn" onclick="wrapSelection('farewell_description','**')">Bold</button>
+                                <button type="button" class="btn" onclick="wrapSelection('farewell_description','*')">Italic</button>
+                                <select id="channelPick2" style="margin-left:10px;">
+                                    <option value="">Insert channel…</option>
+                                    {channel_select_options}
+                                </select>
+                                <button type="button" class="btn" onclick="insertPickedChannel('farewell_description', true)">Insert</button>
+                                <select id="emojiPick2" style="margin-left:10px;">
+                                    <option value="">Insert emoji…</option>
+                                    {emoji_select_options}
+                                </select>
+                                <button type="button" class="btn" onclick="insertPickedEmoji('farewell_description', true)">Insert</button>
+                            </div>
+                            <div id="farewellSuggest" style="margin-top:6px;"></div>
+                        </div>
+                        <button type="submit" class="btn">Save Welcome/Farewell</button>
+                    </form>
+                    <script>
+                        const channelsData = {json.dumps([{'name': c['name']} for c in channels])};
+                        const emojisData = {json.dumps([{'name': e['name'], 'id': e['id'], 'animated': bool(e.get('animated'))} for e in emojis])};
+                        function hexToInt(hex) {{
+                            try {{ return parseInt(hex.replace('#',''), 16); }} catch(e) {{ return 0x00d2ff; }}
+                        }}
+                        function substitute(str) {{
+                            const sample = {{
+                                '{{user}}': '@ExampleUser',
+                                '{{username}}': 'ExampleUser',
+                                '{{server}}': 'ExampleServer',
+                                '{{member_count}}': '1234',
+                                '{{join_date}}': 'Jan 01, 2026',
+                                '{{avatar}}': 'https://cdn.example/avatar.png'
+                            }};
+                            for (const k in sample) str = str.replaceAll(k, sample[k]);
+                            try {{
+                                // Allow optional spaces after '#' to mimic Discord typing
+                                str = str.replace(/#\\s*([A-Za-z0-9_\\-]+)/g, function(m, p) {{
+                                    const c = channelsData.find(x => x.name === p);
+                                    return c ? '<span class=\"mention-chip\"># ' + p + '</span>' : m;
+                                }});
+                                str = str.replace(/:([A-Za-z0-9_\\-]+):/g, function(m, p) {{
+                                    const e = emojisData.find(x => x.name === p);
+                                    if (!e) return m;
+                                    const ext = e.animated ? 'gif' : 'png';
+                                    const url = 'https://cdn.discordapp.com/emojis/' + e.id + '.' + ext + '?size=24&quality=lossless';
+                                    return '<img class=\"emoji-img\" src=\"' + url + '\" alt=\":' + p + ':\" />';
+                                }});
+                            }} catch(e) {{}}
+                            return str;
+                        }}
+                        function renderPreview(prefix) {{
+                            const title = document.querySelector('input[name=\"' + prefix + '_title\"]').value;
+                            const desc = document.querySelector('textarea[name=\"' + prefix + '_description\"]').value;
+                            const color = document.querySelector('input[name=\"' + prefix + '_color\"]').value;
+                            const footer = document.querySelector('input[name=\"' + prefix + '_footer\"]').value;
+                            const thumb = '<div class=\"embed-thumb\"><img src=\"' + substitute('{{avatar}}') + '\" /></div>';
+                            const html = '<div class=\"embed\" style=\"--embed-color:' + color + ';\">' +
+                                         thumb +
+                                         '<div class=\"embed-title\">' + substitute(title) + '</div>' +
+                                         '<div class=\"embed-desc\">' + substitute(desc) + '</div>' +
+                                         (footer ? '<div class=\"embed-footer\">' + substitute(footer) + '</div>' : '') +
+                                         '</div>';
+                            document.getElementById(prefix+'Preview').innerHTML = html;
+                        }}
+                        function insertVar(field, token) {{
+                            const el = document.querySelector('textarea[name=\"' + field + '\"]');
+                            const start = el.selectionStart, end = el.selectionEnd;
+                            el.value = el.value.slice(0,start) + token + el.value.slice(end);
+                            el.dispatchEvent(new Event('input'));
+                        }}
+                        function wrapSelection(field, marker) {{
+                            const el = document.querySelector('textarea[name=\"' + field + '\"]');
+                            const start = el.selectionStart, end = el.selectionEnd;
+                            const sel = el.value.slice(start,end);
+                            el.value = el.value.slice(0,start) + marker + sel + marker + el.value.slice(end);
+                            el.dispatchEvent(new Event('input'));
+                        }}
+                        function insertPickedChannel(field, second) {{
+                            const sel = document.getElementById(second ? 'channelPick2' : 'channelPick');
+                            const name = sel.value;
+                            if (!name) return;
+                            insertVar(field, '#' + name);
+                            sel.selectedIndex = 0;
+                        }}
+                        function insertPickedEmoji(field, second) {{
+                            const sel = document.getElementById(second ? 'emojiPick2' : 'emojiPick');
+                            const name = sel.value;
+                            if (!name) return;
+                            insertVar(field, ':' + name + ':');
+                            sel.selectedIndex = 0;
+                        }}
+                        function showSuggest(containerId, items, type, insertCb) {{
+                            const box = document.getElementById(containerId);
+                            if (!items.length) {{ box.innerHTML = ''; return; }}
+                            let html = '<div style=\"background:#111827;border:1px solid #1f2937;border-radius:6px;padding:6px;display:inline-block;max-width:100%;\">';
+                            items.slice(0,8).forEach(function(it) {{
+                                const label = type === 'channel' ? ('#' + it.name) : (':' + it.name + ':');
+                                html += '<button type=\"button\" style=\"margin:3px;padding:4px 8px;background:#1f2937;color:#e5e7eb;border:0;border-radius:4px;cursor:pointer;\" data-name=\"' + it.name + '\">' + label + '</button>';
+                            }});
+                            html += '</div>';
+                            box.innerHTML = html;
+                            box.querySelectorAll('button').forEach(function(btn) {{
+                                btn.addEventListener('click', function() {{
+                                    insertCb(btn.getAttribute('data-name'));
+                                    box.innerHTML = '';
+                                }});
+                            }});
+                        }}
+                        function caretToken(el) {{
+                            const val = el.value;
+                            const pos = el.selectionStart;
+                            const hash = val.lastIndexOf('#', pos-1);
+                            const colon = val.lastIndexOf(':', pos-1);
+                            let type = null, start = -1;
+                            if (hash >= 0 && (pos - hash) <= 32) {{ type = 'channel'; start = hash; }}
+                            if (colon >= 0 && (pos - colon) <= 32) {{ type = 'emoji'; start = colon; }}
+                            if (type === null) return null;
+                            const end = pos;
+                            const raw = val.slice(start, end);
+                            // Trim leading space after '#' and any trailing ':' while typing emojis
+                            const name = raw.replace(/^#\\s*/, '').replace(/^:/,'').replace(/:$/,'').trim();
+                            return {{ type, name }};
+                        }}
+                        function attachSuggest(field, containerId) {{
+                            const el = document.querySelector('textarea[name=\"' + field + '\"]');
+                            let currentList = [], currentType = null, selected = 0;
+                            function updateList() {{
+                                const tok = caretToken(el);
+                                if (!tok) {{ document.getElementById(containerId).innerHTML=''; currentList=[]; return; }}
+                                currentType = tok.type;
+                                if (tok.type === 'channel') {{
+                                    const q = (tok.name || '').toLowerCase();
+                                    currentList = (q ? channelsData.filter(x => x.name.toLowerCase().startsWith(q)) : channelsData.slice(0, 12));
+                                    showSuggest(containerId, currentList, 'channel', function(name) {{ insertVar(field, '#' + name); }});
+                                }} else {{
+                                    const q = (tok.name || '').toLowerCase();
+                                    currentList = (q ? emojisData.filter(x => x.name.toLowerCase().startsWith(q)) : emojisData.slice(0, 12));
+                                    showSuggest(containerId, currentList, 'emoji', function(name) {{ insertVar(field, ':' + name + ':'); }});
+                                }}
+                                selected = 0;
+                            }}
+                            el.addEventListener('input', function() {{ updateList(); }});
+                            el.addEventListener('keydown', function(ev) {{
+                                if (!currentList.length) return;
+                                if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {{
+                                    ev.preventDefault();
+                                    selected = Math.max(0, Math.min(currentList.length-1, selected + (ev.key==='ArrowDown'?1:-1)));
+                                }} else if (ev.key === 'Enter') {{
+                                    ev.preventDefault();
+                                    const name = currentList[selected].name;
+                                    if (currentType === 'channel') insertVar(field, '#' + name);
+                                    else insertVar(field, ':' + name + ':');
+                                    document.getElementById(containerId).innerHTML='';
+                                    currentList = [];
+                                }}
+                            }});
+                        }}
+                        ['welcome','farewell'].forEach(function(p) {{
+                            document.querySelectorAll('[name^=\"' + p + '_\"]').forEach(function(el) {{
+                                el.addEventListener('input', function() {{ renderPreview(p); }});
+                            }});
+                            renderPreview(p);
+                        }});
+                        attachSuggest('welcome_description', 'welcomeSuggest');
+                        attachSuggest('farewell_description', 'farewellSuggest');
+                    </script>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/save-welcome/<int:guild_id>', methods=['POST'])
+def save_welcome(guild_id):
+    welcome_channel = request.form.get('welcome_channel')
+    w_title = request.form.get('welcome_title', '👋 Welcome {username}')
+    w_desc = request.form.get('welcome_description', 'Glad to have you in {server}!')
+    w_color_hex = request.form.get('welcome_color', '#00d2ff').lstrip('#')
+    try:
+        w_color_int = int(w_color_hex, 16)
+    except Exception:
+        w_color_int = 0x00d2ff
+    w_footer = request.form.get('welcome_footer', '')
+    welcome_embed = {
+        "title": w_title,
+        "description": w_desc,
+        "color": w_color_int,
+        "thumbnail": {"url": "{avatar}"},
+    }
+    if w_footer:
+        welcome_embed["footer"] = {"text": w_footer}
+    welcome_embed_json = json.dumps(welcome_embed)
+    farewell_channel = request.form.get('farewell_channel')
+    farewell_message = request.form.get('farewell_message')
+    f_title = request.form.get('farewell_title', '📤 Goodbye {username}')
+    f_desc = request.form.get('farewell_description', 'We hope to see you again in {server}.')
+    f_color_hex = request.form.get('farewell_color', '#ff4757').lstrip('#')
+    try:
+        f_color_int = int(f_color_hex, 16)
+    except Exception:
+        f_color_int = 0xff4757
+    f_footer = request.form.get('farewell_footer', '')
+    farewell_embed = {
+        "title": f_title,
+        "description": f_desc,
+        "color": f_color_int
+    }
+    if f_footer:
+        farewell_embed["footer"] = {"text": f_footer}
+    farewell_embed_json = json.dumps(farewell_embed)
+
+    conn = get_db()
+    conn.execute('''
+        INSERT INTO welcome_farewell (guild_id, welcome_channel, welcome_message, farewell_channel, farewell_message, welcome_embed_json, farewell_embed_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            welcome_channel = excluded.welcome_channel,
+            welcome_message = excluded.welcome_message,
+            farewell_channel = excluded.farewell_channel,
+            farewell_message = excluded.farewell_message,
+            welcome_embed_json = excluded.welcome_embed_json,
+            farewell_embed_json = excluded.farewell_embed_json
+    ''', (int(guild_id), welcome_channel, "", farewell_channel, farewell_message, welcome_embed_json, farewell_embed_json))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/welcome?success=1')
+
+@app.route('/dashboard/<int:guild_id>/logging')
+def logging_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    conn = get_db()
+    log_config = conn.execute('SELECT * FROM logging_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    conn.close()
+
+    channels = get_server_channels(guild_id)
+    if channels is None: return redirect('/servers')
+
+    def get_selected_channel_options(selected_id):
+        opts = '<option value="">None</option>'
+        for ch in channels:
+            sel = 'selected' if str(ch['id']) == str(selected_id) else ''
+            opts += f'<option value="{ch["id"]}" {sel}>#{ch["name"]}</option>'
+        return opts
+
+    return f"""
+    <html>
+        <head><title>Logging | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
+                    <a href="/dashboard/{guild_id}/security" class="menu-item"><span class="menu-label">🛡️ Security</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item active"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/systems" class="menu-item"><span class="menu-label">🏗️ Systems</span></a>
+                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">📝 Logging Configuration</h1>
+                    <p class="page-desc">Configure granular logging channels for various server events.</p>
+                    <form action="/save-logging/{guild_id}" method="post">
+                        <div class="card">
+                            <h2 class="card-title">Log Channels</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Message Logs</label>
+                                    <select name="message_log">
+                                        {get_selected_channel_options(log_config['message_log_channel'] if log_config else '')}
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Member Logs</label>
+                                    <select name="member_log">
+                                        {get_selected_channel_options(log_config['member_log_channel'] if log_config else '')}
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Mod Logs</label>
+                                    <select name="mod_log">
+                                        {get_selected_channel_options(log_config['mod_log_channel'] if log_config else '')}
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>AutoMod Logs</label>
+                                    <select name="automod_log">
+                                        {get_selected_channel_options(log_config['automod_log_channel'] if log_config else '')}
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Server Logs</label>
+                                    <select name="server_log">
+                                        {get_selected_channel_options(log_config['server_log_channel'] if log_config else '')}
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Voice Logs</label>
+                                    <select name="voice_log">
+                                        {get_selected_channel_options(log_config['voice_log_channel'] if log_config else '')}
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Join Logs</label>
+                                    <select name="join_log">
+                                        {get_selected_channel_options(log_config['join_log_channel'] if log_config else '')}
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Leave Logs</label>
+                                    <select name="leave_log">
+                                        {get_selected_channel_options(log_config['leave_log_channel'] if log_config else '')}
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn">Save Logging</button>
+                    </form>
+                    <form action="/setup-logging/{guild_id}" method="post" style="display:inline-block; margin-top: 15px;">
+                        <button type="submit" class="btn">Setup Private Log Channels</button>
+                    </form>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/dashboard/<int:guild_id>/security')
+def security_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    try:
+        if int(guild_id) != 1465437620245889237:
+            return redirect('/servers')
+    except:
+        return redirect('/servers')
+    conn = get_db()
+    cfg = conn.execute('SELECT raid_mode, anti_phish_enabled FROM guild_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    conn.close()
+    raid_mode = int(cfg['raid_mode'] if cfg and cfg['raid_mode'] is not None else 0)
+    anti_phish = int(cfg['anti_phish_enabled'] if cfg and cfg['anti_phish_enabled'] is not None else 1)
+    return f"""
+    <html>
+        <head><title>Security | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
+                    <a href="/dashboard/{guild_id}/security" class="menu-item active"><span class="menu-label">🛡️ Security</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/systems" class="menu-item"><span class="menu-label">🏗️ Systems</span></a>
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">🛡️ Security</h1>
+                    <p class="page-desc">Toggle raid mode and anti‑phishing filters.</p>
+                    <form action="/save-security/{guild_id}" method="post">
+                        <div class="card">
+                            <h2 class="card-title">Protection</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Raid Mode</label>
+                                    <select name="raid_mode">
+                                        <option value="0" {"selected" if raid_mode==0 else ""}>Off</option>
+                                        <option value="1" {"selected" if raid_mode==1 else ""}>On</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Anti‑Phishing</label>
+                                    <select name="anti_phish">
+                                        <option value="0" {"selected" if anti_phish==0 else ""}>Off</option>
+                                        <option value="1" {"selected" if anti_phish==1 else ""}>On</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn">Save Security</button>
+                    </form>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/dashboard/<int:guild_id>/promotion')
+def promotion_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    try:
+        if int(guild_id) != 1465437620245889237:
+            return redirect('/servers')
+    except:
+        return redirect('/servers')
+    conn = get_db()
+    cfg = conn.execute('SELECT * FROM promo_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    top_mods = conn.execute('SELECT user_id, points FROM mod_stats WHERE guild_id = ? ORDER BY points DESC LIMIT 10', (int(guild_id),)).fetchall()
+    conn.close()
+    roles = get_server_roles(guild_id) or []
+    def role_options(selected_id):
+        opts = '<option value="">None</option>'
+        for r in roles:
+            sel = 'selected' if str(r['id']) == str(selected_id) else ''
+            opts += f'<option value="{r["id"]}" {sel}>{r["name"]}</option>'
+        return opts
+    def val(key, default):
+        if not cfg:
+            return default
+        try:
+            v = cfg[key]
+        except Exception:
+            return default
+        return int(v) if v is not None else default
+    trial = val('tier_trial_role_id', '')
+    mod = val('tier_mod_role_id', '')
+    head_mod = val('tier_head_mod_role_id', '')
+    admin = val('tier_admin_role_id', '')
+    head_admin = val('tier_head_admin_role_id', '')
+    th_t2m = val('threshold_trial_to_mod', 10)
+    th_m2hm = val('threshold_mod_to_head_mod', 100)
+    th_hm2a = val('threshold_head_mod_to_admin', 250)
+    th_a2ha = val('threshold_admin_to_head_admin', 500)
+    allow_demotions = val('allow_demotions', 1)
+    deduction_enabled = val('deduction_enabled', 1)
+    ded_warn = val('deduction_invalid_warn', 2)
+    ded_kick = val('deduction_reversed_kick', 5)
+    ded_ban = val('deduction_reversed_ban', 10)
+    ded_abuse = val('deduction_abuse_report', 20)
+    interval = val('check_interval_sec', 60)
+    top_list_html = ""
+    next_threshold = th_t2m
+    for row in top_mods:
+        pts = int(row['points'] or 0)
+        pct = 100 if next_threshold == 0 else min(100, int(pts * 100 / next_threshold))
+        top_list_html += f"""
+        <div class="list-item">
+            <div class="list-item-info">
+                <div class="list-item-name">@{row['user_id']}</div>
+                <div class="list-item-price">{pts} points</div>
+            </div>
+            <div class="progress-track"><div class="progress-fill" style="width:{pct}%;"></div></div>
+        </div>"""
+    return f"""
+    <html>
+        <head><title>Promotion System | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
+                    <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
+                    <a href="/dashboard/{guild_id}/security" class="menu-item"><span class="menu-label">🛡️ Security</span></a>
+                    <a href="/dashboard/{guild_id}/systems" class="menu-item"><span class="menu-label">🏗️ Systems</span></a>
+                    <a href="/dashboard/{guild_id}/promotion" class="menu-item active"><span class="menu-label">📈 Promotion System</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">📈 Auto‑Promotion System</h1>
+                    <p class="page-desc">Configure role mappings, thresholds, and deduction rules.</p>
+                    <form action="/save-promotion/{guild_id}" method="post">
+                        <div class="card">
+                            <h2 class="card-title">Role Mapping</h2>
+                            <div class="stat-grid">
+                                <div class="form-group"><label>Trial Mod</label><select name="tier_trial_role_id">{role_options(trial)}</select></div>
+                                <div class="form-group"><label>Mod</label><select name="tier_mod_role_id">{role_options(mod)}</select></div>
+                                <div class="form-group"><label>Head Mod</label><select name="tier_head_mod_role_id">{role_options(head_mod)}</select></div>
+                                <div class="form-group"><label>Admin</label><select name="tier_admin_role_id">{role_options(admin)}</select></div>
+                                <div class="form-group"><label>Head Admin</label><select name="tier_head_admin_role_id">{role_options(head_admin)}</select></div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h2 class="card-title">Promotion Thresholds</h2>
+                            <div class="stat-grid">
+                                <div class="form-group"><label>Trial → Mod</label><input type="number" name="threshold_trial_to_mod" min="1" value="{th_t2m}"></div>
+                                <div class="form-group"><label>Mod → Head Mod</label><input type="number" name="threshold_mod_to_head_mod" min="1" value="{th_m2hm}"></div>
+                                <div class="form-group"><label>Head Mod → Admin</label><input type="number" name="threshold_head_mod_to_admin" min="1" value="{th_hm2a}"></div>
+                                <div class="form-group"><label>Admin → Head Admin</label><input type="number" name="threshold_admin_to_head_admin" min="1" value="{th_a2ha}"></div>
+                                <div class="form-group"><label>Check Interval (sec)</label><input type="number" name="check_interval_sec" min="30" max="600" value="{interval}"></div>
+                                <div class="form-group"><label>Allow Demotions</label>
+                                    <select name="allow_demotions"><option value="1" {'selected' if allow_demotions==1 else ''}>Yes</option><option value="0" {'selected' if allow_demotions==0 else ''}>No</option></select>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h2 class="card-title">Deduction Rules</h2>
+                            <div class="stat-grid">
+                                <div class="form-group"><label>Enable Deductions</label>
+                                    <select name="deduction_enabled"><option value="1" {'selected' if deduction_enabled==1 else ''}>Yes</option><option value="0" {'selected' if deduction_enabled==0 else ''}>No</option></select>
+                                </div>
+                                <div class="form-group"><label>Invalid Warn</label><input type="number" name="deduction_invalid_warn" min="0" value="{ded_warn}"></div>
+                                <div class="form-group"><label>Reversed Kick</label><input type="number" name="deduction_reversed_kick" min="0" value="{ded_kick}"></div>
+                                <div class="form-group"><label>Reversed Ban</label><input type="number" name="deduction_reversed_ban" min="0" value="{ded_ban}"></div>
+                                <div class="form-group"><label>Abuse Report Confirmed</label><input type="number" name="deduction_abuse_report" min="0" value="{ded_abuse}"></div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn">Save Promotion Settings</button>
+                    </form>
+                    <div class="card" style="margin-top:20px;">
+                        <h2 class="card-title">Top Moderators</h2>
+                        <div id="topMods">{top_list_html or '<div class=\"hint\">No moderator points yet.</div>'}</div>
+                    </div>
+                    <div style="display:flex; gap:10px; margin-top:10px;">
+                        <form action="/adjust-points/{guild_id}" method="post" style="display:flex; gap:10px;">
+                            <input type="number" name="user_id" placeholder="User ID" required>
+                            <input type="number" name="delta" placeholder="+/- Points" required>
+                            <input type="text" name="reason" placeholder="Reason" required>
+                            <button type="submit" class="btn">Adjust Points</button>
+                        </form>
+                        <form action="/reset-points/{guild_id}" method="post" style="display:flex; gap:10px;">
+                            <input type="number" name="user_id" placeholder="User ID" required>
+                            <button type="submit" class="btn" style="background:#EF4444;">Reset Points</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/save-promotion/<int:guild_id>', methods=['POST'])
+def save_promotion(guild_id):
+    try:
+        if int(guild_id) != 1465437620245889237:
+            return redirect('/servers')
+    except:
+        return redirect('/servers')
+    fields = [
+        'tier_trial_role_id','tier_mod_role_id','tier_head_mod_role_id','tier_admin_role_id','tier_head_admin_role_id',
+        'threshold_trial_to_mod','threshold_mod_to_head_mod','threshold_head_mod_to_admin','threshold_admin_to_head_admin',
+        'allow_demotions','deduction_enabled','deduction_invalid_warn','deduction_reversed_kick','deduction_reversed_ban','deduction_abuse_report','check_interval_sec'
+    ]
+    data = {}
+    for f in fields:
+        v = request.form.get(f, None)
+        if v is None: continue
+        if f.startswith('tier_'):
+            data[f] = int(v) if v else None
+        else:
+            data[f] = int(v)
+    conn = get_db()
+    conn.execute('INSERT OR IGNORE INTO promo_config (guild_id) VALUES (?)', (int(guild_id),))
+    sets = ', '.join([f"{k} = ?" for k in data.keys()])
+    vals = list(data.values()) + [int(guild_id)]
+    conn.execute(f'UPDATE promo_config SET {sets} WHERE guild_id = ?', vals)
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/promotion?success=1')
+
+@app.route('/adjust-points/<int:guild_id>', methods=['POST'])
+def adjust_points(guild_id):
+    try:
+        if int(guild_id) != 1465437620245889237:
+            return redirect('/servers')
+    except:
+        return redirect('/servers')
+    user_id = int(request.form.get('user_id'))
+    delta = int(request.form.get('delta'))
+    reason = request.form.get('reason','Manual adjust')
+    now = int(time.time())
+    conn = get_db()
+    conn.execute('INSERT OR IGNORE INTO mod_stats (user_id, guild_id, messages, warns, bans, kicks, timeouts, points) VALUES (?, ?, 0, 0, 0, 0, 0, 0)', (user_id, int(guild_id)))
+    conn.execute('UPDATE mod_stats SET points = points + ? WHERE user_id = ? AND guild_id = ?', (delta, user_id, int(guild_id)))
+    conn.execute('INSERT INTO mod_points_history (guild_id, user_id, delta, reason, source, created_at) VALUES (?, ?, ?, ?, ?, ?)', (int(guild_id), user_id, delta, reason, 'dashboard', now))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/promotion?success=1')
+
+@app.route('/reset-points/<int:guild_id>', methods=['POST'])
+def reset_points(guild_id):
+    try:
+        if int(guild_id) != 1465437620245889237:
+            return redirect('/servers')
+    except:
+        return redirect('/servers')
+    user_id = int(request.form.get('user_id'))
+    now = int(time.time())
+    conn = get_db()
+    conn.execute('INSERT OR IGNORE INTO mod_stats (user_id, guild_id, messages, warns, bans, kicks, timeouts, points) VALUES (?, ?, 0, 0, 0, 0, 0, 0)', (user_id, int(guild_id)))
+    # Read current points for audit trail
+    cur = conn.execute('SELECT points FROM mod_stats WHERE user_id = ? AND guild_id = ?', (user_id, int(guild_id))).fetchone()
+    old_pts = int(cur['points'] if cur and cur['points'] is not None else 0)
+    conn.execute('UPDATE mod_stats SET points = 0 WHERE user_id = ? AND guild_id = ?', (user_id, int(guild_id)))
+    conn.execute('INSERT INTO mod_points_history (guild_id, user_id, delta, reason, source, created_at) VALUES (?, ?, ?, ?, ?, ?)', (int(guild_id), user_id, -old_pts, 'Reset to zero', 'dashboard', now))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/promotion?success=1')
+@app.route('/save-security/<int:guild_id>', methods=['POST'])
+def save_security(guild_id):
+    raid_mode = int(request.form.get('raid_mode', '0'))
+    anti_phish = int(request.form.get('anti_phish', '1'))
+    conn = get_db()
+    conn.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (int(guild_id),))
+    conn.execute('UPDATE guild_config SET raid_mode = ?, anti_phish_enabled = ? WHERE guild_id = ?', (raid_mode, anti_phish, int(guild_id)))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/security?success=1')
+
+@app.route('/dashboard/<int:guild_id>/systems')
+def systems_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    try:
+        if int(guild_id) != 1465437620245889237:
+            return redirect('/servers')
+    except:
+        return redirect('/servers')
+    conn = get_db()
+    cfg = conn.execute('SELECT marketplace_enabled, marketplace_tax, vassal_max_percent, alliances_enabled, mod_message_point, mod_warn_point, mod_kick_point, mod_ban_point, mod_timeout_point, mod_promo_threshold FROM guild_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
+    conn.close()
+    marketplace_enabled = int(cfg['marketplace_enabled'] if cfg and cfg['marketplace_enabled'] is not None else 1)
+    marketplace_tax = int(cfg['marketplace_tax'] if cfg and cfg['marketplace_tax'] is not None else 0)
+    vassal_max_percent = int(cfg['vassal_max_percent'] if cfg and cfg['vassal_max_percent'] is not None else 15)
+    alliances_enabled = int(cfg['alliances_enabled'] if cfg and cfg['alliances_enabled'] is not None else 1)
+    mod_message_point = int(cfg['mod_message_point'] if cfg and cfg['mod_message_point'] is not None else 1)
+    mod_warn_point = int(cfg['mod_warn_point'] if cfg and cfg['mod_warn_point'] is not None else 5)
+    mod_kick_point = int(cfg['mod_kick_point'] if cfg and cfg['mod_kick_point'] is not None else 10)
+    mod_ban_point = int(cfg['mod_ban_point'] if cfg and cfg['mod_ban_point'] is not None else 15)
+    mod_timeout_point = int(cfg['mod_timeout_point'] if cfg and cfg['mod_timeout_point'] is not None else 4)
+    mod_promo_threshold = int(cfg['mod_promo_threshold'] if cfg and cfg['mod_promo_threshold'] is not None else 500)
+    return f"""
+    <html>
+        <head><title>Systems | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
+                    <a href="/dashboard/{guild_id}/security" class="menu-item"><span class="menu-label">🛡️ Security</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/systems" class="menu-item active"><span class="menu-label">🏗️ Systems</span></a>
+                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">🏗️ Systems</h1>
+                    <p class="page-desc">Configure marketplace, vassals, and alliances.</p>
+                    <form action="/save-systems/{guild_id}" method="post">
+                        <div class="card">
+                            <h2 class="card-title">Marketplace</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Enabled</label>
+                                    <select name="marketplace_enabled">
+                                        <option value="1" {"selected" if marketplace_enabled==1 else ""}>On</option>
+                                        <option value="0" {"selected" if marketplace_enabled==0 else ""}>Off</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Tax (%)</label>
+                                    <input type="number" name="marketplace_tax" min="0" max="25" value="{marketplace_tax}">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h2 class="card-title">Vassals</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Max Percent</label>
+                                    <input type="number" name="vassal_max_percent" min="1" max="25" value="{vassal_max_percent}">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h2 class="card-title">Alliances</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Enabled</label>
+                                    <select name="alliances_enabled">
+                                        <option value="1" {"selected" if alliances_enabled==1 else ""}>On</option>
+                                        <option value="0" {"selected" if alliances_enabled==0 else ""}>Off</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h2 class="card-title">Moderation Points & Promotions</h2>
+                            <div class="stat-grid">
+                                <div class="form-group">
+                                    <label>Message Point</label>
+                                    <input type="number" name="mod_message_point" min="0" max="10" value="{mod_message_point}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Warn Point</label>
+                                    <input type="number" name="mod_warn_point" min="0" max="50" value="{mod_warn_point}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Kick Point</label>
+                                    <input type="number" name="mod_kick_point" min="0" max="100" value="{mod_kick_point}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Ban Point</label>
+                                    <input type="number" name="mod_ban_point" min="0" max="150" value="{mod_ban_point}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Timeout Point</label>
+                                    <input type="number" name="mod_timeout_point" min="0" max="50" value="{mod_timeout_point}">
+                                </div>
+                                <div class="form-group">
+                                    <label>Promo Threshold (points)</label>
+                                    <input type="number" name="mod_promo_threshold" min="0" max="10000" value="{mod_promo_threshold}">
+                                </div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn">Save Systems</button>
+                    </form>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/save-systems/<int:guild_id>', methods=['POST'])
+def save_systems(guild_id):
+    marketplace_enabled = int(request.form.get('marketplace_enabled', '1'))
+    marketplace_tax = int(request.form.get('marketplace_tax', '0'))
+    vassal_max_percent = int(request.form.get('vassal_max_percent', '15'))
+    alliances_enabled = int(request.form.get('alliances_enabled', '1'))
+    mod_message_point = int(request.form.get('mod_message_point', '1'))
+    mod_warn_point = int(request.form.get('mod_warn_point', '5'))
+    mod_kick_point = int(request.form.get('mod_kick_point', '10'))
+    mod_ban_point = int(request.form.get('mod_ban_point', '15'))
+    mod_timeout_point = int(request.form.get('mod_timeout_point', '4'))
+    mod_promo_threshold = int(request.form.get('mod_promo_threshold', '500'))
+    marketplace_tax = max(0, min(25, marketplace_tax))
+    vassal_max_percent = max(1, min(25, vassal_max_percent))
+    conn = get_db()
+    conn.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (int(guild_id),))
+    conn.execute('UPDATE guild_config SET marketplace_enabled = ?, marketplace_tax = ?, vassal_max_percent = ?, alliances_enabled = ?, mod_message_point = ?, mod_warn_point = ?, mod_kick_point = ?, mod_ban_point = ?, mod_timeout_point = ?, mod_promo_threshold = ? WHERE guild_id = ?', 
+                 (marketplace_enabled, marketplace_tax, vassal_max_percent, alliances_enabled, mod_message_point, mod_warn_point, mod_kick_point, mod_ban_point, mod_timeout_point, mod_promo_threshold, int(guild_id)))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/systems?success=1')
+
+ 
+
+ 
+
+ 
+
+@app.route('/dashboard/<int:guild_id>/custom-commands')
+def custom_commands_dashboard(guild_id):
+    if 'access_token' not in session: return redirect('/')
+    conn = get_db()
+    custom_cmds = conn.execute('SELECT * FROM custom_commands WHERE guild_id = ?', (int(guild_id),)).fetchall()
+    conn.close()
+
+    cmds_html = ""
+    for cmd in custom_cmds:
+        cmds_html += f"""
+        <div class="list-item">
+            <div class="list-item-info">
+                <div class="list-item-name">{cmd['name']}</div>
+                <div class="list-item-price">Prefix: {cmd['prefix']}</div>
+            </div>
+            <button onclick="location.href='/delete-custom-command/{guild_id}/{cmd['name']}'" class="btn-delete">×</button>
+        </div>
+        """
+
+    return f"""
+    <html>
+        <head><title>Custom Commands | {guild_id}</title>{STYLE}</head>
+        <body>
+            <div class="sidebar">
+                <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
+                    <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
+                    <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/custom-commands" class="menu-item active"><span class="menu-label">💻 Custom Commands</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container">
+                    <h1 class="page-title">💻 Custom Commands</h1>
+                    <p class="page-desc">Create server-specific commands with restricted Python execution.</p>
+                    
+                    <div class="card">
+                        <h2 class="card-title">Create New Command</h2>
+                        <form action="/save-custom-command/{guild_id}" method="post">
+                            <div style="display: flex; gap: 15px; margin-bottom: 20px;">
+                                <div style="flex: 1;">
+                                    <label>Name</label>
+                                    <input type="text" name="name" placeholder="e.g. hello" required>
+                                </div>
+                                <div style="flex: 1;">
+                                    <label>Prefix (optional)</label>
+                                    <input type="text" name="prefix" placeholder="." value=".">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>Python Code (Sandboxed)</label>
+                                <textarea name="code" rows="10" placeholder="await message.channel.send('Hello!')" required style="font-family: monospace;"></textarea>
+                            </div>
+                            <button type="submit" class="btn">Create Command</button>
+                        </form>
+                    </div>
+
+                    <div class="card" style="margin-top: 30px;">
+                        <h2 class="card-title">Existing Commands</h2>
+                        {cmds_html}
+                    </div>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+@app.route('/save-moderation/<int:guild_id>', methods=['POST'])
+def save_moderation(guild_id):
+    welcome_ch = request.form.get('welcome_channel')
+    welcome_msg = request.form.get('welcome_message')
+    farewell_ch = request.form.get('farewell_channel')
+    farewell_msg = request.form.get('farewell_message')
+    
+    conn = get_db()
+    conn.execute('''
+        INSERT INTO welcome_farewell (guild_id, welcome_channel, welcome_message, farewell_channel, farewell_message)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            welcome_channel = excluded.welcome_channel,
+            welcome_message = excluded.welcome_message,
+            farewell_channel = excluded.farewell_channel,
+            farewell_message = excluded.farewell_message
+    ''', (guild_id, welcome_ch, welcome_msg, farewell_ch, farewell_msg))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/moderation?success=1')
+
+@app.route('/add-automod/<int:guild_id>', methods=['POST'])
+def add_automod(guild_id):
+    word = request.form.get('word')
+    punishment = request.form.get('punishment')
+    conn = get_db()
+    conn.execute('INSERT INTO automod_words (guild_id, word, punishment) VALUES (?, ?, ?)', (guild_id, word, punishment))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/moderation')
+
+@app.route('/delete-automod/<int:guild_id>/<int:word_id>')
+def delete_automod(guild_id, word_id):
+    conn = get_db()
+    conn.execute('DELETE FROM automod_words WHERE word_id = ? AND guild_id = ?', (word_id, guild_id))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/moderation')
+
+@app.route('/save-logging/<int:guild_id>', methods=['POST'])
+def save_logging(guild_id):
+    msg_ch = request.form.get('message_log')
+    mem_ch = request.form.get('member_log')
+    mod_ch = request.form.get('mod_log')
+    auto_ch = request.form.get('automod_log')
+    srv_ch = request.form.get('server_log')
+    v_ch = request.form.get('voice_log')
+    join_ch = request.form.get('join_log')
+    leave_ch = request.form.get('leave_log')
+
+    conn = get_db()
+    conn.execute('''
+        INSERT INTO logging_config (guild_id, message_log_channel, member_log_channel, mod_log_channel, automod_log_channel, server_log_channel, voice_log_channel, join_log_channel, leave_log_channel)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            message_log_channel = excluded.message_log_channel,
+            member_log_channel = excluded.member_log_channel,
+            mod_log_channel = excluded.mod_log_channel,
+            automod_log_channel = excluded.automod_log_channel,
+            server_log_channel = excluded.server_log_channel,
+            voice_log_channel = excluded.voice_log_channel,
+            join_log_channel = excluded.join_log_channel,
+            leave_log_channel = excluded.leave_log_channel
+    ''', (guild_id, msg_ch, mem_ch, mod_ch, auto_ch, srv_ch, v_ch, join_ch, leave_ch))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/logging?success=1')
+
+@app.route('/setup-logging/<int:guild_id>', methods=['POST'])
+def setup_logging(guild_id):
+    if not DISCORD_TOKEN:
+        return "Missing bot token", 500
+    headers = {'Authorization': f"Bot {DISCORD_TOKEN}", 'Content-Type': 'application/json'}
+    bot_id = get_bot_user_id()
+    if bot_id is None:
+        return "Unable to fetch bot user", 500
+    try:
+        r = http_session.get(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/channels", headers=headers, timeout=10)
+        r.raise_for_status()
+        all_channels = r.json()
+    except Exception as e:
+        return f"Failed to fetch channels: {str(e)}", 500
+    category = None
+    for c in all_channels:
+        if str(c.get('type')) == '4' and str(c.get('name')).lower() in ['logs', 'empire-logs']:
+            category = c
+            break
+    if not category:
+        payload = {
+            "name": "empire-logs",
+            "type": 4,
+            "permission_overwrites": [
+                {"id": str(guild_id), "type": 0, "deny": str(1024)},
+                {"id": str(bot_id), "type": 1, "allow": str(3072)}
+            ]
+        }
+        cr = http_session.post(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/channels", headers=headers, json=payload, timeout=10)
+        if cr.status_code >= 400:
+            return f"Failed to create category: {cr.text}", 500
+        category = cr.json()
+    parent_id = str(category['id'])
+    desired = {
+        "message-logs": "message_log_channel",
+        "member-logs": "member_log_channel",
+        "mod-logs": "mod_log_channel",
+        "automod-logs": "automod_log_channel",
+        "server-logs": "server_log_channel",
+        "voice-logs": "voice_log_channel",
+        "join-logs": "join_log_channel",
+        "leave-logs": "leave_log_channel"
+    }
+    created_ids = {}
+    existing = {}
+    for c in all_channels:
+        if str(c.get('type')) == '0' and str(c.get('parent_id')) == parent_id:
+            existing[c.get('name')] = c
+    for name, col in desired.items():
+        ch = existing.get(name)
+        if not ch:
+            payload = {"name": name, "type": 0, "parent_id": parent_id}
+            pr = http_session.post(f"{DISCORD_API_BASE_URL}/guilds/{guild_id}/channels", headers=headers, json=payload, timeout=10)
+            if pr.status_code >= 400:
+                return f"Failed to create {name}: {pr.text}", 500
+            ch = pr.json()
+        created_ids[col] = str(ch['id'])
+    conn = get_db()
+    conn.execute('''
+        INSERT INTO logging_config (guild_id, message_log_channel, member_log_channel, mod_log_channel, automod_log_channel, server_log_channel, voice_log_channel, join_log_channel, leave_log_channel)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            message_log_channel = excluded.message_log_channel,
+            member_log_channel = excluded.member_log_channel,
+            mod_log_channel = excluded.mod_log_channel,
+            automod_log_channel = excluded.automod_log_channel,
+            server_log_channel = excluded.server_log_channel,
+            voice_log_channel = excluded.voice_log_channel,
+            join_log_channel = excluded.join_log_channel,
+            leave_log_channel = excluded.leave_log_channel
+    ''', (int(guild_id),
+          created_ids.get('message_log_channel'),
+          created_ids.get('member_log_channel'),
+          created_ids.get('mod_log_channel'),
+          created_ids.get('automod_log_channel'),
+          created_ids.get('server_log_channel'),
+          created_ids.get('voice_log_channel'),
+          created_ids.get('join_log_channel'),
+          created_ids.get('leave_log_channel')))
+    conn.commit()
+    conn.close()
+    CACHE.pop(f"channels_{guild_id}", None)
+    return redirect(f'/dashboard/{guild_id}/logging?setup=1')
+@app.route('/save-custom-command/<int:guild_id>', methods=['POST'])
+def save_custom_command(guild_id):
+    name = request.form.get('name')
+    prefix = request.form.get('prefix', '.')
+    code = request.form.get('code')
+
+    conn = get_db()
+    conn.execute('''
+        INSERT INTO custom_commands (guild_id, name, prefix, code)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id, name) DO UPDATE SET
+            prefix = excluded.prefix,
+            code = excluded.code
+    ''', (guild_id, name, prefix, code))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/custom-commands?success=1')
+
+@app.route('/delete-custom-command/<int:guild_id>/<name>')
+def delete_custom_command(guild_id, name):
+    conn = get_db()
+    conn.execute('DELETE FROM custom_commands WHERE guild_id = ? AND name = ?', (guild_id, name))
+    conn.commit()
+    conn.close()
+    return redirect(f'/dashboard/{guild_id}/custom-commands')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/')
+
+@app.route('/topgg/webhook', methods=['GET', 'POST'])
+def topgg_webhook():
+    # Handle GET requests for testing
+    if request.method == 'GET':
+        return '''
+        <html>
+            <head><title>Top.gg Webhook Test</title></head>
+            <body style="font-family: Arial; padding: 20px; background: #1a1a22; color: white;">
+                <h1>Top.gg Webhook Endpoint</h1>
+                <p>This endpoint accepts POST requests from Top.gg</p>
+                <p><strong>Status:</strong> ✅ Active</p>
+                <p><strong>Expected Secret:</strong> Check your .env file (TOPGG_WEBHOOK_SECRET)</p>
+                <hr>
+                <h2>Test Webhook Manually:</h2>
+                <form method="POST" style="margin-top: 20px;">
+                    <label>User ID:</label><br>
+                    <input type="text" name="user_id" placeholder="123456789" style="padding: 10px; width: 300px; margin: 10px 0;"><br>
+                    <label>Type:</label><br>
+                    <select name="type" style="padding: 10px; width: 300px; margin: 10px 0;">
+                        <option value="test">Test</option>
+                        <option value="upvote">Upvote</option>
+                    </select><br>
+                    <label>Authorization Header (Secret):</label><br>
+                    <input type="text" name="auth" placeholder="Your webhook secret" style="padding: 10px; width: 300px; margin: 10px 0;"><br>
+                    <button type="submit" style="padding: 10px 20px; background: #00d2ff; color: black; border: none; cursor: pointer; margin-top: 10px;">Test Webhook</button>
+                </form>
+            </body>
+        </html>
+        ''', 200
+    
+    # Log ALL incoming webhook details for debugging
+    print(f"\n{'='*60}")
+    print(f"DEBUG: Incoming Top.gg webhook request")
+    print(f"DEBUG: Method: {request.method}")
+    print(f"DEBUG: Headers: {dict(request.headers)}")
+    print(f"DEBUG: Content-Type: {request.content_type}")
+    
+    # Handle manual form test
+    if request.form:
+        print(f"DEBUG: Manual test form submitted")
+        user_id_str = request.form.get('user_id')
+        vote_type = request.form.get('type', 'test')
+        form_auth = request.form.get('auth')
+        
+        if not user_id_str:
+            return "Missing user ID", 400
+        
+        data = {'type': vote_type, 'user': user_id_str}
+        
+        # For manual tests, check form auth instead of header
+        webhook_secret = os.getenv('TOPGG_WEBHOOK_SECRET', 'nexus_default_secret')
+        if form_auth != webhook_secret:
+            return f"Unauthorized - Secret mismatch. Expected: {webhook_secret}", 401
+        
+        print(f"DEBUG: Manual test authorized")
+    else:
+        # Get raw data first
+        try:
+            if request.is_json:
+                data = request.json
+            else:
+                data = request.get_json(force=True)
+            print(f"DEBUG: JSON Data: {data}")
+        except Exception as e:
+            print(f"DEBUG: Error parsing JSON: {e}")
+            print(f"DEBUG: Raw data: {request.data}")
+            return f"Invalid JSON: {str(e)}", 400
+        
+        # Verify the authorization header from Top.gg (only for real webhooks)
+        auth_header = request.headers.get('Authorization')
+        webhook_secret = os.getenv('TOPGG_WEBHOOK_SECRET', 'nexus_default_secret')
+        
+        print(f"DEBUG: Auth Header Received: {auth_header}")
+        print(f"DEBUG: Expected Secret: {webhook_secret}")
+        
+        if auth_header != webhook_secret:
+            print(f"DEBUG: ❌ Webhook Unauthorized - Expected '{webhook_secret}', got '{auth_header}'")
+            # Log the first few chars of the expected secret for debugging without leaking it all
+            expected_preview = (webhook_secret[:3] + "...") if webhook_secret else "None"
+            got_preview = (auth_header[:3] + "...") if auth_header else "None"
+            return f"Unauthorized - Secret mismatch (Expected: {expected_preview}, Got: {got_preview})", 401
+    
+    print(f"DEBUG: ✅ Authorization passed")
+    
+    # Handle both 'upvote' and 'test' types
+    vote_type = data.get('type') if data else None
+    print(f"DEBUG: Vote Type: {vote_type}")
+    
+    if not data or vote_type not in ['upvote', 'test']:
+        print(f"DEBUG: ❌ Invalid data type: {vote_type}")
+        return f"Invalid data type: {vote_type}. Expected 'upvote' or 'test'", 400
+    
+    # Get user ID (can be string or int)
+    user_id_str = data.get('user')
+    if not user_id_str:
+        print(f"DEBUG: ❌ No user ID in data")
+        return "Missing user ID", 400
+    
+    try:
+        user_id = int(user_id_str)
+    except (ValueError, TypeError):
+        print(f"DEBUG: ❌ Invalid user ID format: {user_id_str}")
+        return f"Invalid user ID: {user_id_str}", 400
+    
+    now = int(time.time())
+    print(f"DEBUG: Processing vote for user_id: {user_id}, timestamp: {now}")
+    
+    # Update global_votes table (bot-wide)
+    try:
+        conn = get_db()
+        conn.execute('''
+            INSERT INTO global_votes (user_id, last_vote) 
+            VALUES (?, ?) 
+            ON CONFLICT(user_id) DO UPDATE SET last_vote = excluded.last_vote
+        ''', (user_id, now))
+        
+        # Also update any existing rows in the users table for immediate effect
+        # Adding 25,000 coins as a voting reward
+        conn.execute('UPDATE users SET last_vote = ?, balance = balance + 25000 WHERE user_id = ?', (now, user_id))
+        conn.commit()
+        conn.close()
+        
+        print(f"DEBUG: ✅ Successfully processed Top.gg {vote_type} for user {user_id}")
+        print(f"{'='*60}\n")
+        
+        if request.method == 'POST' and request.form:
+            return f'''
+            <html>
+                <head><title>Test Result</title></head>
+                <body style="font-family: Arial; padding: 20px; background: #1a1a22; color: white;">
+                    <h1>✅ Webhook Test Successful!</h1>
+                    <p>User ID: {user_id}</p>
+                    <p>Type: {vote_type}</p>
+                    <p>Timestamp: {now}</p>
+                    <p><a href="/topgg/webhook" style="color: #00d2ff;">Test Again</a></p>
+                </body>
+            </html>
+            ''', 200
+        
+        return "OK", 200
+    except Exception as e:
+        print(f"DEBUG: ❌ Database error: {e}")
+        print(f"{'='*60}\n")
+        return f"Database error: {str(e)}", 500
+
 if __name__ == '__main__':
-    bot.run(TOKEN)
+    # Bind to 0.0.0.0 so it's accessible externally on your remote server
+    app.run(host='0.0.0.0', port=5001)
+
 
 
 
