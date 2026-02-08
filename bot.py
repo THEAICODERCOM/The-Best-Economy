@@ -127,6 +127,20 @@ WEEKLY_QUESTS = [
     {"id": "weekly_cmd_1000", "description": "Use 1000 commands this week", "target": 1000, "reward": 500000}
 ]
 
+# Additional action-based quests
+DAILY_QUESTS += [
+    {"id": "daily_work_10", "description": "Work 10 times", "target": 10, "reward": 25000, "kind": "work"},
+    {"id": "daily_crime_3", "description": "Succeed 3 crimes", "target": 3, "reward": 30000, "kind": "crime_success"},
+    {"id": "daily_blackjack_3", "description": "Win 3 blackjack games", "target": 3, "reward": 35000, "kind": "blackjack_wins"},
+    {"id": "daily_rob_2", "description": "Successfully rob 2 users", "target": 2, "reward": 40000, "kind": "rob_success"}
+]
+WEEKLY_QUESTS += [
+    {"id": "weekly_work_50", "description": "Work 50 times", "target": 50, "reward": 150000, "kind": "work"},
+    {"id": "weekly_crime_15", "description": "Succeed 15 crimes", "target": 15, "reward": 200000, "kind": "crime_success"},
+    {"id": "weekly_blackjack_20", "description": "Win 20 blackjack games", "target": 20, "reward": 220000, "kind": "blackjack_wins"},
+    {"id": "weekly_rob_10", "description": "Successfully rob 10 users", "target": 10, "reward": 250000, "kind": "rob_success"}
+]
+
 # Blackjack Card Emojis
 CARD_EMOJIS = {
     # 2s
@@ -252,6 +266,10 @@ async def init_db():
             user_id INTEGER, guild_id INTEGER, asset_id TEXT, count INTEGER DEFAULT 0,
             PRIMARY KEY (user_id, guild_id, asset_id)
         )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS marriages (
+            user_id INTEGER PRIMARY KEY,
+            partner_id INTEGER
+        )''')
         await db.execute('''CREATE TABLE IF NOT EXISTS guild_config (
             guild_id INTEGER PRIMARY KEY, prefix TEXT DEFAULT '.',
             role_shop_json TEXT DEFAULT '{}', custom_assets_json TEXT DEFAULT '{}',
@@ -349,7 +367,10 @@ async def migrate_db():
             ("total_commands", "INTEGER DEFAULT 0"),
             ("successful_robs", "INTEGER DEFAULT 0"),
             ("successful_crimes", "INTEGER DEFAULT 0"),
-            ("passive_income", "REAL DEFAULT 0.0")
+            ("passive_income", "REAL DEFAULT 0.0"),
+            ("blackjack_wins", "INTEGER DEFAULT 0"),
+            ("last_login", "INTEGER DEFAULT 0"),
+            ("login_streak", "INTEGER DEFAULT 0")
         ]
         for col_name, col_type in columns:
             try:
@@ -423,6 +444,47 @@ async def ensure_user(user_id, guild_id):
         await db.execute('INSERT OR IGNORE INTO users (user_id, guild_id) VALUES (?, ?)', (user_id, guild_id))
         await db.commit()
 
+async def ensure_global_user(user_id):
+    await ensure_user(user_id, 0)
+
+async def get_global_money(user_id):
+    await ensure_global_user(user_id)
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT user_id, guild_id, balance, bank, bank_plan, last_work, last_crime, last_rob FROM users WHERE user_id = ? AND guild_id = 0', (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return row
+        async with db.execute('SELECT COALESCE(SUM(balance),0), COALESCE(SUM(bank),0) FROM users WHERE user_id = ?', (user_id,)) as cursor:
+            agg = await cursor.fetchone()
+        balance_sum = int((agg[0] or 0))
+        bank_sum = int((agg[1] or 0))
+        await db.execute('INSERT OR REPLACE INTO users (user_id, guild_id, balance, bank, bank_plan) VALUES (?, 0, ?, ?, ?)', (user_id, balance_sum, bank_sum, 'standard'))
+        await db.commit()
+    async with aiosqlite.connect(DB_FILE) as db2:
+        db2.row_factory = aiosqlite.Row
+        async with db2.execute('SELECT user_id, guild_id, balance, bank, bank_plan, last_work, last_crime, last_rob FROM users WHERE user_id = ? AND guild_id = 0', (user_id,)) as cursor2:
+            return await cursor2.fetchone()
+
+async def update_global_balance(user_id, delta):
+    await ensure_global_user(user_id)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('UPDATE users SET balance = MAX(0, balance + ?) WHERE user_id = ? AND guild_id = 0', (int(delta), user_id))
+        await db.commit()
+
+async def move_global_wallet_to_bank(user_id, amount):
+    await ensure_global_user(user_id)
+    amt = int(amount)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('UPDATE users SET balance = MAX(0, balance - ?), bank = bank + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
+        await db.commit()
+
+async def move_global_bank_to_wallet(user_id, amount):
+    await ensure_global_user(user_id)
+    amt = int(amount)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('UPDATE users SET bank = MAX(0, bank - ?), balance = balance + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
+        await db.commit()
 async def add_xp(user_id, guild_id, amount):
     await ensure_user(user_id, guild_id)
     async with aiosqlite.connect(DB_FILE) as db:
@@ -1730,6 +1792,26 @@ async def ensure_quest_resets(user_id, guild_id):
             await db.execute('UPDATE users SET daily_reset = ?, weekly_reset = ?, daily_commands = ?, weekly_commands = ?, daily_reward_claimed = ?, weekly_reward_claimed = ?, daily_quest_completed_json = ?, weekly_quest_completed_json = ?, daily_stats_json = ?, weekly_stats_json = ? WHERE user_id = ? AND guild_id = ?', (daily_reset, weekly_reset, daily_commands, weekly_commands, daily_reward_claimed, weekly_reward_claimed, daily_completed_json, weekly_completed_json, daily_stats_json, weekly_stats_json, user_id, guild_id))
             await db.commit()
 
+async def increment_stat(user_id, guild_id, key):
+    await ensure_quest_resets(user_id, guild_id)
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT daily_stats_json, weekly_stats_json FROM users WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return
+        try:
+            daily_stats = json.loads(row[0] or '{}')
+        except:
+            daily_stats = {}
+        try:
+            weekly_stats = json.loads(row[1] or '{}')
+        except:
+            weekly_stats = {}
+        daily_stats[key] = int(daily_stats.get(key, 0)) + 1
+        weekly_stats[key] = int(weekly_stats.get(key, 0)) + 1
+        await db.execute('UPDATE users SET daily_stats_json = ?, weekly_stats_json = ? WHERE user_id = ? AND guild_id = ?', (json.dumps(daily_stats), json.dumps(weekly_stats), user_id, guild_id))
+        await db.commit()
+
 async def increment_quests(user_id, guild_id, command_name=None):
     await ensure_quest_resets(user_id, guild_id)
     now = int(time.time())
@@ -1825,7 +1907,7 @@ def get_active_weekly_quests(guild_id, timestamp=None):
 
 # --- Logic Functions (Shared by Prefix & Slash) ---
 async def work_logic(ctx, user_id, guild_id):
-    data = await get_user_data(user_id, guild_id)
+    data = await get_global_money(user_id)
     now = int(time.time())
     if now - data['last_work'] < 300:
         return False, f"⏳ Your workers are tired! Wait **{300 - (now - data['last_work'])}s**."
@@ -1853,8 +1935,8 @@ async def work_logic(ctx, user_id, guild_id):
         msg_boost_str = f" (Includes {' + '.join(msg_boost)}!)"
             
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = balance + ?, last_work = ? WHERE user_id = ? AND guild_id = ?', 
-                        (earned, now, user_id, guild_id))
+        await db.execute('UPDATE users SET balance = balance + ?, last_work = ? WHERE user_id = ? AND guild_id = 0', 
+                        (earned, now, user_id))
         await db.commit()
     
     # Use helper for XP to trigger level up notifications
@@ -2001,25 +2083,19 @@ async def interest_task():
             rows = await cursor.fetchall()
         if not rows:
             return
-        guild_groups = {}
-        for uid, gid, bank, plan in rows:
-            if gid not in guild_groups:
-                guild_groups[gid] = []
-            guild_groups[gid].append((uid, bank, plan or 'standard'))
         updates = []
-        for gid, members in guild_groups.items():
-            banks_config = await get_guild_banks(gid)
-            for uid, bank, plan in members:
-                plan_data = banks_config.get(plan) or banks_config.get('standard')
-                if not plan_data:
-                    rate_min = 0.01
-                    rate_max = 0.02
-                else:
-                    rate_min = float(plan_data.get('min', 0.01))
-                    rate_max = float(plan_data.get('max', 0.02))
-                interest = int(bank * random.uniform(rate_min, rate_max))
-                if interest > 0:
-                    updates.append((interest, uid, gid))
+        for uid, gid, bank, plan in rows:
+            plan_id = plan or 'standard'
+            if gid == 0:
+                plan_data = DEFAULT_BANK_PLANS.get(plan_id) or DEFAULT_BANK_PLANS.get('standard')
+            else:
+                banks_config = await get_guild_banks(gid)
+                plan_data = banks_config.get(plan_id) or banks_config.get('standard')
+            rate_min = float((plan_data or {}).get('min', 0.01))
+            rate_max = float((plan_data or {}).get('max', 0.02))
+            interest = int(bank * random.uniform(rate_min, rate_max))
+            if interest > 0:
+                updates.append((interest, uid, gid))
         if updates:
             await db.executemany('UPDATE users SET bank = bank + ? WHERE user_id = ? AND guild_id = ?', updates)
         await db.commit()
@@ -2984,6 +3060,8 @@ async def blackjack(ctx: commands.Context, amount: str = None):
         
         return " ".join(emojis)
 
+    # Determine split availability
+    can_split = player_hand[0][0] == player_hand[1][0]
     class BlackjackView(discord.ui.View):
         def __init__(self, ctx, can_double=True, can_split=False):
             super().__init__(timeout=30)
@@ -3022,7 +3100,11 @@ async def blackjack(ctx: commands.Context, amount: str = None):
         async def split(self, interaction: discord.Interaction, button: discord.ui.Button):
             if interaction.user.id != self.ctx.author.id:
                 return await interaction.response.send_message("This isn't your game!", ephemeral=True)
-            await interaction.response.send_message("Split is not yet implemented!", ephemeral=True)
+            if not can_split:
+                return await interaction.response.send_message("You can only split identical ranks.", ephemeral=True)
+            self.value = "split"
+            await interaction.response.defer()
+            self.stop()
 
     async def get_bj_embed(show_dealer=False, result_text=None):
         # Using a bright color as requested (Cyan/Bright Blue)
@@ -3054,7 +3136,7 @@ async def blackjack(ctx: commands.Context, amount: str = None):
         
         return embed
 
-    view = BlackjackView(ctx, can_double=(balance >= bet_amount * 2))
+    view = BlackjackView(ctx, can_double=(balance >= bet_amount * 2), can_split=can_split)
     msg = await ctx.send(embed=await get_bj_embed(), view=view)
 
     # Game Loop
@@ -3076,6 +3158,48 @@ async def blackjack(ctx: commands.Context, amount: str = None):
             bet_amount *= 2
             player_hand.append(get_card())
             break
+        elif view.value == "split":
+            hand1 = [player_hand[0], get_card()]
+            hand2 = [player_hand[1], get_card()]
+            # Simple auto-play strategy for split: hit until 17+
+            while calc_hand(hand1) < 17:
+                hand1.append(get_card())
+            while calc_hand(hand2) < 17:
+                hand2.append(get_card())
+            # Dealer plays
+            while calc_hand(dealer_hand) < 17:
+                dealer_hand.append(get_card())
+            # Evaluate both hands
+            results = []
+            for h in [hand1, hand2]:
+                p_total = calc_hand(h)
+                d_total = calc_hand(dealer_hand)
+                if p_total > 21:
+                    results.append("loss")
+                elif d_total > 21 or p_total > d_total:
+                    results.append("win")
+                elif p_total == d_total:
+                    results.append("push")
+                else:
+                    results.append("loss")
+            # Apply settlements: each hand is one bet
+            total_delta = 0
+            if "win" in results: total_delta += bet_amount
+            if results.count("win") == 2: total_delta += bet_amount
+            if results.count("loss") == 1: total_delta -= bet_amount
+            if results.count("loss") == 2: total_delta -= bet_amount * 2
+            async with aiosqlite.connect(DB_FILE) as db:
+                if total_delta > 0:
+                    await db.execute('UPDATE users SET balance = balance + ?, blackjack_wins = blackjack_wins + ? WHERE user_id = ? AND guild_id = 0', (total_delta, results.count("win"), ctx.author.id))
+                elif total_delta < 0:
+                    await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = 0', (abs(total_delta), ctx.author.id))
+                await db.commit()
+            await increment_stat(ctx.author.id, ctx.guild.id, "blackjack_plays")
+            if results.count("win") > 0:
+                await increment_stat(ctx.author.id, ctx.guild.id, "blackjack_wins")
+            summary = f"Split result — Wins: {results.count('win')}, Pushes: {results.count('push')}, Losses: {results.count('loss')}."
+            await msg.edit(embed=await get_bj_embed(show_dealer=True, result_text=summary), view=None)
+            return
 
     # Dealer Turn
     p_total = calc_hand(player_hand)
@@ -3104,22 +3228,20 @@ async def blackjack(ctx: commands.Context, amount: str = None):
     async with aiosqlite.connect(DB_FILE) as db:
         if win_status == "win":
             server_multiplier = get_server_join_multiplier(ctx.author.id)
-            final_win = int(bet_amount * server_multiplier * bj_multiplier)
-            await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (final_win, ctx.author.id, ctx.guild.id))
-            if server_multiplier > 1.0 or bj_multiplier > 1.0:
-                mult_text = []
-                if server_multiplier > 1.0: mult_text.append(f"{server_multiplier}x Server")
-                if bj_multiplier > 1.0: mult_text.append(f"{bj_multiplier}x Job")
-                result += f" ({' + '.join(mult_text)} Boost!)"
+            final_win = int(bet_amount * server_multiplier)
+            await db.execute('UPDATE users SET balance = balance + ?, blackjack_wins = blackjack_wins + 1 WHERE user_id = ? AND guild_id = 0', (final_win, ctx.author.id))
+            if server_multiplier > 1.0:
+                result += f" ({server_multiplier}x Server Boost!)"
         elif win_status == "loss":
-            await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = ?', (bet_amount, ctx.author.id, ctx.guild.id))
+            await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = 0', (bet_amount, ctx.author.id))
         await db.commit()
+    await increment_stat(ctx.author.id, ctx.guild.id, "blackjack_wins" if win_status == "win" else "blackjack_plays")
 
     await msg.edit(embed=await get_bj_embed(show_dealer=True, result_text=result), view=None)
 
 @bot.hybrid_command(name="deposit", aliases=["dep"], description="Deposit coins into the bank")
 async def deposit(ctx: commands.Context, amount: str):
-    user = await get_user_data(ctx.author.id, ctx.guild.id)
+    user = await get_global_money(ctx.author.id)
     if amount.lower() == 'all':
         amt = user['balance']
     else:
@@ -3129,14 +3251,12 @@ async def deposit(ctx: commands.Context, amount: str):
     if amt <= 0: return await ctx.send("Amount must be positive.")
     if user['balance'] < amt: return await ctx.send("You don't have enough coins!")
     
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = balance - ?, bank = bank + ? WHERE user_id = ? AND guild_id = ?', (amt, amt, ctx.author.id, ctx.guild.id))
-        await db.commit()
+    await move_global_wallet_to_bank(ctx.author.id, amt)
     await ctx.send(f"🏦 Deposited **{amt:,} coins**.")
 
 @bot.hybrid_command(name="withdraw", description="Withdraw coins from your bank")
 async def withdraw(ctx: commands.Context, amount: str):
-    data = await get_user_data(ctx.author.id, ctx.guild.id)
+    data = await get_global_money(ctx.author.id)
     if amount.lower() == 'all':
         amt = data['bank']
     else:
@@ -3146,10 +3266,7 @@ async def withdraw(ctx: commands.Context, amount: str):
     if amt <= 0: return await ctx.send("Amount must be positive.")
     if amt > data['bank']: return await ctx.send("You don't have that much in your bank!")
     
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = balance + ?, bank = bank - ? WHERE user_id = ? AND guild_id = ?', 
-                        (amt, amt, ctx.author.id, ctx.guild.id))
-        await db.commit()
+    await move_global_bank_to_wallet(ctx.author.id, amt)
     await ctx.send(f"✅ Withdrew **{amt:,} coins**.")
 
 @bot.hybrid_command(name="vote", description="Vote for the bot on Top.gg to get rewards!")
@@ -3240,7 +3357,7 @@ async def buy_asset(ctx: commands.Context, asset_id: str, count: int = 1):
 @bot.hybrid_command(name="profile", description="View your empire status")
 async def profile(ctx: commands.Context, member: discord.Member = None):
     target = member or ctx.author
-    data = await get_user_data(target.id, ctx.guild.id)
+    data = await get_global_money(target.id)
     await ensure_rewards(target.id)
     
     async with aiosqlite.connect(DB_FILE) as db:
@@ -3267,7 +3384,7 @@ async def profile(ctx: commands.Context, member: discord.Member = None):
     
     embed = discord.Embed(title=f"👑 {target.display_name}'s Empire{medals_str}", color=0x00d2ff)
     embed.add_field(name="📊 Stats", value=f"Level: {data['level']}\nXP: {data['xp']}\nPrestige: {data['prestige']}", inline=True)
-    embed.add_field(name="💰 Wealth", value=f"Wallet: {data['balance']:,}\nBank: {data['bank']:,}", inline=True)
+    embed.add_field(name="💰 Wealth (Global)", value=f"Wallet: {data['balance']:,}\nBank: {data['bank']:,}", inline=True)
     embed.add_field(name="🏷️ Titles", value=titles_str, inline=False)
     embed.add_field(name="🏗️ Assets", value=assets_str, inline=False)
     await ctx.send(embed=embed)
@@ -3275,7 +3392,7 @@ async def profile(ctx: commands.Context, member: discord.Member = None):
 @bot.hybrid_command(name="crime", description="Commit a crime for high rewards (or risk!)")
 @commands.cooldown(1, 1800, commands.BucketType.user)
 async def crime(ctx: commands.Context):
-    data = await get_user_data(ctx.author.id, ctx.guild.id)
+    data = await get_global_money(ctx.author.id)
     now = int(time.time())
     
     # Keeping the old check as a backup, but commands.cooldown is better
@@ -3297,15 +3414,17 @@ async def crime(ctx: commands.Context):
             msg_boost = " (Includes **2x Server Booster**!)"
             
         async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = balance + ?, last_crime = ?, successful_crimes = successful_crimes + 1 WHERE user_id = ? AND guild_id = ?', (earned, now, ctx.author.id, ctx.guild.id))
+            await db.execute('UPDATE users SET balance = balance + ?, last_crime = ?, successful_crimes = successful_crimes + 1 WHERE user_id = ? AND guild_id = 0', (earned, now, ctx.author.id))
             await db.commit()
         await ctx.send(f"😈 You pulled off a heist and got **{earned:,} coins**!{msg_boost}")
+        await increment_stat(ctx.author.id, ctx.guild.id, "crime_success")
     else:
         loss = random.randint(500, 1000)
         async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = MAX(0, balance - ?), last_crime = ? WHERE user_id = ? AND guild_id = ?', (loss, now, ctx.author.id, ctx.guild.id))
+            await db.execute('UPDATE users SET balance = MAX(0, balance - ?), last_crime = ? WHERE user_id = ? AND guild_id = 0', (loss, now, ctx.author.id))
             await db.commit()
         await ctx.send(f"👮 BUSTED! You lost **{loss:,} coins** while escaping.")
+        await increment_stat(ctx.author.id, ctx.guild.id, "crime_fail")
 
 @bot.hybrid_command(name="dailyquests", description="View your daily quest progress")
 async def dailyquests(ctx: commands.Context):
@@ -3374,9 +3493,9 @@ async def weeklyquests(ctx: commands.Context):
 @bot.hybrid_command(name="balance", aliases=["bal"], description="Check your balance")
 async def balance(ctx: commands.Context, member: discord.Member = None):
     target = member or ctx.author
-    data = await get_user_data(target.id, ctx.guild.id)
+    data = await get_global_money(target.id)
     bank_plan = data['bank_plan'] if 'bank_plan' in data.keys() else 'standard'
-    banks = await get_guild_banks(ctx.guild.id)
+    banks = DEFAULT_BANK_PLANS
     plan = banks.get(bank_plan) or banks.get('standard')
     if plan:
         rate_min = plan.get('min', 0.01)
@@ -3395,8 +3514,8 @@ async def balance(ctx: commands.Context, member: discord.Member = None):
 
 @bot.hybrid_command(name="bank", description="View and switch bank plans")
 async def bank_cmd(ctx: commands.Context, plan_id: str = None):
-    data = await get_user_data(ctx.author.id, ctx.guild.id)
-    banks = await get_guild_banks(ctx.guild.id)
+    data = await get_global_money(ctx.author.id)
+    banks = DEFAULT_BANK_PLANS
     current = data['bank_plan'] if 'bank_plan' in data.keys() and data['bank_plan'] else 'standard'
     if not plan_id:
         desc = ""
@@ -3429,9 +3548,9 @@ async def bank_cmd(ctx: commands.Context, plan_id: str = None):
         return
     async with aiosqlite.connect(DB_FILE) as db:
         if price > 0:
-            await db.execute('UPDATE users SET balance = balance - ?, bank_plan = ? WHERE user_id = ? AND guild_id = ?', (price, plan_id, ctx.author.id, ctx.guild.id))
+            await db.execute('UPDATE users SET balance = balance - ?, bank_plan = ? WHERE user_id = ? AND guild_id = 0', (price, plan_id, ctx.author.id))
         else:
-            await db.execute('UPDATE users SET bank_plan = ? WHERE user_id = ? AND guild_id = ?', (plan_id, ctx.author.id, ctx.guild.id))
+            await db.execute('UPDATE users SET bank_plan = ? WHERE user_id = ? AND guild_id = 0', (plan_id, ctx.author.id))
         await db.commit()
     await ctx.send(f"Switched your bank plan to **{info.get('name', plan_id)}**.")
 
@@ -3448,8 +3567,8 @@ async def work(ctx: commands.Context):
 @commands.cooldown(1, 1800, commands.BucketType.user)
 async def rob(ctx: commands.Context, target: discord.Member):
     if target.id == ctx.author.id: return await ctx.send("Don't rob yourself.")
-    stealer = await get_user_data(ctx.author.id, ctx.guild.id)
-    victim = await get_user_data(target.id, ctx.guild.id)
+    stealer = await get_global_money(ctx.author.id)
+    victim = await get_global_money(target.id)
     if victim['balance'] < 500: return await ctx.send("Target is too poor! They need at least 500 coins.")
     
     now = int(time.time())
@@ -3459,18 +3578,20 @@ async def rob(ctx: commands.Context, target: discord.Member):
     if random.random() < 0.35: # Lowered from 0.4
         stolen = random.randint(50, int(victim['balance'] * 0.25)) # Lowered max steal from 30%
         async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = balance + ?, last_rob = ?, successful_robs = successful_robs + 1 WHERE user_id = ? AND guild_id = ?', (stolen, now, ctx.author.id, ctx.guild.id))
-            await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = ?', (stolen, target.id, ctx.guild.id))
+            await db.execute('UPDATE users SET balance = balance + ?, last_rob = ?, successful_robs = successful_robs + 1 WHERE user_id = ? AND guild_id = 0', (stolen, now, ctx.author.id))
+            await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = 0', (stolen, target.id))
             await db.commit()
         embed = discord.Embed(description=f"🧤 Stole **{stolen:,}** from {target.mention}!", color=0x2ecc71)
         await ctx.send(embed=apply_theme(embed))
+        await increment_stat(ctx.author.id, ctx.guild.id, "rob_success")
     else:
         fine = random.randint(300, 600)
         async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = MAX(0, balance - ?), last_rob = ? WHERE user_id = ? AND guild_id = ?', (fine, now, ctx.author.id, ctx.guild.id))
+            await db.execute('UPDATE users SET balance = MAX(0, balance - ?), last_rob = ? WHERE user_id = ? AND guild_id = 0', (fine, now, ctx.author.id))
             await db.commit()
         embed = discord.Embed(description=f"🚔 Caught! Fined {fine:,} coins.", color=0xe74c3c)
         await ctx.send(embed=apply_theme(embed))
+        await increment_stat(ctx.author.id, ctx.guild.id, "rob_fail")
 
 @bot.hybrid_command(name="buyrole", description="Buy a role from the server shop")
 async def buyrole(ctx: commands.Context, role: discord.Role):
@@ -3485,7 +3606,7 @@ async def buyrole(ctx: commands.Context, role: discord.Role):
         return await ctx.send("❌ This role is not for sale!")
 
     price = shop[role_id]
-    user = await get_user_data(ctx.author.id, ctx.guild.id)
+    user = await get_global_money(ctx.author.id)
 
     if user['balance'] < price:
         return await ctx.send(f"❌ You need **{price - user['balance']:,} more coins**!")
@@ -3493,7 +3614,7 @@ async def buyrole(ctx: commands.Context, role: discord.Role):
     try:
         await ctx.author.add_roles(role)
         async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = ?', (price, ctx.author.id, ctx.guild.id))
+            await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ? AND guild_id = 0', (price, ctx.author.id))
             await db.commit()
         await ctx.send(f"✅ Successfully bought the **{role.name}** role!")
     except discord.Forbidden:
@@ -3521,6 +3642,119 @@ async def rank(ctx: commands.Context, member: discord.Member = None):
     embed.set_thumbnail(url=target.display_avatar.url)
     await ctx.send(embed=embed)
 
+# --- Social & Casino Add-ons ---
+@bot.hybrid_command(name="gift", description="Gift coins to another user (global money)")
+@app_commands.describe(member="User to gift", amount="Amount of coins")
+async def gift(ctx: commands.Context, member: discord.Member, amount: int):
+    if member.id == ctx.author.id:
+        return await ctx.send("You can't gift yourself.")
+    if amount <= 0:
+        return await ctx.send("Amount must be positive.")
+    sender = await get_global_money(ctx.author.id)
+    if sender['balance'] < amount:
+        return await ctx.send("You don't have enough coins.")
+    await update_global_balance(ctx.author.id, -amount)
+    await update_global_balance(member.id, amount)
+    await ctx.send(f"🎁 {ctx.author.mention} gifted **{amount:,}** coins to {member.mention}.")
+
+@bot.hybrid_command(name="marry", description="Marry another user")
+async def marry(ctx: commands.Context, member: discord.Member):
+    if member.id == ctx.author.id:
+        return await ctx.send("You can't marry yourself.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT partner_id FROM marriages WHERE user_id = ?', (ctx.author.id,)) as c:
+            row = await c.fetchone()
+        async with db.execute('SELECT partner_id FROM marriages WHERE user_id = ?', (member.id,)) as c2:
+            row2 = await c2.fetchone()
+        if row or row2:
+            return await ctx.send("Either you or the target is already married.")
+        await db.execute('INSERT OR REPLACE INTO marriages (user_id, partner_id) VALUES (?, ?)', (ctx.author.id, member.id))
+        await db.execute('INSERT OR REPLACE INTO marriages (user_id, partner_id) VALUES (?, ?)', (member.id, ctx.author.id))
+        await db.commit()
+    await ctx.send(f"💍 {ctx.author.mention} and {member.mention} are now married! Congratulations!")
+
+@bot.hybrid_command(name="divorce", description="Divorce your current partner")
+async def divorce(ctx: commands.Context):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT partner_id FROM marriages WHERE user_id = ?', (ctx.author.id,)) as c:
+            row = await c.fetchone()
+        if not row:
+            return await ctx.send("You're not married.")
+        partner_id = row[0]
+        await db.execute('DELETE FROM marriages WHERE user_id = ?', (ctx.author.id,))
+        await db.execute('DELETE FROM marriages WHERE user_id = ?', (partner_id,))
+        await db.commit()
+    await ctx.send("💔 Divorce finalized.")
+
+def win_loss_apply(user_id, amount, win=True):
+    delta = amount if win else -amount
+    return update_global_balance(user_id, delta)
+
+@bot.hybrid_command(name="coinflip", description="50/50 coinflip")
+@app_commands.describe(amount="Bet amount or 'all'")
+async def coinflip(ctx: commands.Context, amount: str):
+    data = await get_global_money(ctx.author.id)
+    if amount.lower() == 'all':
+        bet = data['balance']
+    else:
+        try:
+            bet = int(amount)
+        except:
+            return await ctx.send("Enter a valid number or 'all'.")
+    if bet <= 0: return await ctx.send("Bet must be positive.")
+    if bet > data['balance']: return await ctx.send("You don't have enough coins.")
+    win = random.choice([True, False])
+    await win_loss_apply(ctx.author.id, bet, win=win)
+    await ctx.send("🪙 Heads! You win!" if win else "🪙 Tails! You lose.")
+
+@bot.hybrid_command(name="slots", description="Spin the slot machine")
+@app_commands.describe(amount="Bet amount or 'all'")
+async def slots(ctx: commands.Context, amount: str):
+    data = await get_global_money(ctx.author.id)
+    if amount.lower() == 'all':
+        bet = data['balance']
+    else:
+        try:
+            bet = int(amount)
+        except:
+            return await ctx.send("Enter a valid number or 'all'.")
+    if bet <= 0: return await ctx.send("Bet must be positive.")
+    if bet > data['balance']: return await ctx.send("You don't have enough coins.")
+    reels = ['🍒','🍋','🍇','⭐','💎']
+    r = [random.choice(reels) for _ in range(3)]
+    if r[0] == r[1] == r[2]:
+        win_amt = int(bet * 3)
+        await update_global_balance(ctx.author.id, win_amt)
+        await ctx.send(f"🎰 {' '.join(r)} — JACKPOT! +{win_amt:,}")
+    elif r[0] == r[1] or r[1] == r[2] or r[0] == r[2]:
+        win_amt = int(bet * 1.5)
+        await update_global_balance(ctx.author.id, win_amt)
+        await ctx.send(f"🎰 {' '.join(r)} — Pair! +{win_amt:,}")
+    else:
+        await update_global_balance(ctx.author.id, -bet)
+        await ctx.send(f"🎰 {' '.join(r)} — No match. -{bet:,}")
+
+@bot.hybrid_command(name="russianroulette", aliases=["rr"], description="Risky game: 1/6 chance to lose")
+@app_commands.describe(amount="Bet amount or 'all'")
+async def russianroulette(ctx: commands.Context, amount: str):
+    data = await get_global_money(ctx.author.id)
+    if amount.lower() == 'all':
+        bet = data['balance']
+    else:
+        try:
+            bet = int(amount)
+        except:
+            return await ctx.send("Enter a valid number or 'all'.")
+    if bet <= 0: return await ctx.send("Bet must be positive.")
+    if bet > data['balance']: return await ctx.send("You don't have enough coins.")
+    chamber = random.randint(1,6)
+    if chamber == 1:
+        await update_global_balance(ctx.author.id, -bet)
+        await ctx.send(f"🔫 Bang! You lost **{bet:,}** coins.")
+    else:
+        await update_global_balance(ctx.author.id, bet)
+        await ctx.send(f"🔫 Click! You survived and won **{bet:,}** coins.")
+
 # Leaderboard Cache
 LB_CACHE = {}
 LB_CACHE_DURATION = 300 # 5 minutes
@@ -3532,47 +3766,67 @@ LB_CACHE_DURATION = 300 # 5 minutes
     app_commands.Choice(name="Most Successful Crimes", value="crimes"),
     app_commands.Choice(name="Most Money", value="money"),
     app_commands.Choice(name="Highest Passive Income", value="passive"),
-    app_commands.Choice(name="Highest Level", value="level")
+    app_commands.Choice(name="Highest Level", value="level"),
+    app_commands.Choice(name="Blackjack Wins", value="blackjack_wins"),
+    app_commands.Choice(name="Highest Wonder Level", value="wonder")
 ])
-async def leaderboard(ctx: commands.Context, category: str = "money"):
+@app_commands.choices(scope=[
+    app_commands.Choice(name="Global", value="global"),
+    app_commands.Choice(name="Server Only", value="server")
+])
+async def leaderboard(ctx: commands.Context, category: str = "money", scope: str = "global"):
     now = time.time()
     
     # Check cache
-    if category in LB_CACHE:
-        cache_data, timestamp = LB_CACHE[category]
+    cache_key = f"{scope}:{category}"
+    if cache_key in LB_CACHE:
+        cache_data, timestamp = LB_CACHE[cache_key]
         if now - timestamp < LB_CACHE_DURATION:
             return await ctx.send(embed=cache_data)
 
     async with aiosqlite.connect(DB_FILE) as db:
+        where = "" if scope == "global" else f" WHERE guild_id = {ctx.guild.id} "
+        group = "GROUP BY user_id"
+        limit = "LIMIT 10"
         if category == "commands":
-            query = 'SELECT user_id, SUM(total_commands) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 10'
+            query = f'SELECT user_id, SUM(total_commands) as total FROM users{where} {group} ORDER BY total DESC {limit}'
             title = "🏆 Global Commands Leaderboard"
             symbol = "⌨️"
             unit = "commands"
         elif category == "robs":
-            query = 'SELECT user_id, SUM(successful_robs) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 10'
+            query = f'SELECT user_id, SUM(successful_robs) as total FROM users{where} {group} ORDER BY total DESC {limit}'
             title = "🏆 Global Robbery Leaderboard"
             symbol = "🧤"
             unit = "robs"
         elif category == "crimes":
-            query = 'SELECT user_id, SUM(successful_crimes) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 10'
+            query = f'SELECT user_id, SUM(successful_crimes) as total FROM users{where} {group} ORDER BY total DESC {limit}'
             title = "🏆 Global Crime Leaderboard"
             symbol = "😈"
             unit = "crimes"
         elif category == "money":
-            query = 'SELECT user_id, SUM(balance + bank) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 10'
+            query = f'SELECT user_id, SUM(balance + bank) as total FROM users{where} {group} ORDER BY total DESC {limit}'
             title = "🏆 Global Wealth Leaderboard"
             symbol = "🪙"
             unit = "coins"
         elif category == "passive":
-            query = 'SELECT user_id, SUM(passive_income) as total FROM users GROUP BY user_id ORDER BY total DESC LIMIT 10'
+            query = f'SELECT user_id, SUM(passive_income) as total FROM users{where} {group} ORDER BY total DESC {limit}'
             title = "🏆 Global Passive Income Leaderboard"
             symbol = "📈"
             unit = "coins/10m"
         elif category == "level":
-            query = 'SELECT user_id, MAX(level) as max_level, MAX(xp) as max_xp FROM users GROUP BY user_id ORDER BY max_level DESC, max_xp DESC LIMIT 10'
+            query = f'SELECT user_id, MAX(level) as max_level, MAX(xp) as max_xp FROM users{where} {group} ORDER BY max_level DESC, max_xp DESC {limit}'
             title = "🏆 Global Level Leaderboard"
             symbol = "⭐"
+            unit = "Level"
+        elif category == "blackjack_wins":
+            query = f'SELECT user_id, SUM(blackjack_wins) as total FROM users{where} {group} ORDER BY total DESC {limit}'
+            title = "🏆 Blackjack Wins Leaderboard"
+            symbol = "🃏"
+            unit = "wins"
+        elif category == "wonder":
+            query = f'SELECT guild_id, MAX(level) as total FROM guild_wonder ORDER BY total DESC LIMIT 10'
+            title = "🏛️ Highest Wonder Level"
+            symbol = "🏛️"
             unit = "Level"
 
         async with db.execute(query) as cursor:
@@ -3588,24 +3842,29 @@ async def leaderboard(ctx: commands.Context, category: str = "money"):
         # Medal for top 3
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"**{i}.**"
         
-        user = bot.get_user(uid)
-        name = user.name if user else f"User({uid})"
-        
-        if category == "level":
-            max_level = row[1]
-            max_xp = row[2]
-            lb_str += f"{medal} **{name}** — Lvl {max_level} ({max_xp} XP)\n"
-        elif category == "passive":
-            lb_str += f"{medal} **{name}** — {symbol} {val:,.2f} {unit}\n"
+        if category == "wonder":
+            gid = uid
+            guild = bot.get_guild(gid)
+            gname = guild.name if guild else f"Guild({gid})"
+            lb_str += f"{medal} **{gname}** — {symbol} Level {val}\n"
         else:
-            lb_str += f"{medal} **{name}** — {symbol} {val:,} {unit}\n"
+            user = bot.get_user(uid)
+            name = user.name if user else f"User({uid})"
+            if category == "level":
+                max_level = row[1]
+                max_xp = row[2]
+                lb_str += f"{medal} **{name}** — Lvl {max_level} ({max_xp} XP)\n"
+            elif category == "passive":
+                lb_str += f"{medal} **{name}** — {symbol} {val:,.2f} {unit}\n"
+            else:
+                lb_str += f"{medal} **{name}** — {symbol} {val:,} {unit}\n"
     
     lb_str += "\n*Top 3 receive stackable coin multipliers!*"
     
     embed = discord.Embed(title=title, description=lb_str, color=0xFFA500)
     
     # Update cache
-    LB_CACHE[category] = (embed, time.time())
+    LB_CACHE[cache_key] = (embed, time.time())
     
     await ctx.send(embed=embed)
 
@@ -3623,6 +3882,28 @@ async def setup_cmd(ctx: commands.Context):
     )
     embed.set_footer(text="Rule with iron, prosper with gold.")
     await ctx.send(embed=embed)
+
+@bot.hybrid_command(name="daily", description="Claim your daily reward and build a login streak")
+async def daily(ctx: commands.Context):
+    data = await get_global_money(ctx.author.id)
+    now = int(time.time())
+    last = int(data['last_login'] or 0)
+    streak = int(data['login_streak'] or 0)
+    if last and now - last < 86400:
+        remaining = 86400 - (now - last)
+        hours, rem = divmod(remaining, 3600)
+        minutes, _ = divmod(rem, 60)
+        return await ctx.send(f"⏳ Your daily is not ready. Come back in **{hours}h {minutes}m**.")
+    # Increase streak if within 48 hours, else reset
+    if last and now - last <= 172800:
+        streak += 1
+    else:
+        streak = 1
+    reward = 10000 + (streak * 2000)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('UPDATE users SET balance = balance + ?, last_login = ?, login_streak = ? WHERE user_id = ? AND guild_id = 0', (reward, now, streak, ctx.author.id))
+        await db.commit()
+    await ctx.send(f"📅 Daily claimed! **+{reward:,}** coins. Streak: **{streak}**.")
 
 @bot.hybrid_command(name="jobs", description="List available jobs")
 async def jobs(ctx: commands.Context):
@@ -3904,3 +4185,4 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
