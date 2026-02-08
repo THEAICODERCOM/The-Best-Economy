@@ -526,6 +526,13 @@ async def migrate_db():
             )''')
         except:
             pass
+        try:
+            await db.execute('''CREATE TABLE IF NOT EXISTS guild_auto_role (
+                guild_id INTEGER PRIMARY KEY,
+                role_id INTEGER
+            )''')
+        except:
+            pass
         await db.commit()
 
 @tasks.loop(seconds=60)
@@ -858,12 +865,25 @@ async def on_message_edit(before, after):
 
 @bot.event
 async def on_member_join(member):
-    # Log the event
-    embed_log = discord.Embed(title="📥 Member Joined", color=discord.Color.green(), timestamp=discord.utils.utcnow())
-    embed_log.add_field(name="User", value=f"{member.mention} ({member.id})", inline=True)
-    embed_log.add_field(name="Account Created", value=member.created_at.strftime("%b %d, %Y"), inline=True)
-    embed_log.set_thumbnail(url=member.display_avatar.url)
-    await log_embed(member.guild, "join_log_channel", embed_log)
+    # Anti-raid join rate detection and quarantine
+    now_sec = _now_sec()
+    win = JOIN_WINDOW.get(member.guild.id, [])
+    win = [t for t in win if now_sec - t < 60]
+    win.append(now_sec)
+    JOIN_WINDOW[member.guild.id] = win
+    if len(win) >= 10:
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (member.guild.id,))
+            await db.execute('UPDATE guild_config SET raid_mode = 1 WHERE guild_id = ?', (member.guild.id,))
+            await db.commit()
+    acc_age_days = (discord.utils.utcnow() - member.created_at).days
+    if acc_age_days < 3:
+        role = await _ensure_quarantine_role(member.guild)
+        if role:
+            try:
+                await member.add_roles(role, reason="Account too new (anti-raid)")
+            except:
+                pass
 
     # Welcome system (embed-only)
     async with aiosqlite.connect(DB_FILE) as db:
@@ -1753,6 +1773,38 @@ async def on_message(message: discord.Message):
                     await log_embed(message.guild, "command_log_channel", embed)
                     return # Custom command handled, don't process regular commands
 
+    # Anti-phishing simple pattern
+    try:
+        cfg = await _cfg_get(message.guild.id, ["raid_mode","anti_phish_enabled","mod_message_point"])
+        if int(cfg.get("anti_phish_enabled", 1) or 1) == 1:
+            content_low = message.content.lower()
+            if ("free nitro" in content_low or "discordgift" in content_low or "airdrop" in content_low) and ("http" in content_low or "www" in content_low):
+                try:
+                    await message.delete()
+                except:
+                    pass
+                try:
+                    await message.author.timeout(discord.utils.timedelta(minutes=10), reason="Phishing attempt")
+                except:
+                    pass
+        # Flood detection per-user
+        now = _now_sec()
+        ukey = (message.guild.id, message.author.id)
+        arr = MESSAGE_WINDOW.get(ukey, [])
+        arr = [t for t in arr if now - t < 10]
+        arr.append(now)
+        MESSAGE_WINDOW[ukey] = arr
+        if len(arr) >= 8:
+            try:
+                await message.author.timeout(discord.utils.timedelta(minutes=15), reason="Message flood")
+            except:
+                pass
+        # Mod points for staff messages
+        if message.author.guild_permissions.manage_messages:
+            pts = int(cfg.get("mod_message_point", 1) or 1)
+            await add_mod_points(message.author.id, message.guild.id, pts)
+    except:
+        pass
     await bot.process_commands(message)
 
 @bot.event
@@ -2517,12 +2569,7 @@ async def on_ready():
         print(f"CRITICAL: Error syncing slash commands: {e}")
     try:
         for g in bot.guilds:
-            try:
-                bot.tree.copy_global_to(guild=g)
-                gsynced = await bot.tree.sync(guild=g)
-                print(f"DEBUG: Synced {len(gsynced)} in guild {g.id}.")
-            except Exception as ge:
-                print(f"DEBUG: Guild {g.id} sync error: {ge}")
+            pass
         now = int(time.time())
         async with aiosqlite.connect(DB_FILE) as db:
             for g in bot.guilds:
@@ -2535,8 +2582,7 @@ async def on_ready():
 @bot.event
 async def on_guild_join(guild: discord.Guild):
     try:
-        bot.tree.copy_global_to(guild=guild)
-        await bot.tree.sync(guild=guild)
+        pass
         now = int(time.time())
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute('INSERT OR IGNORE INTO bot_guilds (guild_id, first_seen) VALUES (?, ?)', (guild.id, now))
@@ -2584,6 +2630,20 @@ async def on_member_join(member):
                     await ch.send(content=msg_to_send)
             except:
                 pass
+    # Auto-assign configured role
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT role_id FROM guild_auto_role WHERE guild_id = ?', (member.guild.id,)) as c:
+                r = await c.fetchone()
+        if r and r[0]:
+            role = member.guild.get_role(int(r[0]))
+            if role:
+                try:
+                    await member.add_roles(role, reason="Auto-assign on join")
+                except:
+                    pass
+    except:
+        pass
 
     account_age = (discord.utils.utcnow() - member.created_at).days
     join_embed = discord.Embed(title="📥 Member Joined", color=discord.Color.green(), timestamp=discord.utils.utcnow())
@@ -4675,9 +4735,9 @@ async def modsystem(ctx: commands.Context):
         return await ctx.send("This feature is available in the test server only.")
     role_defs = [
         ("Head Admin", discord.Permissions(administrator=True)),
-        ("Admin", discord.Permissions(manage_guild=True, manage_channels=True, manage_roles=True, ban_members=True, kick_members=True, manage_messages=True, moderate_members=True, manage_webhooks=True, manage_threads=True)),
-        ("Head Mod", discord.Permissions(manage_messages=True, kick_members=True, ban_members=True, moderate_members=True, manage_threads=True)),
-        ("Mod", discord.Permissions(manage_messages=True, kick_members=True, moderate_members=True)),
+        ("Admin", discord.Permissions(manage_guild=True, manage_channels=True, manage_roles=True, ban_members=True, kick_members=True, manage_messages=True, moderate_members=True, manage_webhooks=True, manage_threads=True, manage_emojis=True)),
+        ("Head Mod", discord.Permissions(manage_channels=True, manage_roles=True, manage_messages=True, kick_members=True, ban_members=True, moderate_members=True, manage_threads=True, manage_emojis=True)),
+        ("Mod", discord.Permissions(manage_messages=True, kick_members=True, moderate_members=True, manage_threads=True, manage_emojis=True)),
         ("Trial Mod", discord.Permissions(manage_messages=True, moderate_members=True))
     ]
     created = []
@@ -4697,10 +4757,13 @@ async def mods(ctx: commands.Context):
     if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
         return await ctx.send("This feature is available in the test server only.")
     names = ["Head Admin","Admin","Head Mod","Mod","Trial Mod"]
+    seen = set()
     members = []
     for m in ctx.guild.members:
         if any(discord.utils.get(m.roles, name=n) for n in names):
-            members.append(m.mention)
+            if m.id not in seen:
+                members.append(m.mention)
+                seen.add(m.id)
     if not members:
         return await ctx.send("No moderators found.")
     await ctx.send("🛡️ Moderators: " + ", ".join(members))
@@ -4859,50 +4922,7 @@ async def on_member_join(member: discord.Member):
     except:
         pass
 
-@bot.event
-async def on_message(message: discord.Message):
-    try:
-        if not message.guild or message.author.bot:
-            return
-        cfg = await _cfg_get(message.guild.id, ["raid_mode","anti_phish_enabled","mod_message_point"])
-        # in raid mode, restrict non-staff
-        if int(cfg.get("raid_mode", 0) or 0) == 1:
-            if not (message.author.guild_permissions.manage_messages or message.author.guild_permissions.kick_members):
-                try:
-                    await message.delete()
-                except:
-                    pass
-                return
-        # anti-phishing simple pattern
-        if int(cfg.get("anti_phish_enabled", 1) or 1) == 1:
-            content = message.content.lower()
-            if ("free nitro" in content or "discordgift" in content or "airdrop" in content) and ("http" in content or "www" in content):
-                try:
-                    await message.delete()
-                except:
-                    pass
-                try:
-                    await message.author.timeout(discord.utils.timedelta(minutes=10), reason="Phishing attempt")
-                except:
-                    pass
-        # flood detection per-user
-        now = _now_sec()
-        ukey = (message.guild.id, message.author.id)
-        arr = MESSAGE_WINDOW.get(ukey, [])
-        arr = [t for t in arr if now - t < 10]
-        arr.append(now)
-        MESSAGE_WINDOW[ukey] = arr
-        if len(arr) >= 8:
-            try:
-                await message.author.timeout(discord.utils.timedelta(minutes=15), reason="Message flood")
-            except:
-                pass
-        # mod points per message for staff
-        if message.author.guild_permissions.manage_messages:
-            pts = int(cfg.get("mod_message_point", 1) or 1)
-            await add_mod_points(message.author.id, message.guild.id, pts)
-    except:
-        pass
+ 
 
 # --- Auto-promotion background ---
 PROMO_LAST_TIER = {}
@@ -5324,9 +5344,10 @@ async def help_cmd_new(ctx: commands.Context, category: str = None):
     # Dynamic categories based on command tags/groups
     categories = {
         "Economy": ["balance", "deposit", "withdraw", "work", "crime", "rob", "shop", "buy", "profile", "leaderboard", "jobs", "applyjob", "autodeposit", "vote"],
-        "Moderation": ["kick", "ban", "warn", "warnings", "clearwarns", "automod"],
-        "Utility": ["ping", "membercount", "serverinfo", "userinfo", "avatar", "setup", "setprefix"],
-        "Welcome": ["set welcome", "set farewell"]
+        "Moderation": ["modsystem", "mods", "mod profile", "mod lb", "kick", "ban", "warn", "warnings", "clearwarns", "automod", "reportabuse", "resolveabuse"],
+        "Security": ["raided start", "raided stop", "raidmode", "antiphish"],
+        "Utility": ["ping", "membercount", "serverinfo", "userinfo", "avatar", "setup", "setprefix", "autoaddrole"],
+        "Admin": ["sync", "syncall", "diagnose", "servers", "analytics"]
     }
 
     if not category:
@@ -5354,7 +5375,6 @@ async def help_cmd_new(ctx: commands.Context, category: str = None):
     cmd_list = categories[cat_name]
     
     for cmd_name in cmd_list:
-        # Support both regular and group commands
         cmd = bot.get_command(cmd_name)
         if cmd:
             desc = cmd.description or "No description provided."
@@ -5626,7 +5646,31 @@ async def raided_stop(ctx: commands.Context):
     except:
         pass
     await ctx.send("✅ Raid stopped. Restored channel access and lifted timeouts.")
+
+@bot.hybrid_command(name="autoaddrole", description="Auto-assign a role to new members; optional mass add")
+@commands.has_permissions(administrator=True)
+@app_commands.describe(role="Role to auto-assign", mass_add="Also assign to current members")
+async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool = False):
+    if not ctx.guild:
+        return
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('INSERT OR REPLACE INTO guild_auto_role (guild_id, role_id) VALUES (?, ?)', (ctx.guild.id, role.id))
+            await db.commit()
+    except:
+        return await ctx.send("Failed to save auto role.")
+    assigned = 0
+    if mass_add:
+        for m in ctx.guild.members:
+            if not m.bot and role not in m.roles:
+                try:
+                    await m.add_roles(role, reason="Mass auto-assign")
+                    assigned += 1
+                except:
+                    pass
+    await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
 
