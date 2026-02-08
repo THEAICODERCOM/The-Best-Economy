@@ -2598,7 +2598,8 @@ def _resolve_text_mentions(guild: discord.Guild, text: str) -> str:
                 if e.name == name:
                     return f"<:{e.name}:{e.id}>"
             return f":{name}:"
-        text = re.sub(r"(?<!\\w)#([A-Za-z0-9_\\-]+)", repl_channel, text)
+        # Allow optional spaces after '#', e.g. '# rules'
+        text = re.sub(r"(?<!\\w)#\\s*([A-Za-z0-9_\\-]+)", repl_channel, text)
         text = re.sub(r":([A-Za-z0-9_\\-]+):", repl_emoji, text)
     except:
         pass
@@ -3903,4 +3904,3 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
-
