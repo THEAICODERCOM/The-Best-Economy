@@ -484,6 +484,19 @@ async def migrate_db():
             )''')
         except:
             pass
+        try:
+            await db.execute('''CREATE TABLE IF NOT EXISTS abuse_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER,
+                reporter_id INTEGER,
+                accused_id INTEGER,
+                reason TEXT,
+                evidence TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at INTEGER
+            )''')
+        except:
+            pass
         await db.commit()
 
 # Bot setup
@@ -602,6 +615,28 @@ def is_owner_or_delegate():
         if ctx.author.id == ctx.guild.owner_id:
             return True
         return await has_owner_access(ctx.guild.id, ctx.author.id)
+    return commands.check(predicate)
+
+async def _get_head_admin_role_id(guild_id: int):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT tier_head_admin_role_id FROM promo_config WHERE guild_id = ?', (guild_id,)) as c:
+            row = await c.fetchone()
+        if not row:
+            return None
+        try:
+            rid = int(row[0]) if row[0] is not None else None
+        except:
+            rid = None
+        return rid
+
+def is_head_admin_only():
+    async def predicate(ctx):
+        if not ctx.guild:
+            return False
+        rid = await _get_head_admin_role_id(ctx.guild.id)
+        if not rid:
+            return False
+        return any(r.id == rid for r in getattr(ctx.author, "roles", []))
     return commands.check(predicate)
 async def add_xp(user_id, guild_id, amount):
     await ensure_user(user_id, guild_id)
@@ -4343,6 +4378,73 @@ async def syncall(ctx: commands.Context):
         await ctx.send(f"✅ Global: {len(gsynced)} • Server: {len(lsynced)}")
     except Exception as e:
         await ctx.send(f"❌ Sync failed: {e}")
+
+@bot.hybrid_command(name="reportabuse", description="Report staff abuse to the moderators")
+async def report_abuse(ctx: commands.Context, accused: discord.Member, reason: str, evidence: str = None):
+    now = int(time.time())
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT INTO abuse_reports (guild_id, reporter_id, accused_id, reason, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?)', 
+                         (ctx.guild.id, ctx.author.id, accused.id, reason, evidence or "", now))
+        await db.commit()
+    embed = discord.Embed(title="🚨 Abuse Report Filed", color=discord.Color.red(), timestamp=discord.utils.utcnow())
+    embed.add_field(name="Reporter", value=f"{ctx.author.mention} ({ctx.author.id})", inline=False)
+    embed.add_field(name="Accused", value=f"{accused.mention} ({accused.id})", inline=False)
+    embed.add_field(name="Reason", value=reason[:512], inline=False)
+    if evidence:
+        embed.add_field(name="Evidence", value=evidence[:256], inline=False)
+    await log_embed(ctx.guild, "mod_log_channel", embed)
+    await ctx.send("✅ Your report has been submitted to the moderators.")
+
+@bot.hybrid_command(name="resolveabuse", description="Resolve an abuse report and optionally apply deduction")
+@is_head_admin_only()
+async def resolve_abuse(ctx: commands.Context, report_id: int, decision: str):
+    decision = str(decision).lower().strip()
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT accused_id, reporter_id FROM abuse_reports WHERE id = ? AND guild_id = ?', (report_id, ctx.guild.id)) as c:
+            row = await c.fetchone()
+        if not row:
+            return await ctx.send("❌ Report not found.")
+        accused_id, reporter_id = row
+        if decision not in ["confirm", "deny"]:
+            return await ctx.send("❌ Decision must be 'confirm' or 'deny'.")
+        await db.execute('UPDATE abuse_reports SET status = ? WHERE id = ? AND guild_id = ?', (decision, report_id, ctx.guild.id))
+        if decision == "confirm":
+            cfg = await _cfg_get(ctx.guild.id, ["deduction_abuse_report"])
+            ded = int(cfg.get("deduction_abuse_report", 20) or 20)
+            now = int(time.time())
+            await db.execute('INSERT OR IGNORE INTO mod_stats (user_id, guild_id, points) VALUES (?, ?, 0)', (accused_id, ctx.guild.id))
+            await db.execute('UPDATE mod_stats SET points = MAX(0, points - ?) WHERE user_id = ? AND guild_id = ?', (ded, accused_id, ctx.guild.id))
+            await db.execute('INSERT INTO mod_points_history (guild_id, user_id, delta, reason, source, created_at) VALUES (?, ?, ?, ?, ?, ?)', 
+                             (ctx.guild.id, accused_id, -ded, "Abuse report confirmed", "moderation", now))
+            await db.commit()
+            embed = discord.Embed(title="⚠️ Abuse Confirmed", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+            embed.add_field(name="Accused", value=f"<@{accused_id}>", inline=False)
+            embed.add_field(name="Deduction", value=f"-{ded} points", inline=False)
+            await log_embed(ctx.guild, "mod_log_channel", embed)
+            await ctx.send(f"✅ Applied -{ded} points to <@{accused_id}>.")
+        else:
+            await ctx.send("✅ Report marked as denied.")
+
+@bot.hybrid_command(name="diagnose", description="Diagnose command sync and prefix")
+@commands.has_permissions(administrator=True)
+async def diagnose(ctx: commands.Context):
+    try:
+        global_count = len(await bot.tree.sync())
+    except:
+        global_count = len(bot.tree.get_commands())
+    try:
+        bot.tree.copy_global_to(guild=ctx.guild)
+        local = await bot.tree.sync(guild=ctx.guild)
+        local_count = len(local)
+    except:
+        local_count = 0
+    prefix = await get_prefix(bot, ctx.message)
+    await ctx.send(f"🔎 Commands — Global: {global_count} • This guild: {local_count}\n🔧 Prefix: `{prefix}`")
+
+@bot.hybrid_command(name="showprefix", description="Show current server prefix")
+async def showprefix(ctx: commands.Context):
+    p = await get_prefix(bot, ctx.message)
+    await ctx.send(f"Current prefix: `{p}`")
 @bot.hybrid_command(name="modsystem", description="Create mod roles and start tracking")
 @commands.has_permissions(administrator=True)
 async def modsystem(ctx: commands.Context):
@@ -5156,5 +5258,3 @@ async def remove_owner_cmd(ctx: commands.Context, member: discord.Member):
     await ctx.send(f"✅ {member.mention} can no longer use owner-only commands.")
 if __name__ == '__main__':
     bot.run(TOKEN)
-
-
