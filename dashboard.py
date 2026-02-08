@@ -849,6 +849,7 @@ def dashboard(guild_id):
                 <div class="sidebar-menu">
                     <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
                     <a href="/dashboard/{guild_id}" class="menu-item {'active' if request.path == f'/dashboard/{guild_id}' else ''}"><span class="menu-label">⚙️ General</span></a>
+                    <a href="/dashboard/{guild_id}/welcome" class="menu-item {'active' if '/welcome' in request.path else ''}"><span class="menu-label">👋 Welcome</span></a>
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item {'active' if '/moderation' in request.path else ''}"><span class="menu-label">🛡️ Moderation</span></a>
                     {"<a href=\"/dashboard/%d/security\" class=\"menu-item\"><span class=\"menu-label\">🛡️ Security</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
                     {"<a href=\"/dashboard/%d/systems\" class=\"menu-item\"><span class=\"menu-label\">🏗️ Systems</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
