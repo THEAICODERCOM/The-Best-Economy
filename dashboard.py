@@ -851,9 +851,9 @@ def dashboard(guild_id):
                     <a href="/dashboard/{guild_id}" class="menu-item {'active' if request.path == f'/dashboard/{guild_id}' else ''}"><span class="menu-label">⚙️ General</span></a>
                     <a href="/dashboard/{guild_id}/welcome" class="menu-item {'active' if '/welcome' in request.path else ''}"><span class="menu-label">👋 Welcome</span></a>
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item {'active' if '/moderation' in request.path else ''}"><span class="menu-label">🛡️ Moderation</span></a>
-                    {"<a href=\"/dashboard/%d/security\" class=\"menu-item\"><span class=\"menu-label\">🛡️ Security</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
-                    {"<a href=\"/dashboard/%d/systems\" class=\"menu-item\"><span class=\"menu-label\">🏗️ Systems</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
-                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/security" class="menu-item {'active' if '/security' in request.path else ''}"><span class="menu-label">🛡️ Security</span></a>
+                    <a href="/dashboard/{guild_id}/systems" class="menu-item {'active' if '/systems' in request.path else ''}"><span class="menu-label">🏗️ Systems</span></a>
+                    <a href="/dashboard/{guild_id}/promotion" class="menu-item {'active' if '/promotion' in request.path else ''}"><span class="menu-label">📈 Promotion System</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item {'active' if '/logging' in request.path else ''}"><span class="menu-label">📝 Logging</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item {'active' if '/custom-commands' in request.path else ''}"><span class="menu-label">💻 Custom Commands</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
@@ -1233,10 +1233,10 @@ def moderation_dashboard(guild_id):
                     <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
                     <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item active"><span class="menu-label">🛡️ Moderation</span></a>
-                    {"<a href=\"/dashboard/%d/security\" class=\"menu-item\"><span class=\"menu-label\">🛡️ Security</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/security" class="menu-item"><span class="menu-label">🛡️ Security</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
-                    {"<a href=\"/dashboard/%d/systems\" class=\"menu-item\"><span class=\"menu-label\">🏗️ Systems</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
-                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/systems" class="menu-item"><span class="menu-label">🏗️ Systems</span></a>
+                    <a href="/dashboard/{guild_id}/promotion" class="menu-item"><span class="menu-label">📈 Promotion System</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
                     <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
@@ -1345,10 +1345,10 @@ def welcome_dashboard(guild_id):
                     <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
                     <a href="/dashboard/{guild_id}/welcome" class="menu-item active"><span class="menu-label">👋 Welcome</span></a>
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
-                    {"<a href=\"/dashboard/%d/security\" class=\"menu-item\"><span class=\"menu-label\">🛡️ Security</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/security" class="menu-item"><span class="menu-label">🛡️ Security</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
-                    {"<a href=\"/dashboard/%d/systems\" class=\"menu-item\"><span class=\"menu-label\">🏗️ Systems</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
-                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/systems" class="menu-item"><span class="menu-label">🏗️ Systems</span></a>
+                    <a href="/dashboard/{guild_id}/promotion" class="menu-item"><span class="menu-label">📈 Promotion System</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
                     <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
@@ -1693,7 +1693,7 @@ def logging_dashboard(guild_id):
                     <a href="/dashboard/{guild_id}/security" class="menu-item"><span class="menu-label">🛡️ Security</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item active"><span class="menu-label">📝 Logging</span></a>
                     <a href="/dashboard/{guild_id}/systems" class="menu-item"><span class="menu-label">🏗️ Systems</span></a>
-                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/promotion" class="menu-item"><span class="menu-label">📈 Promotion System</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
                     <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
@@ -1795,6 +1795,7 @@ def security_dashboard(guild_id):
                     <a href="/dashboard/{guild_id}/security" class="menu-item active"><span class="menu-label">🛡️ Security</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
                     <a href="/dashboard/{guild_id}/systems" class="menu-item"><span class="menu-label">🏗️ Systems</span></a>
+                    <a href="/dashboard/{guild_id}/promotion" class="menu-item"><span class="menu-label">📈 Promotion System</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
                     <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
@@ -2086,7 +2087,7 @@ def systems_dashboard(guild_id):
                     <a href="/dashboard/{guild_id}/security" class="menu-item"><span class="menu-label">🛡️ Security</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
                     <a href="/dashboard/{guild_id}/systems" class="menu-item active"><span class="menu-label">🏗️ Systems</span></a>
-                    {"<a href=\"/dashboard/%d/promotion\" class=\"menu-item\"><span class=\"menu-label\">📈 Promotion System</span></a>" % int(guild_id) if int(guild_id)==1465437620245889237 else ""}
+                    <a href="/dashboard/{guild_id}/promotion" class="menu-item"><span class="menu-label">📈 Promotion System</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item"><span class="menu-label">💻 Custom Commands</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
                     <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
@@ -2230,7 +2231,10 @@ def custom_commands_dashboard(guild_id):
                     <a href="/dashboard/{guild_id}" class="menu-item"><span class="menu-label">⚙️ General</span></a>
                     <a href="/dashboard/{guild_id}/welcome" class="menu-item"><span class="menu-label">👋 Welcome</span></a>
                     <a href="/dashboard/{guild_id}/moderation" class="menu-item"><span class="menu-label">🛡️ Moderation</span></a>
+                    <a href="/dashboard/{guild_id}/security" class="menu-item"><span class="menu-label">🛡️ Security</span></a>
                     <a href="/dashboard/{guild_id}/logging" class="menu-item"><span class="menu-label">📝 Logging</span></a>
+                    <a href="/dashboard/{guild_id}/systems" class="menu-item"><span class="menu-label">🏗️ Systems</span></a>
+                    <a href="/dashboard/{guild_id}/promotion" class="menu-item"><span class="menu-label">📈 Promotion System</span></a>
                     <a href="/dashboard/{guild_id}/custom-commands" class="menu-item active"><span class="menu-label">💻 Custom Commands</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
                     <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
