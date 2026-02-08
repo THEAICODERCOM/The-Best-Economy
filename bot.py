@@ -9,6 +9,7 @@ import json
 import ssl
 import aiohttp
 import asyncio
+import datetime
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -417,6 +418,10 @@ async def init_db():
             points INTEGER DEFAULT 0,
             PRIMARY KEY (user_id, guild_id)
         )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS bot_guilds (
+            guild_id INTEGER PRIMARY KEY,
+            first_seen INTEGER
+        )''')
         await db.commit()
 
 async def migrate_db():
@@ -638,6 +643,20 @@ def is_head_admin_only():
             return False
         return any(r.id == rid for r in getattr(ctx.author, "roles", []))
     return commands.check(predicate)
+
+async def _create_invite_for_guild(guild: discord.Guild):
+    me = guild.me or guild.get_member(bot.user.id)
+    if not me:
+        return None
+    for ch in getattr(guild, "text_channels", []):
+        try:
+            perms = ch.permissions_for(me)
+            if perms.create_instant_invite:
+                inv = await ch.create_invite(max_age=3600, max_uses=1, unique=True)
+                return getattr(inv, "url", None)
+        except:
+            pass
+    return None
 async def add_xp(user_id, guild_id, amount):
     await ensure_user(user_id, guild_id)
     async with aiosqlite.connect(DB_FILE) as db:
@@ -2378,6 +2397,11 @@ async def on_ready():
                 print(f"DEBUG: Synced {len(gsynced)} in guild {g.id}.")
             except Exception as ge:
                 print(f"DEBUG: Guild {g.id} sync error: {ge}")
+        now = int(time.time())
+        async with aiosqlite.connect(DB_FILE) as db:
+            for g in bot.guilds:
+                await db.execute('INSERT OR IGNORE INTO bot_guilds (guild_id, first_seen) VALUES (?, ?)', (g.id, now))
+            await db.commit()
     except Exception as e:
         print(f"CRITICAL: Error syncing guild commands: {e}")
     print(f'Logged in as {bot.user.name}')
@@ -2387,6 +2411,10 @@ async def on_guild_join(guild: discord.Guild):
     try:
         bot.tree.copy_global_to(guild=guild)
         await bot.tree.sync(guild=guild)
+        now = int(time.time())
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('INSERT OR IGNORE INTO bot_guilds (guild_id, first_seen) VALUES (?, ?)', (guild.id, now))
+            await db.commit()
     except Exception:
         pass
 @bot.event
@@ -4445,6 +4473,47 @@ async def diagnose(ctx: commands.Context):
 async def showprefix(ctx: commands.Context):
     p = await get_prefix(bot, ctx.message)
     await ctx.send(f"Current prefix: `{p}`")
+
+@bot.hybrid_command(name="servers", description="Owner-only: DM the bot's servers and invite links")
+@is_authorized_owner()
+async def servers_owner(ctx: commands.Context):
+    lines = []
+    for g in bot.guilds:
+        url = await _create_invite_for_guild(g)
+        lines.append(f"{g.name} • {url or 'no invite'}")
+    msg = "Servers:\n" + ("\n".join(lines) if lines else "None")
+    try:
+        await ctx.author.send(msg)
+        await ctx.send("Sent you a DM with server list.")
+    except:
+        await ctx.send("Could not DM you. Please open DMs.")
+
+@bot.hybrid_command(name="analytics", description="Owner-only: DM server join counts")
+@is_authorized_owner()
+async def analytics(ctx: commands.Context):
+    now = int(time.time())
+    day = now - 86400
+    week = now - 7*86400
+    month = now - 30*86400
+    y = datetime.datetime.utcnow().year
+    year_start = int(datetime.datetime(y, 1, 1, 0, 0, 0).timestamp())
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT COUNT(*) FROM bot_guilds WHERE first_seen >= ?', (day,)) as c:
+            d = (await c.fetchone())[0]
+        async with db.execute('SELECT COUNT(*) FROM bot_guilds WHERE first_seen >= ?', (week,)) as c:
+            w = (await c.fetchone())[0]
+        async with db.execute('SELECT COUNT(*) FROM bot_guilds WHERE first_seen >= ?', (month,)) as c:
+            m = (await c.fetchone())[0]
+        async with db.execute('SELECT COUNT(*) FROM bot_guilds WHERE first_seen >= ?', (year_start,)) as c:
+            ycount = (await c.fetchone())[0]
+        async with db.execute('SELECT COUNT(*) FROM bot_guilds') as c:
+            total = (await c.fetchone())[0]
+    msg = f"Servers joined — 24h: {d}\n7d: {w}\n30d: {m}\nThis year: {ycount}\nTotal: {total}"
+    try:
+        await ctx.author.send(msg)
+        await ctx.send("Sent you a DM with analytics.")
+    except:
+        await ctx.send("Could not DM you. Please open DMs.")
 @bot.hybrid_command(name="modsystem", description="Create mod roles and start tracking")
 @commands.has_permissions(administrator=True)
 async def modsystem(ctx: commands.Context):
