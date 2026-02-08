@@ -5157,3 +5157,4 @@ async def remove_owner_cmd(ctx: commands.Context, member: discord.Member):
     await ctx.send(f"✅ {member.mention} can no longer use owner-only commands.")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
