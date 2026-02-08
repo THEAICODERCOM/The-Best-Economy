@@ -358,6 +358,65 @@ async def init_db():
             prefix TEXT DEFAULT '.',
             PRIMARY KEY (guild_id, name)
         )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS alliances (
+            alliance_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER,
+            name TEXT UNIQUE,
+            bank INTEGER DEFAULT 0,
+            owner_id INTEGER
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS alliance_members (
+            alliance_id INTEGER,
+            user_id INTEGER,
+            role TEXT DEFAULT 'member',
+            PRIMARY KEY (alliance_id, user_id)
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS vassals (
+            lord_id INTEGER,
+            vassal_id INTEGER,
+            guild_id INTEGER,
+            percent INTEGER DEFAULT 5,
+            PRIMARY KEY (lord_id, vassal_id, guild_id)
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS market_listings (
+            listing_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER,
+            seller_id INTEGER,
+            item TEXT,
+            price INTEGER,
+            quantity INTEGER DEFAULT 1,
+            created_at INTEGER
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS marriage_proposals (
+            proposer_id INTEGER,
+            target_id INTEGER,
+            guild_id INTEGER,
+            created_at INTEGER,
+            PRIMARY KEY (proposer_id, target_id, guild_id)
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS divorce_cases (
+            case_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER,
+            spouse1_id INTEGER,
+            spouse2_id INTEGER,
+            kids INTEGER DEFAULT 0,
+            questions_json TEXT,
+            answers1_json TEXT,
+            answers2_json TEXT,
+            status TEXT DEFAULT 'pending',
+            fines_json TEXT
+        )''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS mod_stats (
+            user_id INTEGER,
+            guild_id INTEGER,
+            messages INTEGER DEFAULT 0,
+            warns INTEGER DEFAULT 0,
+            bans INTEGER DEFAULT 0,
+            kicks INTEGER DEFAULT 0,
+            timeouts INTEGER DEFAULT 0,
+            points INTEGER DEFAULT 0,
+            PRIMARY KEY (user_id, guild_id)
+        )''')
         await db.commit()
 
 async def migrate_db():
@@ -383,6 +442,38 @@ async def migrate_db():
             pass
         try:
             await db.execute('ALTER TABLE logging_config ADD COLUMN leave_log_channel INTEGER')
+        except:
+            pass
+        try:
+            await db.execute('ALTER TABLE logging_config ADD COLUMN use_webhooks INTEGER DEFAULT 0')
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE guild_config ADD COLUMN raid_mode INTEGER DEFAULT 0")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE guild_config ADD COLUMN anti_phish_enabled INTEGER DEFAULT 1")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE guild_config ADD COLUMN marketplace_enabled INTEGER DEFAULT 1")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE guild_config ADD COLUMN marketplace_tax INTEGER DEFAULT 0")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE guild_config ADD COLUMN vassal_max_percent INTEGER DEFAULT 15")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE guild_config ADD COLUMN alliances_enabled INTEGER DEFAULT 1")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE marriages ADD COLUMN kids INTEGER DEFAULT 0")
         except:
             pass
         await db.commit()
@@ -832,7 +923,7 @@ async def log_mod_action(guild, action, target, moderator, reason, duration=None
 
 async def log_embed(guild, column, embed):
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute(f'SELECT {column} FROM logging_config WHERE guild_id = ?', (guild.id,)) as cursor:
+        async with db.execute(f'SELECT {column}, use_webhooks FROM logging_config WHERE guild_id = ?', (guild.id,)) as cursor:
             row = await cursor.fetchone()
             if not row or not row[0]:
                 return
@@ -848,19 +939,34 @@ async def log_embed(guild, column, embed):
                 except:
                     return
 
-            if channel:
-                # Retry mechanism
-                for attempt in range(3):
-                    try:
-                        await channel.send(embed=embed)
-                        break
-                    except discord.HTTPException as e:
-                        if attempt == 2:
-                            print(f"Failed to send log to {channel_id} ({column}) after 3 attempts: {e}")
-                        await asyncio.sleep(1 * (attempt + 1))
-                    except Exception as e:
-                        print(f"Error logging embed ({column}): {e}")
-                        break
+            use_webhooks = 0
+            try:
+                use_webhooks = int(row[1] or 0)
+            except:
+                use_webhooks = 0
+
+            if channel and use_webhooks == 1:
+                try:
+                    whs = await channel.webhooks()
+                    wh = whs[0] if whs else None
+                    if not wh:
+                        wh = await channel.create_webhook(name="EmpireNexus Logs")
+                    await wh.send(embed=embed, username=guild.me.display_name if guild.me else "EmpireNexus", avatar_url=guild.me.display_avatar.url if guild.me else None)
+                    return
+                except:
+                    pass
+
+            for attempt in range(3):
+                try:
+                    await channel.send(embed=embed)
+                    break
+                except discord.HTTPException as e:
+                    if attempt == 2:
+                        print(f"Failed to send log to {channel_id} ({column}) after 3 attempts: {e}")
+                    await asyncio.sleep(1 * (attempt + 1))
+                except Exception as e:
+                    print(f"Error logging embed ({column}): {e}")
+                    break
 
 def parse_duration(duration_str):
     if not duration_str:
@@ -2400,6 +2506,49 @@ async def on_raw_reaction_remove(payload):
 
 # --- Hybrid Commands ---
 
+@bot.event
+async def on_message(message):
+    if not message.guild or message.author.bot:
+        return
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT raid_mode, anti_phish_enabled FROM guild_config WHERE guild_id = ?', (message.guild.id,)) as cursor:
+                row = await cursor.fetchone()
+        raid_mode = int(row[0] or 0) if row else 0
+        anti_phish = int(row[1] or 1) if row else 1
+    except:
+        raid_mode = 0
+        anti_phish = 1
+    if raid_mode == 1:
+        perms = message.author.guild_permissions
+        if not perms.manage_messages and not perms.administrator:
+            try:
+                await message.delete()
+            except:
+                pass
+            embed = discord.Embed(title="Raid Mode", description=f"Blocked a message from {message.author.mention} in {message.channel.mention}.", color=discord.Color.red(), timestamp=discord.utils.utcnow())
+            await log_embed(message.guild, "automod_log_channel", embed)
+            return
+    if anti_phish == 1:
+        content = (message.content or "").lower()
+        suspect = any(x in content for x in ["free nitro","discordgift","nitro-gift","airdrop","giveaway","steamcommunity"])
+        if suspect:
+            try:
+                await message.delete()
+            except:
+                pass
+            embed = discord.Embed(title="Anti‑Phishing", description=f"Removed a suspicious message from {message.author.mention}.", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+            embed.add_field(name="Channel", value=message.channel.mention, inline=True)
+            await log_embed(message.guild, "automod_log_channel", embed)
+            return
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('INSERT OR IGNORE INTO mod_stats (user_id, guild_id) VALUES (?, ?)', (message.author.id, message.guild.id))
+            await db.execute('UPDATE mod_stats SET messages = messages + 1, points = points + 1 WHERE user_id = ? AND guild_id = ?', (message.author.id, message.guild.id))
+            await db.commit()
+    except:
+        pass
+    await bot.process_commands(message)
 @bot.hybrid_command(name="start", description="New to the Empire? Start your tutorial here!")
 async def start_tutorial(ctx: commands.Context):
     data = await get_user_data(ctx.author.id, ctx.guild.id)
@@ -2530,7 +2679,10 @@ class HelpSelect(discord.ui.Select):
                         f"`{prefix}inventory`, `/inventory` – View your assets.",
                         f"`{prefix}profile`, `/profile` – Empire overview with Titles & Medals.",
                         f"`{prefix}prestige`, `/prestige` – Reset for permanent multipliers.",
-                        f"`{prefix}buyrole`, `/buyrole` – Buy server roles with coins."
+                        f"`{prefix}buyrole`, `/buyrole` – Buy server roles with coins.",
+                        f"`{prefix}alliance create|join|info`, `/alliance` – Alliance management.",
+                        f"`{prefix}vassal sponsor @user [percent]`, `/vassal` – Sponsor vassals.",
+                        f"`{prefix}market list|view|buy`, `/market` – Player marketplace."
                     ],
                     "explain": (
                         "Invest coins into assets that pay every 10 minutes. Prestige resets progress for permanent multipliers."
@@ -2567,7 +2719,13 @@ class HelpSelect(discord.ui.Select):
                         f"`{prefix}delwarn`, `/delwarn` – Delete a warn by ID.",
                         f"`{prefix}removewarn`, `/removewarn` – Alias for delwarn.",
                         f"`{prefix}automod add/remove`, `/automod` – Word filter management.",
-                        f"`{prefix}setlogs`, `/setlogs` – Configure log channels."
+                        f"`{prefix}setlogs`, `/setlogs` – Configure log channels.",
+                        f"`{prefix}raidmode on|off`, `/raidmode` – Lock down during raids.",
+                        f"`{prefix}antiphish on|off`, `/antiphish` – Scam link guard.",
+                        f"`{prefix}modsystem`, `/modsystem` – Create mod roles & tracking.",
+                        f"`{prefix}mod profile`, `/mod profile` – View your mod points.",
+                        f"`{prefix}mods`, `/mods` – List tracked moderators.",
+                        f"`{prefix}mod lb`, `/mod lb` – Mod leaderboard."
                     ],
                     "explain": (
                         "Configure automod and use kick/ban/warns to keep the server safe. "
@@ -2619,7 +2777,10 @@ class HelpSelect(discord.ui.Select):
                         f"`{prefix}rank`, `/rank` – Level & XP bar.",
                         f"`{prefix}setup`, `/setup` – Dashboard link.",
                         f"`{prefix}setprefix`, `/setprefix` – Change prefix.",
-                        f"`{prefix}start`, `/start` – Tutorial."
+                        f"`{prefix}start`, `/start` – Tutorial.",
+                        f"`{prefix}bounty @user <amount>`, `/bounty` – Place a bounty.",
+                        f"`{prefix}remind <10m|2h|1d> [text]`, `/remind` – DM reminders.",
+                        f"`{prefix}poll <question> options:\"A,B,C\"`, `/poll` – Multi‑choice poll."
                     ],
                     "explain": (
                         "Use start to onboard new players and help to explore features."
@@ -2681,6 +2842,19 @@ def _resolve_text_mentions(guild: discord.Guild, text: str) -> str:
         pass
     return text
 
+async def _cfg_get(guild_id: int, keys: list[str]) -> dict:
+    out = {}
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            cols = ", ".join(keys)
+            async with db.execute(f'SELECT {cols} FROM guild_config WHERE guild_id = ?', (guild_id,)) as c:
+                row = await c.fetchone()
+        if row:
+            for i, k in enumerate(keys):
+                out[k] = row[i]
+    except:
+        pass
+    return out
 def _apply_placeholders_member(guild: discord.Guild, member: discord.Member) -> dict:
     return {
         "{user}": member.mention,
@@ -3668,10 +3842,9 @@ async def marry(ctx: commands.Context, member: discord.Member):
             row2 = await c2.fetchone()
         if row or row2:
             return await ctx.send("Either you or the target is already married.")
-        await db.execute('INSERT OR REPLACE INTO marriages (user_id, partner_id) VALUES (?, ?)', (ctx.author.id, member.id))
-        await db.execute('INSERT OR REPLACE INTO marriages (user_id, partner_id) VALUES (?, ?)', (member.id, ctx.author.id))
+        await db.execute('INSERT OR REPLACE INTO marriage_proposals (proposer_id, target_id, guild_id, created_at) VALUES (?, ?, ?, ?)', (ctx.author.id, member.id, ctx.guild.id, int(time.time())))
         await db.commit()
-    await ctx.send(f"💍 {ctx.author.mention} and {member.mention} are now married! Congratulations!")
+    await ctx.send(f"💌 {member.mention}, {ctx.author.mention} proposed! Use `/acceptmarry @{ctx.author.display_name}` or `/declinemarry @{ctx.author.display_name}`.")
 
 @bot.hybrid_command(name="divorce", description="Divorce your current partner")
 async def divorce(ctx: commands.Context):
@@ -3681,14 +3854,129 @@ async def divorce(ctx: commands.Context):
         if not row:
             return await ctx.send("You're not married.")
         partner_id = row[0]
+        async with db.execute('SELECT kids FROM marriages WHERE user_id = ?', (ctx.author.id,)) as kc:
+            krow = await kc.fetchone()
+        kids = int(krow[0] or 0) if krow else 0
+        if kids > 0:
+            questions = [
+                "Who has more stable availability for childcare?",
+                "Who contributes more to family finances?",
+                "Who has better support network in the server?",
+                "Who has shown more consistency in daily engagement?",
+                "Who can provide safer environment (moderation record)?"
+            ]
+            await db.execute('INSERT INTO divorce_cases (guild_id, spouse1_id, spouse2_id, kids, questions_json) VALUES (?, ?, ?, ?, ?)', (ctx.guild.id, ctx.author.id, partner_id, kids, json.dumps(questions)))
+            await db.commit()
+            await ctx.send("⚖️ Court case opened. Both spouses must answer via `/divorce_answer case_id:<id> answers:\"A,B,C,D,E\"` where A/B indicates which spouse for each question.")
+            return
         await db.execute('DELETE FROM marriages WHERE user_id = ?', (ctx.author.id,))
         await db.execute('DELETE FROM marriages WHERE user_id = ?', (partner_id,))
         await db.commit()
     await ctx.send("💔 Divorce finalized.")
 
+@bot.hybrid_command(name="acceptmarry", description="Accept a marriage proposal")
+async def acceptmarry(ctx: commands.Context, member: discord.Member):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT created_at FROM marriage_proposals WHERE proposer_id = ? AND target_id = ? AND guild_id = ?', (member.id, ctx.author.id, ctx.guild.id)) as c:
+            row = await c.fetchone()
+        if not row:
+            return await ctx.send("No proposal found.")
+        await db.execute('DELETE FROM marriage_proposals WHERE proposer_id = ? AND target_id = ? AND guild_id = ?', (member.id, ctx.author.id, ctx.guild.id))
+        await db.execute('INSERT OR REPLACE INTO marriages (user_id, partner_id, kids) VALUES (?, ?, COALESCE((SELECT kids FROM marriages WHERE user_id = ?), 0))', (ctx.author.id, member.id, ctx.author.id))
+        await db.execute('INSERT OR REPLACE INTO marriages (user_id, partner_id, kids) VALUES (?, ?, COALESCE((SELECT kids FROM marriages WHERE user_id = ?), 0))', (member.id, ctx.author.id, member.id))
+        await db.commit()
+    await ctx.send(f"💍 {ctx.author.mention} and {member.mention} are now married! Congratulations!")
+
+@bot.hybrid_command(name="declinemarry", description="Decline a marriage proposal")
+async def declinemarry(ctx: commands.Context, member: discord.Member):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('DELETE FROM marriage_proposals WHERE proposer_id = ? AND target_id = ? AND guild_id = ?', (member.id, ctx.author.id, ctx.guild.id))
+        await db.commit()
+    await ctx.send("❌ Proposal declined.")
+
+@bot.hybrid_command(name="divorce_answer", description="Answer divorce case questions")
+async def divorce_answer(ctx: commands.Context, case_id: int, answers: str):
+    parts = [p.strip().upper() for p in answers.split(",") if p.strip()]
+    if len(parts) != 5 or any(p not in ["A","B"] for p in parts):
+        return await ctx.send("Provide 5 answers as A or B separated by commas.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM divorce_cases WHERE case_id = ? AND status = "pending"', (case_id,)) as c:
+            row = await c.fetchone()
+        if not row:
+            return await ctx.send("Case not found or already closed.")
+        s1 = int(row['spouse1_id']); s2 = int(row['spouse2_id'])
+        ajson = json.dumps(parts)
+        if ctx.author.id == s1:
+            await db.execute('UPDATE divorce_cases SET answers1_json = ? WHERE case_id = ?', (ajson, case_id))
+        elif ctx.author.id == s2:
+            await db.execute('UPDATE divorce_cases SET answers2_json = ? WHERE case_id = ?', (ajson, case_id))
+        else:
+            return await ctx.send("You are not part of this case.")
+        await db.commit()
+        async with db.execute('SELECT answers1_json, answers2_json, kids FROM divorce_cases WHERE case_id = ?', (case_id,)) as c2:
+            row2 = await c2.fetchone()
+        if not row2 or not row2['answers1_json'] or not row2['answers2_json']:
+            return await ctx.send("Answers recorded. Waiting for the other spouse.")
+        a1 = json.loads(row2['answers1_json'])
+        a2 = json.loads(row2['answers2_json'])
+        score1 = sum(1 for i in range(5) if a1[i] == "A" and a2[i] == "A")
+        score2 = sum(1 for i in range(5) if a1[i] == "B" and a2[i] == "B")
+        winner = s1 if score1 >= score2 else s2
+        loser = s2 if winner == s1 else s1
+        kids = int(row2['kids'] or 0)
+        base_fine = max(1000, kids * 5000)
+        extra_fine = max(0, (score1 - score2) * 1000) if winner == s1 else max(0, (score2 - score1) * 1000)
+        fines = {"base": base_fine, "loser_extra": extra_fine}
+        await db.execute('UPDATE divorce_cases SET status = "closed", fines_json = ? WHERE case_id = ?', (json.dumps(fines), case_id))
+        await db.execute('UPDATE marriages SET kids = ? WHERE user_id = ?', (kids, winner))
+        await db.execute('UPDATE marriages SET kids = 0 WHERE user_id = ?', (loser))
+        await db.execute('DELETE FROM marriages WHERE user_id = ?', (winner))
+        await db.execute('DELETE FROM marriages WHERE user_id = ?', (loser))
+        await db.commit()
+    await update_global_balance(loser, -(base_fine + extra_fine))
+    await ctx.send(f"⚖️ Court concluded. Custody awarded to <@{winner}>. Fines: base {base_fine:,}, loser extra {extra_fine:,}.")
+
+@bot.hybrid_command(name="kids", description="Manage or view family kids count")
+@app_commands.describe(action="add or view", count="How many to add (if adding)")
+async def kids(ctx: commands.Context, action: str = "view", count: int = 0):
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        return await ctx.send("This feature is available in the test server only.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT partner_id, kids FROM marriages WHERE user_id = ?', (ctx.author.id,)) as c:
+            row = await c.fetchone()
+        if not row:
+            return await ctx.send("You're not married.")
+        partner_id = int(row[0]); current = int(row[1] or 0)
+        if action.lower() == "add":
+            if count <= 0:
+                return await ctx.send("Provide a positive count.")
+            newc = current + count
+            await db.execute('UPDATE marriages SET kids = ? WHERE user_id = ?', (newc, ctx.author.id))
+            await db.execute('UPDATE marriages SET kids = ? WHERE user_id = ?', (newc, partner_id))
+            await db.commit()
+            return await ctx.send(f"👶 Family updated: kids = {newc}.")
+        return await ctx.send(f"👪 Current kids: {current}.")
 def win_loss_apply(user_id, amount, win=True):
     delta = amount if win else -amount
-    return update_global_balance(user_id, delta)
+    res = update_global_balance(user_id, delta)
+    if win and amount > 0:
+        bot.loop.create_task(apply_vassal_cut(user_id, 0, amount))
+    return res
+
+async def apply_vassal_cut(user_id: int, guild_id: int, amount: int):
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT lord_id, percent FROM vassals WHERE vassal_id = ? ORDER BY percent DESC LIMIT 1', (user_id,)) as c:
+                row = await c.fetchone()
+        if not row:
+            return
+        lord_id, percent = row
+        cut = int(amount * (percent / 100.0))
+        if cut > 0:
+            await update_global_balance(lord_id, cut)
+    except:
+        pass
 
 @bot.hybrid_command(name="coinflip", description="50/50 coinflip")
 @app_commands.describe(amount="Bet amount or 'all'")
@@ -3724,14 +4012,14 @@ async def slots(ctx: commands.Context, amount: str):
     r = [random.choice(reels) for _ in range(3)]
     if r[0] == r[1] == r[2]:
         win_amt = int(bet * 3)
-        await update_global_balance(ctx.author.id, win_amt)
+        await win_loss_apply(ctx.author.id, win_amt, win=True)
         await ctx.send(f"🎰 {' '.join(r)} — JACKPOT! +{win_amt:,}")
     elif r[0] == r[1] or r[1] == r[2] or r[0] == r[2]:
         win_amt = int(bet * 1.5)
-        await update_global_balance(ctx.author.id, win_amt)
+        await win_loss_apply(ctx.author.id, win_amt, win=True)
         await ctx.send(f"🎰 {' '.join(r)} — Pair! +{win_amt:,}")
     else:
-        await update_global_balance(ctx.author.id, -bet)
+        await win_loss_apply(ctx.author.id, bet, win=False)
         await ctx.send(f"🎰 {' '.join(r)} — No match. -{bet:,}")
 
 @bot.hybrid_command(name="russianroulette", aliases=["rr"], description="Risky game: 1/6 chance to lose")
@@ -3749,10 +4037,10 @@ async def russianroulette(ctx: commands.Context, amount: str):
     if bet > data['balance']: return await ctx.send("You don't have enough coins.")
     chamber = random.randint(1,6)
     if chamber == 1:
-        await update_global_balance(ctx.author.id, -bet)
+        await win_loss_apply(ctx.author.id, bet, win=False)
         await ctx.send(f"🔫 Bang! You lost **{bet:,}** coins.")
     else:
-        await update_global_balance(ctx.author.id, bet)
+        await win_loss_apply(ctx.author.id, bet, win=True)
         await ctx.send(f"🔫 Click! You survived and won **{bet:,}** coins.")
 
 # Leaderboard Cache
@@ -3961,6 +4249,606 @@ async def applyjob(ctx: commands.Context, job_id: str):
         await ctx.send(f"❌ Incorrect answer. You failed the application for **{info.get('name', job_id)}**.")
 
 # --- Utility Commands ---
+
+@bot.hybrid_command(name="raidmode", description="Toggle Raid Mode for this server")
+@commands.has_permissions(administrator=True)
+async def raidmode(ctx: commands.Context, state: str):
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        return await ctx.send("This feature is available in the test server only.")
+    val = 1 if str(state).lower() in ["on","enable","enabled","true","1"] else 0
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (ctx.guild.id,))
+        await db.execute('UPDATE guild_config SET raid_mode = ? WHERE guild_id = ?', (val, ctx.guild.id))
+        await db.commit()
+    await ctx.send("🔒 Raid Mode enabled." if val == 1 else "🔓 Raid Mode disabled.")
+
+@bot.hybrid_command(name="antiphish", description="Toggle Anti‑Phishing filter")
+@commands.has_permissions(manage_messages=True)
+async def antiphish(ctx: commands.Context, state: str):
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        return await ctx.send("This feature is available in the test server only.")
+    val = 1 if str(state).lower() in ["on","enable","enabled","true","1"] else 0
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (ctx.guild.id,))
+        await db.execute('UPDATE guild_config SET anti_phish_enabled = ? WHERE guild_id = ?', (val, ctx.guild.id))
+        await db.commit()
+    await ctx.send("🛡️ Anti‑Phishing enabled." if val == 1 else "🛡️ Anti‑Phishing disabled.")
+
+@bot.hybrid_command(name="modsystem", description="Create mod roles and start tracking")
+@commands.has_permissions(administrator=True)
+async def modsystem(ctx: commands.Context):
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        return await ctx.send("This feature is available in the test server only.")
+    role_defs = [
+        ("Head Admin", discord.Permissions(administrator=True)),
+        ("Admin", discord.Permissions(manage_guild=True, ban_members=True, kick_members=True, manage_messages=True)),
+        ("Head Mod", discord.Permissions(manage_messages=True, kick_members=True)),
+        ("Mod", discord.Permissions(manage_messages=True)),
+        ("Trial Mod", discord.Permissions(manage_messages=True))
+    ]
+    created = []
+    for name, perms in role_defs:
+        existing = discord.utils.get(ctx.guild.roles, name=name)
+        if not existing:
+            try:
+                r = await ctx.guild.create_role(name=name, permissions=perms, hoist=True, mentionable=True, reason="Empire Nexus mod system")
+                created.append(r.name)
+            except:
+                pass
+    msg = "✅ Created: " + ", ".join(created) if created else "ℹ️ Roles already exist."
+    await ctx.send(msg)
+
+@bot.hybrid_command(name="mods", description="List moderators tracked by the system")
+async def mods(ctx: commands.Context):
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        return await ctx.send("This feature is available in the test server only.")
+    names = ["Head Admin","Admin","Head Mod","Mod","Trial Mod"]
+    members = []
+    for m in ctx.guild.members:
+        if any(discord.utils.get(m.roles, name=n) for n in names):
+            members.append(m.mention)
+    if not members:
+        return await ctx.send("No moderators found.")
+    await ctx.send("🛡️ Moderators: " + ", ".join(members))
+
+@bot.hybrid_command(name="mod", description="View your mod profile or leaderboard")
+async def mod(ctx: commands.Context, subcommand: str = "profile"):
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        return await ctx.send("This feature is available in the test server only.")
+    if subcommand.lower() == "profile":
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT messages, warns, bans, kicks, timeouts, points FROM mod_stats WHERE user_id = ? AND guild_id = ?', (ctx.author.id, ctx.guild.id)) as c:
+                row = await c.fetchone()
+        if not row:
+            return await ctx.send("No mod stats yet.")
+        await ctx.send(f"🧭 Mod Profile for {ctx.author.mention}\nMessages: {row[0]}\nWarns: {row[1]}\nBans: {row[2]}\nKicks: {row[3]}\nTimeouts: {row[4]}\nPoints: {row[5]}")
+    elif subcommand.lower() == "lb":
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT user_id, points FROM mod_stats WHERE guild_id = ? ORDER BY points DESC LIMIT 10', (ctx.guild.id,)) as c:
+                rows = await c.fetchall()
+        if not rows:
+            return await ctx.send("No mod leaderboard yet.")
+        lines = []
+        for i, r in enumerate(rows, 1):
+            u = ctx.guild.get_member(r[0])
+            uname = u.display_name if u else f"User({r[0]})"
+            lines.append(f"{i}. {uname} — {r[1]} pts")
+        await ctx.send("🛡️ Mod Leaderboard\n" + "\n".join(lines))
+    else:
+        await ctx.send("Use `profile` or `lb`.")
+
+@bot.hybrid_command(name="bounty", description="Place a bounty on a user")
+@app_commands.describe(member="Target user", amount="Bounty amount")
+async def bounty(ctx: commands.Context, member: discord.Member, amount: int):
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        return await ctx.send("This feature is available in the test server only.")
+    if amount <= 0:
+        return await ctx.send("Enter a positive amount.")
+    await update_global_balance(ctx.author.id, -amount)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR IGNORE INTO users (user_id, guild_id) VALUES (?, ?)', (member.id, ctx.guild.id))
+        await db.commit()
+    await ctx.send(f"🎯 Bounty of {amount:,} coins placed on {member.mention}. Next successful `/rob` against them claims it.")
+
+@bot.hybrid_command(name="remind", description="Set a reminder")
+@app_commands.describe(time_str="e.g., 10m, 2h, 1d", text="Reminder text")
+async def remind(ctx: commands.Context, time_str: str, text: str = "Claim daily!"):
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        return await ctx.send("This feature is available in the test server only.")
+    secs = parse_duration(time_str)
+    if not secs:
+        return await ctx.send("Invalid duration. Use like 10m, 2h, 1d.")
+    when = discord.utils.utcnow() + discord.utils.timedelta(seconds=secs)
+    await ctx.send(f"⏰ Reminder set for {discord.utils.format_dt(when, style='R')}. I will DM you.")
+    async def _task():
+        await asyncio.sleep(secs)
+        try:
+            await ctx.author.send(f"⏰ Reminder: {text}")
+        except:
+            pass
+    bot.loop.create_task(_task())
+
+@bot.hybrid_command(name="poll", description="Create a poll")
+@app_commands.describe(question="Poll question", options="Comma‑separated options")
+async def poll(ctx: commands.Context, question: str, options: str):
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        return await ctx.send("This feature is available in the test server only.")
+    opts = [o.strip() for o in options.split(",") if o.strip()]
+    if len(opts) < 2 or len(opts) > 10:
+        return await ctx.send("Provide 2–10 options separated by commas.")
+    emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    embed = discord.Embed(title="📊 Poll", description=question, color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+    desc = "\n".join(f"{emojis[i]} {opt}" for i, opt in enumerate(opts))
+    embed.add_field(name="Options", value=desc, inline=False)
+    msg = await ctx.send(embed=embed)
+    for i in range(len(opts)):
+        try:
+            await msg.add_reaction(emojis[i])
+        except:
+            pass
+
+# --- Moderation Points Helpers ---
+async def _mod_cfg(guild_id: int) -> dict:
+    return await _cfg_get(guild_id, ["mod_message_point","mod_warn_point","mod_kick_point","mod_ban_point","mod_timeout_point","mod_promo_threshold"])
+
+async def add_mod_points(user_id: int, guild_id: int, points: int):
+    if points <= 0:
+        return
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR IGNORE INTO mod_stats (user_id, guild_id, messages, warns, bans, kicks, timeouts, points) VALUES (?, ?, 0, 0, 0, 0, 0, 0)', (user_id, guild_id))
+        await db.execute('UPDATE mod_stats SET points = points + ? WHERE user_id = ? AND guild_id = ?', (points, user_id, guild_id))
+        await db.commit()
+
+@bot.event
+async def on_command_completion(ctx: commands.Context):
+    try:
+        if not ctx.guild:
+            return
+        if ctx.guild.id != TEST_GUILD_ID:
+            return
+        name = ctx.command.qualified_name if ctx.command else ""
+        cfg = await _mod_cfg(ctx.guild.id)
+        if name in ("warn", "warning"):
+            await add_mod_points(ctx.author.id, ctx.guild.id, int(cfg.get("mod_warn_point", 5) or 5))
+        elif name in ("kick",):
+            await add_mod_points(ctx.author.id, ctx.guild.id, int(cfg.get("mod_kick_point", 10) or 10))
+        elif name in ("ban",):
+            await add_mod_points(ctx.author.id, ctx.guild.id, int(cfg.get("mod_ban_point", 15) or 15))
+        elif name in ("timeout","mute"):
+            await add_mod_points(ctx.author.id, ctx.guild.id, int(cfg.get("mod_timeout_point", 4) or 4))
+    except:
+        pass
+
+# --- Anti-raid & Backups ---
+JOIN_WINDOW = {}
+MESSAGE_WINDOW = {}
+
+def _now_sec():
+    return int(time.time())
+
+async def _ensure_quarantine_role(guild: discord.Guild) -> discord.Role | None:
+    role = discord.utils.get(guild.roles, name="Quarantine")
+    if role:
+        return role
+    try:
+        perms = discord.Permissions(send_messages=False, add_reactions=False, connect=False)
+        role = await guild.create_role(name="Quarantine", permissions=perms, reason="Empire Nexus anti-raid")
+        return role
+    except:
+        return None
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    try:
+        cfg = await _cfg_get(member.guild.id, ["raid_mode","anti_phish_enabled"])
+        # rate-based raid detection window
+        now = _now_sec()
+        win = JOIN_WINDOW.get(member.guild.id, [])
+        win = [t for t in win if now - t < 60]
+        win.append(now)
+        JOIN_WINDOW[member.guild.id] = win
+        # if high join rate => enable raid mode
+        if len(win) >= 10:
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (member.guild.id,))
+                await db.execute('UPDATE guild_config SET raid_mode = 1 WHERE guild_id = ?', (member.guild.id,))
+                await db.commit()
+        # quarantine very new accounts
+        acc_age_days = (discord.utils.utcnow() - member.created_at).days
+        if acc_age_days < 3:
+            role = await _ensure_quarantine_role(member.guild)
+            if role:
+                try:
+                    await member.add_roles(role, reason="Account too new (anti-raid)")
+                except:
+                    pass
+    except:
+        pass
+
+@bot.event
+async def on_message(message: discord.Message):
+    try:
+        if not message.guild or message.author.bot:
+            return
+        cfg = await _cfg_get(message.guild.id, ["raid_mode","anti_phish_enabled","mod_message_point"])
+        # in raid mode, restrict non-staff
+        if int(cfg.get("raid_mode", 0) or 0) == 1:
+            if not (message.author.guild_permissions.manage_messages or message.author.guild_permissions.kick_members):
+                try:
+                    await message.delete()
+                except:
+                    pass
+                return
+        # anti-phishing simple pattern
+        if int(cfg.get("anti_phish_enabled", 1) or 1) == 1:
+            content = message.content.lower()
+            if ("free nitro" in content or "discordgift" in content or "airdrop" in content) and ("http" in content or "www" in content):
+                try:
+                    await message.delete()
+                except:
+                    pass
+                try:
+                    await message.author.timeout(discord.utils.timedelta(minutes=10), reason="Phishing attempt")
+                except:
+                    pass
+        # flood detection per-user
+        now = _now_sec()
+        ukey = (message.guild.id, message.author.id)
+        arr = MESSAGE_WINDOW.get(ukey, [])
+        arr = [t for t in arr if now - t < 10]
+        arr.append(now)
+        MESSAGE_WINDOW[ukey] = arr
+        if len(arr) >= 8:
+            try:
+                await message.author.timeout(discord.utils.timedelta(minutes=15), reason="Message flood")
+            except:
+                pass
+        # mod points per message for staff
+        if message.author.guild_permissions.manage_messages:
+            pts = int(cfg.get("mod_message_point", 1) or 1)
+            await add_mod_points(message.author.id, message.guild.id, pts)
+    except:
+        pass
+
+# --- Auto-promotion background ---
+PROMO_LAST_TIER = {}
+PROMO_TASK_STARTED = False
+
+def _tier_index(roles_map, member: discord.Member) -> int:
+    order = [
+        roles_map.get("tier_trial_role_id"),
+        roles_map.get("tier_mod_role_id"),
+        roles_map.get("tier_head_mod_role_id"),
+        roles_map.get("tier_admin_role_id"),
+        roles_map.get("tier_head_admin_role_id"),
+    ]
+    has = {r.id for r in getattr(member, "roles", [])}
+    for i, rid in reversed(list(enumerate(order))):
+        if rid and rid in has:
+            return i
+    for i, rid in enumerate(order):
+        if rid and rid in has:
+            return i
+    return -1
+
+def _target_tier(points: int, thresholds: dict) -> int:
+    if points >= int(thresholds.get("threshold_admin_to_head_admin", 500) or 500):
+        return 4
+    if points >= int(thresholds.get("threshold_head_mod_to_admin", 250) or 250):
+        return 3
+    if points >= int(thresholds.get("threshold_mod_to_head_mod", 100) or 100):
+        return 2
+    if points >= int(thresholds.get("threshold_trial_to_mod", 10) or 10):
+        return 1
+    return 0
+
+async def _load_promo_config(db) -> dict:
+    cfg = {}
+    async with db.execute('SELECT * FROM promo_config WHERE guild_id = ?', (TEST_GUILD_ID,)) as c:
+        row = await c.fetchone()
+        if row:
+            for k in row.keys():
+                cfg[k] = row[k]
+    return cfg
+
+async def _save_audit(db, user_id: int, action: str, from_role_id: int | None, to_role_id: int | None, points: int, note: str):
+    now = _now_sec()
+    await db.execute('INSERT INTO promo_audit (guild_id, user_id, action, from_role_id, to_role_id, points_at_action, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                     (TEST_GUILD_ID, user_id, action, from_role_id or 0, to_role_id or 0, points, note, now))
+
+async def _promotion_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            guild = bot.get_guild(TEST_GUILD_ID)
+            if not guild:
+                await asyncio.sleep(30)
+                continue
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                cfg = await _load_promo_config(db)
+                if not cfg:
+                    await asyncio.sleep(60)
+                    continue
+                roles_map = {
+                    "tier_trial_role_id": int(cfg.get("tier_trial_role_id") or 0) or None,
+                    "tier_mod_role_id": int(cfg.get("tier_mod_role_id") or 0) or None,
+                    "tier_head_mod_role_id": int(cfg.get("tier_head_mod_role_id") or 0) or None,
+                    "tier_admin_role_id": int(cfg.get("tier_admin_role_id") or 0) or None,
+                    "tier_head_admin_role_id": int(cfg.get("tier_head_admin_role_id") or 0) or None,
+                }
+                thresholds = cfg
+                allow_demotions = int(cfg.get("allow_demotions", 1) or 1) == 1
+                check_interval = int(cfg.get("check_interval_sec", 60) or 60)
+                role_ids = [rid for rid in roles_map.values() if rid]
+                candidates = [m for m in guild.members if any(r.id in role_ids for r in getattr(m, "roles", []))]
+                for m in candidates:
+                    cur_tier = _tier_index(roles_map, m)
+                    if cur_tier < 0:
+                        continue
+                    async with db.execute('SELECT points FROM mod_stats WHERE user_id = ? AND guild_id = ?', (m.id, TEST_GUILD_ID)) as c:
+                        row = await c.fetchone()
+                        pts = int((row and row[0]) or 0)
+                    tgt = _target_tier(pts, thresholds)
+                    last_key = (TEST_GUILD_ID, m.id)
+                    PROMO_LAST_TIER[last_key] = PROMO_LAST_TIER.get(last_key, cur_tier)
+                    if tgt > cur_tier:
+                        to_role_id = [roles_map.get(k) for k in ["tier_trial_role_id","tier_mod_role_id","tier_head_mod_role_id","tier_admin_role_id","tier_head_admin_role_id"]][tgt]
+                        from_role_id = [roles_map.get(k) for k in ["tier_trial_role_id","tier_mod_role_id","tier_head_mod_role_id","tier_admin_role_id","tier_head_admin_role_id"]][cur_tier]
+                        to_role = guild.get_role(to_role_id) if to_role_id else None
+                        from_role = guild.get_role(from_role_id) if from_role_id else None
+                        try:
+                            if to_role:
+                                await m.add_roles(to_role, reason="Auto-promotion")
+                            if from_role and from_role in m.roles:
+                                await m.remove_roles(from_role, reason="Tier change")
+                            await _save_audit(db, m.id, "PROMOTE", from_role_id, to_role_id, pts, "")
+                            await db.commit()
+                            PROMO_LAST_TIER[last_key] = tgt
+                        except:
+                            pass
+                    elif allow_demotions and tgt < cur_tier:
+                        to_role_id = [roles_map.get(k) for k in ["tier_trial_role_id","tier_mod_role_id","tier_head_mod_role_id","tier_admin_role_id","tier_head_admin_role_id"]][tgt]
+                        from_role_id = [roles_map.get(k) for k in ["tier_trial_role_id","tier_mod_role_id","tier_head_mod_role_id","tier_admin_role_id","tier_head_admin_role_id"]][cur_tier]
+                        to_role = guild.get_role(to_role_id) if to_role_id else None
+                        from_role = guild.get_role(from_role_id) if from_role_id else None
+                        try:
+                            if to_role:
+                                await m.add_roles(to_role, reason="Auto-demotion")
+                            if from_role and from_role in m.roles:
+                                await m.remove_roles(from_role, reason="Tier change")
+                            await _save_audit(db, m.id, "DEMOTE", from_role_id, to_role_id, pts, "")
+                            await db.commit()
+                            PROMO_LAST_TIER[last_key] = tgt
+                        except:
+                            pass
+            await asyncio.sleep(check_interval if 'check_interval' in locals() else 60)
+        except:
+            await asyncio.sleep(60)
+
+@bot.event
+async def on_ready():
+    global PROMO_TASK_STARTED
+    if not PROMO_TASK_STARTED:
+        try:
+            asyncio.create_task(_promotion_loop())
+            PROMO_TASK_STARTED = True
+        except:
+            PROMO_TASK_STARTED = True
+
+@bot.hybrid_group(name="alliance", description="Alliance management")
+async def alliance(ctx: commands.Context):
+    if ctx.interaction:
+        await ctx.interaction.response.defer(ephemeral=False)
+    else:
+        await ctx.send("Use a subcommand.")
+    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
+    if cfg.get("alliances_enabled", 1) == 0:
+        await ctx.send("⚠️ Alliances are disabled for this server.")
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        await ctx.send("This feature is available in the test server only.")
+
+@alliance.command(name="create", description="Create a new alliance")
+async def alliance_create(ctx: commands.Context, name: str):
+    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
+    if cfg.get("alliances_enabled", 1) == 0:
+        return await ctx.send("⚠️ Alliances are disabled for this server.")
+    name = name.strip()
+    async with aiosqlite.connect(DB_FILE) as db:
+        try:
+            await db.execute('INSERT INTO alliances (guild_id, name, owner_id) VALUES (?, ?, ?)', (ctx.guild.id, name, ctx.author.id))
+            await db.commit()
+        except:
+            return await ctx.send("Alliance name taken.")
+        async with db.execute('SELECT alliance_id FROM alliances WHERE guild_id = ? AND name = ?', (ctx.guild.id, name)) as c:
+            row = await c.fetchone()
+        aid = row[0]
+        await db.execute('INSERT OR REPLACE INTO alliance_members (alliance_id, user_id, role) VALUES (?, ?, ?)', (aid, ctx.author.id, "owner"))
+        await db.commit()
+    await ctx.send(f"🏰 Alliance **{name}** created.")
+
+@alliance.command(name="join", description="Join an alliance")
+async def alliance_join(ctx: commands.Context, name: str):
+    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
+    if cfg.get("alliances_enabled", 1) == 0:
+        return await ctx.send("⚠️ Alliances are disabled for this server.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT alliance_id FROM alliances WHERE guild_id = ? AND name = ?', (ctx.guild.id, name)) as c:
+            row = await c.fetchone()
+        if not row:
+            return await ctx.send("Alliance not found.")
+        aid = row[0]
+        await db.execute('INSERT OR IGNORE INTO alliance_members (alliance_id, user_id, role) VALUES (?, ?, ?)', (aid, ctx.author.id, "member"))
+        await db.commit()
+    await ctx.send(f"🤝 You joined **{name}**.")
+
+@alliance.command(name="info", description="View alliance info")
+async def alliance_info(ctx: commands.Context, name: str):
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        return await ctx.send("This feature is available in the test server only.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT alliance_id, bank, owner_id FROM alliances WHERE guild_id = ? AND name = ?', (ctx.guild.id, name)) as c:
+            row = await c.fetchone()
+        if not row:
+            return await ctx.send("Alliance not found.")
+        aid, bank, owner_id = row
+        async with db.execute('SELECT user_id, role FROM alliance_members WHERE alliance_id = ?', (aid,)) as c2:
+            members = await c2.fetchall()
+    owner = ctx.guild.get_member(owner_id)
+    owner_name = owner.display_name if owner else f"User({owner_id})"
+    mtext = "\n".join(f"- {ctx.guild.get_member(uid).mention if ctx.guild.get_member(uid) else uid} ({role})" for uid, role in members) or "No members."
+    embed = discord.Embed(title=f"🏰 Alliance: {name}", color=discord.Color.gold(), timestamp=discord.utils.utcnow())
+    embed.add_field(name="Owner", value=owner_name)
+    embed.add_field(name="Bank", value=f"{bank:,} coins")
+    embed.add_field(name="Members", value=mtext, inline=False)
+    await ctx.send(embed=embed)
+
+@alliance.command(name="deposit", description="Deposit coins into alliance bank")
+async def alliance_deposit(ctx: commands.Context, name: str, amount: int):
+    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
+    if cfg.get("alliances_enabled", 1) == 0:
+        return await ctx.send("⚠️ Alliances are disabled for this server.")
+    if amount <= 0:
+        return await ctx.send("Enter a positive amount.")
+    data = await get_global_money(ctx.author.id)
+    if data['balance'] < amount:
+        return await ctx.send("You don't have enough coins.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT alliance_id FROM alliances WHERE guild_id = ? AND name = ?', (ctx.guild.id, name)) as c:
+            row = await c.fetchone()
+        if not row:
+            return await ctx.send("Alliance not found.")
+        aid = row[0]
+        await db.execute('UPDATE alliances SET bank = bank + ? WHERE alliance_id = ?', (amount, aid))
+        await db.commit()
+    await update_global_balance(ctx.author.id, -amount)
+    await ctx.send(f"🏦 Deposited **{amount:,}** into **{name}**.")
+
+@alliance.command(name="withdraw", description="Owner withdraws coins from alliance bank")
+async def alliance_withdraw(ctx: commands.Context, name: str, amount: int):
+    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
+    if cfg.get("alliances_enabled", 1) == 0:
+        return await ctx.send("⚠️ Alliances are disabled for this server.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT alliance_id, bank, owner_id FROM alliances WHERE guild_id = ? AND name = ?', (ctx.guild.id, name)) as c:
+            row = await c.fetchone()
+        if not row:
+            return await ctx.send("Alliance not found.")
+        aid, bank, owner_id = row
+        if ctx.author.id != owner_id:
+            return await ctx.send("Only the owner can withdraw.")
+        if amount <= 0 or amount > bank:
+            return await ctx.send("Invalid amount.")
+        await db.execute('UPDATE alliances SET bank = bank - ? WHERE alliance_id = ?', (amount, aid))
+        await db.commit()
+    await update_global_balance(ctx.author.id, amount)
+    await ctx.send(f"🏦 Withdrew **{amount:,}** from **{name}**.")
+
+@bot.hybrid_group(name="market", description="Player marketplace")
+async def market(ctx: commands.Context):
+    if ctx.interaction:
+        await ctx.interaction.response.defer(ephemeral=False)
+    else:
+        await ctx.send("Use a subcommand.")
+
+@market.command(name="list", description="List an item for sale")
+async def market_list(ctx: commands.Context, item: str, price: int, quantity: int = 1):
+    item = item.strip()
+    if not item or price <= 0 or quantity <= 0:
+        return await ctx.send("Provide a valid item, positive price, and quantity.")
+    cfg = await _cfg_get(ctx.guild.id, ["marketplace_enabled"])
+    if cfg.get("marketplace_enabled", 1) == 0:
+        return await ctx.send("🛒 Marketplace is disabled for this server.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT INTO market_listings (guild_id, seller_id, item, price, quantity, created_at) VALUES (?, ?, ?, ?, ?, ?)', (ctx.guild.id, ctx.author.id, item, price, quantity, int(time.time())))
+        await db.commit()
+    await ctx.send(f"🛒 Listed **{item}** for **{price:,}** (x{quantity}).")
+
+@market.command(name="view", description="View current listings")
+async def market_view(ctx: commands.Context):
+    cfg = await _cfg_get(ctx.guild.id, ["marketplace_enabled"])
+    if cfg.get("marketplace_enabled", 1) == 0:
+        return await ctx.send("🛒 Marketplace is disabled for this server.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT listing_id, seller_id, item, price, quantity FROM market_listings WHERE guild_id = ? ORDER BY created_at DESC LIMIT 10', (ctx.guild.id,)) as c:
+            rows = await c.fetchall()
+    if not rows:
+        return await ctx.send("No listings.")
+    lines = []
+    for lid, sid, item, price, qty in rows:
+        seller = ctx.guild.get_member(sid)
+        sname = seller.display_name if seller else f"User({sid})"
+        lines.append(f"#{lid} • {item} • {price:,} • x{qty} • by {sname}")
+    embed = discord.Embed(title="🛒 Marketplace Listings", description="\n".join(lines), color=discord.Color.green(), timestamp=discord.utils.utcnow())
+    await ctx.send(embed=embed)
+
+@market.command(name="buy", description="Buy from a listing")
+async def market_buy(ctx: commands.Context, listing_id: int, quantity: int = 1):
+    if quantity <= 0:
+        return await ctx.send("Quantity must be positive.")
+    cfg = await _cfg_get(ctx.guild.id, ["marketplace_enabled","marketplace_tax"])
+    if cfg.get("marketplace_enabled", 1) == 0:
+        return await ctx.send("🛒 Marketplace is disabled for this server.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT seller_id, item, price, quantity FROM market_listings WHERE listing_id = ? AND guild_id = ?', (listing_id, ctx.guild.id)) as c:
+            row = await c.fetchone()
+        if not row:
+            return await ctx.send("Listing not found.")
+        seller_id, item, price, avail_qty = row
+        if ctx.author.id == seller_id:
+            return await ctx.send("You cannot buy your own listing.")
+        if quantity > avail_qty:
+            return await ctx.send("Not enough quantity available.")
+        total = price * quantity
+        buyer = await get_global_money(ctx.author.id)
+        if buyer['balance'] < total:
+            return await ctx.send("You don't have enough coins.")
+        tax_pct = int(cfg.get("marketplace_tax", 0) or 0)
+        tax_amt = int(total * (tax_pct / 100.0)) if tax_pct > 0 else 0
+        seller_take = total - tax_amt
+        await update_global_balance(ctx.author.id, -total)
+        await update_global_balance(seller_id, seller_take)
+        new_qty = avail_qty - quantity
+        if new_qty == 0:
+            await db.execute('DELETE FROM market_listings WHERE listing_id = ?', (listing_id,))
+        else:
+            await db.execute('UPDATE market_listings SET quantity = ? WHERE listing_id = ?', (new_qty, listing_id))
+        await db.commit()
+    msg = f"✅ Bought **{quantity}x {item}** for **{total:,}**."
+    if tax_amt > 0:
+        msg += f" Tax: **{tax_amt:,}**."
+    await ctx.send(msg)
+
+@bot.hybrid_group(name="vassal", description="Vassal sponsorships")
+async def vassal(ctx: commands.Context):
+    if ctx.interaction:
+        await ctx.interaction.response.defer(ephemeral=False)
+    else:
+        await ctx.send("Use a subcommand.")
+    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
+    if cfg.get("alliances_enabled", 1) == 0:
+        await ctx.send("⚠️ Vassals are disabled for this server.")
+
+@vassal.command(name="sponsor", description="Sponsor a vassal")
+@app_commands.describe(member="User to sponsor", percent="Contribution percent (max 15)")
+async def vassal_sponsor(ctx: commands.Context, member: discord.Member, percent: int = 5):
+    cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled","vassal_max_percent"])
+    if cfg.get("alliances_enabled", 1) == 0:
+        return await ctx.send("⚠️ Vassals are disabled for this server.")
+    maxp = int(cfg.get("vassal_max_percent", 15) or 15)
+    if percent < 1 or percent > maxp:
+        return await ctx.send(f"Percent must be between 1 and {maxp}.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR REPLACE INTO vassals (lord_id, vassal_id, guild_id, percent) VALUES (?, ?, ?, ?)', (ctx.author.id, member.id, ctx.guild.id, percent))
+        await db.commit()
+    await ctx.send(f"🤝 {member.mention} is now your vassal at {percent}% contribution.")
+
+@vassal.command(name="remove", description="Remove vassal sponsorship")
+async def vassal_remove(ctx: commands.Context, member: discord.Member):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('DELETE FROM vassals WHERE lord_id = ? AND vassal_id = ? AND guild_id = ?', (ctx.author.id, member.id, ctx.guild.id))
+        await db.commit()
+    await ctx.send("🔚 Sponsorship removed.")
 
 @bot.hybrid_command(name="ping", description="Check the bot's latency")
 async def ping(ctx: commands.Context):
@@ -4185,4 +5073,5 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
 
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
