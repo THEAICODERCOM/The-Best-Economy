@@ -597,6 +597,10 @@ async def migrate_db():
         except:
             pass
         try:
+            await db.execute('ALTER TABLE guild_config ADD COLUMN boss_channel_id INTEGER')
+        except:
+            pass
+        try:
             await db.execute('''CREATE TABLE IF NOT EXISTS auto_sync_config (
                 id INTEGER PRIMARY KEY CHECK (id=1),
                 enabled INTEGER DEFAULT 0,
@@ -752,6 +756,21 @@ async def _get_boss_interval(guild_id: int) -> int:
             row = await c.fetchone()
             return int(row[0]) if row and row[0] else 3600
 
+async def _get_boss_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT boss_channel_id FROM guild_config WHERE guild_id = ?', (guild.id,)) as c:
+                row = await c.fetchone()
+        if row and row[0]:
+            ch = guild.get_channel(int(row[0]))
+            if ch:
+                me = guild.me or guild.get_member(bot.user.id)
+                if me and ch.permissions_for(me).send_messages:
+                    return ch
+    except:
+        pass
+    return None
+
 def _pick_text_channel(guild: discord.Guild) -> discord.TextChannel | None:
     for ch in getattr(guild, "text_channels", []):
         me = guild.me or guild.get_member(bot.user.id)
@@ -772,7 +791,7 @@ async def _spawn_boss(guild: discord.Guild):
                          (guild.id, boss["name"], boss["difficulty"], boss["hp"], boss["hp"], int(time.time())))
         await db.execute('DELETE FROM boss_damage WHERE guild_id = ?', (guild.id,))
         await db.commit()
-    ch = _pick_text_channel(guild)
+    ch = await _get_boss_channel(guild) or _pick_text_channel(guild)
     if ch:
         embed = discord.Embed(title=f"👹 Boss Spawned — {boss['name']}", color=discord.Color.red(), timestamp=discord.utils.utcnow())
         embed.add_field(name="Difficulty", value=boss["difficulty"], inline=True)
@@ -4828,9 +4847,13 @@ async def auto_synccleanup(ctx: commands.Context, mode: str = "on"):
         await db.execute('INSERT OR REPLACE INTO auto_sync_config (id, enabled, last_run) VALUES (1, ?, COALESCE((SELECT last_run FROM auto_sync_config WHERE id=1), 0))', (enabled,))
         await db.commit()
     await ctx.send(f"⚙️ Auto sync cleanup is now {'ENABLED' if enabled else 'DISABLED'}.")
-@bot.hybrid_command(name="reportabuse", description="Report staff abuse to the moderators")
 @bot.hybrid_command(name="currentboss", description="View current boss status")
 async def currentboss(ctx: commands.Context):
+    if ctx.interaction:
+        try:
+            await ctx.interaction.response.defer(ephemeral=False)
+        except:
+            pass
     boss = await _get_boss(ctx.guild.id)
     if not boss or not boss["is_active"]:
         return await ctx.send("No active boss. Please wait for the next spawn.")
@@ -4842,6 +4865,11 @@ async def currentboss(ctx: commands.Context):
 @bot.hybrid_command(name="attack", description="Attack the boss by spending coins")
 @app_commands.describe(amount="Coins to spend as damage")
 async def attack(ctx: commands.Context, amount: int):
+    if ctx.interaction:
+        try:
+            await ctx.interaction.response.defer(ephemeral=False)
+        except:
+            pass
     if amount <= 0:
         return await ctx.send("Enter a positive amount.")
     boss = await _get_boss(ctx.guild.id)
@@ -4864,6 +4892,11 @@ async def attack(ctx: commands.Context, amount: int):
 @bot.hybrid_command(name="itemuse", description="Use a boss loot item for this fight")
 @app_commands.describe(item="Item ID (e.g., epic_sword, mana_elixir)")
 async def itemuse(ctx: commands.Context, item: str):
+    if ctx.interaction:
+        try:
+            await ctx.interaction.response.defer(ephemeral=False)
+        except:
+            pass
     iid = str(item).lower().strip()
     if iid not in LOOT_ITEMS:
         return await ctx.send("Invalid item ID.")
@@ -4879,11 +4912,46 @@ async def itemuse(ctx: commands.Context, item: str):
 @bot.hybrid_command(name="cd", description="Admin: Set boss spawn interval in minutes")
 @commands.has_permissions(administrator=True)
 async def cd(ctx: commands.Context, minutes: int):
+    if ctx.interaction:
+        try:
+            await ctx.interaction.response.defer(ephemeral=False)
+        except:
+            pass
     m = max(1, int(minutes))
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('INSERT OR REPLACE INTO guild_config (guild_id, boss_spawn_interval) VALUES (?, ?)', (ctx.guild.id, m * 60))
         await db.commit()
     await ctx.send(f"⏱️ Boss spawn interval set to **{m} minutes**.")
+
+@bot.hybrid_command(name="bossinterval", description="Admin: Set boss spawn interval in minutes")
+@commands.has_permissions(administrator=True)
+async def bossinterval(ctx: commands.Context, minutes: int):
+    if ctx.interaction:
+        try:
+            await ctx.interaction.response.defer(ephemeral=False)
+        except:
+            pass
+    m = max(1, int(minutes))
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR REPLACE INTO guild_config (guild_id, boss_spawn_interval) VALUES (?, ?)', (ctx.guild.id, m * 60))
+        await db.commit()
+    await ctx.send(f"⏱️ Boss spawn interval set to **{m} minutes**.")
+
+@bot.hybrid_command(name="setbosschannel", description="Admin: Set the channel for boss announcements")
+@commands.has_permissions(administrator=True)
+@app_commands.describe(channel="Channel to post boss spawns and status")
+async def setbosschannel(ctx: commands.Context, channel: discord.TextChannel):
+    if ctx.interaction:
+        try:
+            await ctx.interaction.response.defer(ephemeral=False)
+        except:
+            pass
+    if not isinstance(channel, discord.TextChannel):
+        return await ctx.send("Please select a text channel.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR REPLACE INTO guild_config (guild_id, boss_channel_id) VALUES (?, ?)', (ctx.guild.id, channel.id))
+        await db.commit()
+    await ctx.send(f"📣 Boss announcements will be posted in {channel.mention}.")
 @bot.hybrid_command(name="reportabuse", description="Report staff abuse to the moderators")
 async def report_abuse(ctx: commands.Context, accused: discord.Member, reason: str, evidence: str = None):
     now = int(time.time())
@@ -5979,4 +6047,5 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
