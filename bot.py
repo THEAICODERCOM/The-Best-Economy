@@ -46,6 +46,8 @@ SUPPORT_SERVER_INVITE = "BkCxVgJa"
 SUPPORT_GUILD_ID = None
 BOT_OWNERS = [1324354578338025533]
 INSTANCE_ID = None
+LOCK_DIR = os.path.dirname(os.path.abspath(__file__))
+FILE_LOCK_PATH = os.path.join(LOCK_DIR, ".empire_instance.lock")
 
 # Default Assets
 DEFAULT_ASSETS = {
@@ -504,6 +506,26 @@ async def migrate_db():
             )''')
         except:
             pass
+        try:
+            await db.execute('''CREATE TABLE IF NOT EXISTS raid_state (
+                guild_id INTEGER PRIMARY KEY,
+                started_at INTEGER,
+                duration_sec INTEGER,
+                restore_sec INTEGER,
+                lock_active INTEGER DEFAULT 0,
+                channel_overwrites_json TEXT DEFAULT '{}',
+                timeouts_json TEXT DEFAULT '[]'
+            )''')
+        except:
+            pass
+        try:
+            await db.execute('''CREATE TABLE IF NOT EXISTS process_lock (
+                id INTEGER PRIMARY KEY CHECK (id=1),
+                holder TEXT,
+                expires INTEGER
+            )''')
+        except:
+            pass
         await db.commit()
 
 @tasks.loop(seconds=60)
@@ -513,7 +535,13 @@ async def instance_heartbeat_task():
     try:
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute('UPDATE bot_instances SET updated_at = ? WHERE inst_id = ?', (int(time.time()), INSTANCE_ID))
+            await db.execute('UPDATE process_lock SET expires = ? WHERE id = 1 AND holder = ?', (int(time.time()) + 120, INSTANCE_ID))
             await db.commit()
+    except:
+        pass
+    try:
+        if os.path.exists(FILE_LOCK_PATH):
+            os.utime(FILE_LOCK_PATH, None)
     except:
         pass
 
@@ -530,15 +558,50 @@ async def ensure_single_instance():
                 hostname TEXT
             )''')
             await db.execute('DELETE FROM bot_instances WHERE updated_at < ?', (now - 3600,))
-            async with db.execute('SELECT inst_id FROM bot_instances WHERE updated_at >= ? AND inst_id != ?', (now - 120, INSTANCE_ID)) as c:
-                existing = await c.fetchone()
-            if existing:
+            # DB singleton lock using UPSERT only if expired
+            await db.execute('''CREATE TABLE IF NOT EXISTS process_lock (
+                id INTEGER PRIMARY KEY CHECK (id=1),
+                holder TEXT,
+                expires INTEGER
+            )''')
+            await db.execute('''INSERT INTO process_lock (id, holder, expires) VALUES (1, ?, ?)
+                                ON CONFLICT(id) DO UPDATE SET holder=excluded.holder, expires=excluded.expires
+                                WHERE process_lock.expires < ?''', (INSTANCE_ID, now + 120, now))
+            async with db.execute('SELECT holder, expires FROM process_lock WHERE id = 1') as c:
+                row = await c.fetchone()
+            if not row:
+                return True
+            holder, expires = row
+            if holder != INSTANCE_ID and (expires or 0) >= now:
                 return False
             await db.execute('INSERT OR REPLACE INTO bot_instances (inst_id, updated_at, hostname) VALUES (?, ?, ?)', (INSTANCE_ID, now, os.uname().nodename))
             await db.commit()
         return True
     except:
         return True
+def _acquire_file_lock():
+    try:
+        if os.path.exists(FILE_LOCK_PATH):
+            mtime = os.path.getmtime(FILE_LOCK_PATH)
+            if time.time() - mtime > 180:
+                try:
+                    os.remove(FILE_LOCK_PATH)
+                except:
+                    pass
+        fd = os.open(FILE_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w") as f:
+            f.write(f"{os.uname().nodename}:{os.getpid()}:{INSTANCE_ID}:{int(time.time())}\n")
+        return True
+    except FileExistsError:
+        return False
+    except:
+        return True
+def _release_file_lock():
+    try:
+        if os.path.exists(FILE_LOCK_PATH):
+            os.remove(FILE_LOCK_PATH)
+    except:
+        pass
 
 # Bot setup
 intents = discord.Intents.default()
@@ -2409,6 +2472,12 @@ async def on_ready():
     await migrate_db()
     ok = await ensure_single_instance()
     if not ok:
+        try:
+            await bot.close()
+        except:
+            pass
+        return
+    if not _acquire_file_lock():
         try:
             await bot.close()
         except:
@@ -4547,6 +4616,32 @@ async def servers_owner(ctx: commands.Context):
     except:
         await ctx.send("Could not DM you. Please open DMs.")
 
+@bot.hybrid_command(name="instances", description="Owner-only: list known running instances")
+@is_authorized_owner()
+async def instances_owner(ctx: commands.Context):
+    now = int(time.time())
+    rows = []
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT inst_id, updated_at, hostname FROM bot_instances ORDER BY updated_at DESC') as c:
+                rows = await c.fetchall()
+    except:
+        rows = []
+    lines = []
+    for inst_id, updated_at, hostname in rows:
+        age = now - (updated_at or 0)
+        lines.append(f"{hostname or 'unknown'} • {inst_id} • last heartbeat {age}s ago")
+    try:
+        fl = "present" if os.path.exists(FILE_LOCK_PATH) else "absent"
+        lines.append(f"file_lock: {fl}")
+    except:
+        pass
+    msg = "Instances:\n" + ("\n".join(lines) if lines else "None")
+    try:
+        await ctx.author.send(msg)
+        await ctx.send("Sent you a DM with instance status.")
+    except:
+        await ctx.send("Could not DM you. Please open DMs.")
 @bot.hybrid_command(name="analytics", description="Owner-only: DM server join counts")
 @is_authorized_owner()
 async def analytics(ctx: commands.Context):
@@ -4580,10 +4675,10 @@ async def modsystem(ctx: commands.Context):
         return await ctx.send("This feature is available in the test server only.")
     role_defs = [
         ("Head Admin", discord.Permissions(administrator=True)),
-        ("Admin", discord.Permissions(manage_guild=True, ban_members=True, kick_members=True, manage_messages=True)),
-        ("Head Mod", discord.Permissions(manage_messages=True, kick_members=True)),
-        ("Mod", discord.Permissions(manage_messages=True)),
-        ("Trial Mod", discord.Permissions(manage_messages=True))
+        ("Admin", discord.Permissions(manage_guild=True, manage_channels=True, manage_roles=True, ban_members=True, kick_members=True, manage_messages=True, moderate_members=True, manage_webhooks=True, manage_threads=True)),
+        ("Head Mod", discord.Permissions(manage_messages=True, kick_members=True, ban_members=True, moderate_members=True, manage_threads=True)),
+        ("Mod", discord.Permissions(manage_messages=True, kick_members=True, moderate_members=True)),
+        ("Trial Mod", discord.Permissions(manage_messages=True, moderate_members=True))
     ]
     created = []
     for name, perms in role_defs:
@@ -5373,5 +5468,164 @@ async def remove_owner_cmd(ctx: commands.Context, member: discord.Member):
         await db.execute('DELETE FROM owner_access WHERE guild_id = ? AND user_id = ?', (ctx.guild.id, member.id))
         await db.commit()
     await ctx.send(f"✅ {member.mention} can no longer use owner-only commands.")
+def _parse_duration(s: str) -> int:
+    s = str(s).strip().lower()
+    try:
+        if s.endswith("m"):
+            return int(s[:-1]) * 60
+        if s.endswith("h"):
+            return int(s[:-1]) * 3600
+        if s.endswith("d"):
+            return int(s[:-1]) * 86400
+        return int(s) * 60
+    except:
+        return 0
+@bot.hybrid_group(name="raided", description="Raid response")
+@commands.has_permissions(administrator=True)
+async def raided(ctx: commands.Context):
+    if ctx.interaction:
+        await ctx.interaction.response.defer(ephemeral=False)
+    else:
+        await ctx.send("Use a subcommand.")
+
+@raided.command(name="start", description="Start raid lockdown, purge, timeout, and ban spammers")
+async def raided_start(ctx: commands.Context, duration: str, restoretime: str):
+    if not ctx.guild:
+        return
+    dur = _parse_duration(duration)
+    rst = _parse_duration(restoretime)
+    if dur <= 0 or rst <= 0:
+        return await ctx.send("Enter valid duration and restoretime like 30m and 1h.")
+    threshold_dt = datetime.datetime.utcnow() - datetime.timedelta(seconds=rst)
+    deleted_total = 0
+    spam_counts = {}
+    try:
+        invites = await ctx.guild.invites()
+        for inv in invites:
+            try:
+                await inv.delete()
+            except:
+                pass
+    except:
+        pass
+    try:
+        dr = ctx.guild.default_role
+        perms = dr.permissions
+        perms.update(create_instant_invite=False)
+        await dr.edit(permissions=perms)
+    except:
+        pass
+    snapshot = {}
+    try:
+        for ch in list(ctx.guild.text_channels) + list(ctx.guild.voice_channels):
+            try:
+                ov = ch.overwrites_for(ctx.guild.default_role)
+                snapshot[str(ch.id)] = {
+                    "view_channel": ov.view_channel,
+                    "send_messages": getattr(ov, "send_messages", None),
+                    "connect": getattr(ov, "connect", None)
+                }
+                await ch.set_permissions(ctx.guild.default_role, view_channel=False, send_messages=False, connect=False)
+            except:
+                pass
+    except:
+        pass
+    timeout_list = []
+    until = discord.utils.utcnow() + datetime.timedelta(seconds=dur)
+    try:
+        for m in ctx.guild.members:
+            if not m.bot:
+                try:
+                    await m.timeout(until, reason="Raid lockdown")
+                    timeout_list.append(m.id)
+                except:
+                    pass
+    except:
+        pass
+    try:
+        for ch in ctx.guild.text_channels:
+            try:
+                msgs = await ch.purge(after=threshold_dt, bulk=True)
+                for msg in msgs or []:
+                    if not getattr(msg.author, "bot", False):
+                        spam_counts[msg.author.id] = spam_counts.get(msg.author.id, 0) + 1
+                deleted_total += len(msgs or [])
+            except:
+                pass
+    except:
+        pass
+    try:
+        for uid, cnt in spam_counts.items():
+            if cnt >= 10:
+                try:
+                    u = ctx.guild.get_member(uid)
+                    if u:
+                        await ctx.guild.ban(u, reason="Spam during raid window", delete_message_days=1)
+                except:
+                    pass
+    except:
+        pass
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('INSERT OR REPLACE INTO raid_state (guild_id, started_at, duration_sec, restore_sec, lock_active, channel_overwrites_json, timeouts_json) VALUES (?, ?, ?, ?, ?, ?, ?)', 
+                             (ctx.guild.id, int(time.time()), dur, rst, 1, json.dumps(snapshot), json.dumps(timeout_list)))
+            await db.commit()
+    except:
+        pass
+    await ctx.send(f"✅ Raid started. Deleted ~{deleted_total} messages, locked channels, applied timeouts, and banned spammers.")
+
+@raided.command(name="stop", description="Stop raid lockdown and restore channel access")
+async def raided_stop(ctx: commands.Context):
+    if not ctx.guild:
+        return
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT channel_overwrites_json, timeouts_json FROM raid_state WHERE guild_id = ?', (ctx.guild.id,)) as c:
+                row = await c.fetchone()
+            if not row:
+                return await ctx.send("No raid state found.")
+            snapshot = json.loads(row[0] or "{}")
+            timeout_list = json.loads(row[1] or "[]")
+    except:
+        snapshot = {}
+        timeout_list = []
+    try:
+        dr = ctx.guild.default_role
+        perms = dr.permissions
+        perms.update(create_instant_invite=True)
+        await dr.edit(permissions=perms)
+    except:
+        pass
+    try:
+        for ch in list(ctx.guild.text_channels) + list(ctx.guild.voice_channels):
+            data = snapshot.get(str(ch.id))
+            if data is not None:
+                try:
+                    await ch.set_permissions(ctx.guild.default_role, 
+                                             view_channel=data.get("view_channel"), 
+                                             send_messages=data.get("send_messages"), 
+                                             connect=data.get("connect"))
+                except:
+                    pass
+    except:
+        pass
+    try:
+        for uid in timeout_list:
+            m = ctx.guild.get_member(uid)
+            if m:
+                try:
+                    await m.timeout(None, reason="Raid stop")
+                except:
+                    pass
+    except:
+        pass
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('UPDATE raid_state SET lock_active = 0 WHERE guild_id = ?', (ctx.guild.id,))
+            await db.commit()
+    except:
+        pass
+    await ctx.send("✅ Raid stopped. Restored channel access and lifted timeouts.")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
