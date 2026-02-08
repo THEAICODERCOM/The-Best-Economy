@@ -1207,7 +1207,8 @@ def welcome_dashboard(guild_id):
                             }};
                             for (const k in sample) str = str.replaceAll(k, sample[k]);
                             try {{
-                                str = str.replace(/#([A-Za-z0-9_\\-]+)/g, function(m, p) {{
+                                // Allow optional spaces after '#' to mimic Discord typing
+                                str = str.replace(/#\\s*([A-Za-z0-9_\\-]+)/g, function(m, p) {{
                                     const c = channelsData.find(x => x.name === p);
                                     return c ? '<span class=\"mention-chip\"># ' + p + '</span>' : m;
                                 }});
@@ -1290,7 +1291,8 @@ def welcome_dashboard(guild_id):
                             if (type === null) return null;
                             const end = pos;
                             const raw = val.slice(start, end);
-                            const name = raw.replace(/^#/, '').replace(/^:/,'').replace(/:$/,'');
+                            // Trim leading space after '#' and any trailing ':' while typing emojis
+                            const name = raw.replace(/^#\\s*/, '').replace(/^:/,'').replace(/:$/,'').trim();
                             return {{ type, name }};
                         }}
                         function attachSuggest(field, containerId) {{
@@ -1298,13 +1300,15 @@ def welcome_dashboard(guild_id):
                             let currentList = [], currentType = null, selected = 0;
                             function updateList() {{
                                 const tok = caretToken(el);
-                                if (!tok || !tok.name) {{ document.getElementById(containerId).innerHTML=''; currentList=[]; return; }}
+                                if (!tok) {{ document.getElementById(containerId).innerHTML=''; currentList=[]; return; }}
                                 currentType = tok.type;
                                 if (tok.type === 'channel') {{
-                                    currentList = channelsData.filter(x => x.name.toLowerCase().startsWith(tok.name.toLowerCase()));
+                                    const q = (tok.name || '').toLowerCase();
+                                    currentList = (q ? channelsData.filter(x => x.name.toLowerCase().startsWith(q)) : channelsData.slice(0, 12));
                                     showSuggest(containerId, currentList, 'channel', function(name) {{ insertVar(field, '#' + name); }});
                                 }} else {{
-                                    currentList = emojisData.filter(x => x.name.toLowerCase().startsWith(tok.name.toLowerCase()));
+                                    const q = (tok.name || '').toLowerCase();
+                                    currentList = (q ? emojisData.filter(x => x.name.toLowerCase().startsWith(q)) : emojisData.slice(0, 12));
                                     showSuggest(containerId, currentList, 'emoji', function(name) {{ insertVar(field, ':' + name + ':'); }});
                                 }}
                                 selected = 0;
@@ -1498,6 +1502,12 @@ def logging_dashboard(guild_id):
         </body>
     </html>
     """
+
+ 
+
+ 
+
+ 
 
 @app.route('/dashboard/<int:guild_id>/custom-commands')
 def custom_commands_dashboard(guild_id):
@@ -1902,14 +1912,3 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
-
-
-
-
-
-
-
-
-
-
-
