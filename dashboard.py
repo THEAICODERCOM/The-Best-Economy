@@ -1063,7 +1063,19 @@ def welcome_dashboard(guild_id):
 
     return f"""
     <html>
-        <head><title>Welcome & Farewell | {guild_id}</title>{STYLE}</head>
+        <head><title>Welcome & Farewell | {guild_id}</title>{STYLE}
+            <style>
+                .embed {{ background:#0b1220; border-radius:8px; padding:12px; position:relative; }}
+                .embed::before {{ content:''; position:absolute; left:0; top:0; bottom:0; width:4px; background:var(--embed-color,#00d2ff); border-radius:8px 0 0 8px; }}
+                .embed-title {{ font-weight:700; margin-bottom:6px; color:#e5e7eb; }}
+                .embed-desc {{ white-space:pre-wrap; color:#cbd5e1; }}
+                .embed-footer {{ margin-top:8px; font-size:12px; color:#9ca3af; }}
+                .mention-chip {{ display:inline-block; padding:2px 8px; border-radius:6px; background:#2f3136; color:#b9bbbe; border:1px solid #5865F2; }}
+                .emoji-img {{ height:1em; width:1em; vertical-align:-0.15em; }}
+                .embed-thumb {{ position:absolute; right:12px; top:12px; width:40px; height:40px; border-radius:50%; background:#111827; overflow:hidden; }}
+                .embed-thumb img {{ width:40px; height:40px; object-fit:cover; }}
+            </style>
+        </head>
         <body>
             <div class="sidebar">
                 <div class="sidebar-header"><a href="/" class="logo">Empire Nexus</a></div>
@@ -1197,14 +1209,14 @@ def welcome_dashboard(guild_id):
                             try {{
                                 str = str.replace(/#([A-Za-z0-9_\\-]+)/g, function(m, p) {{
                                     const c = channelsData.find(x => x.name === p);
-                                    return c ? '<span style=\"background:#2f3136;color:#00d2ff;padding:0 4px;border-radius:3px;\">#' + p + '</span>' : m;
+                                    return c ? '<span class=\"mention-chip\"># ' + p + '</span>' : m;
                                 }});
                                 str = str.replace(/:([A-Za-z0-9_\\-]+):/g, function(m, p) {{
                                     const e = emojisData.find(x => x.name === p);
                                     if (!e) return m;
                                     const ext = e.animated ? 'gif' : 'png';
                                     const url = 'https://cdn.discordapp.com/emojis/' + e.id + '.' + ext + '?size=24&quality=lossless';
-                                    return '<img src=\"' + url + '\" alt=\":' + p + ':\" style=\"height:1em;width:1em;vertical-align:-0.15em;\" />';
+                                    return '<img class=\"emoji-img\" src=\"' + url + '\" alt=\":' + p + ':\" />';
                                 }});
                             }} catch(e) {{}}
                             return str;
@@ -1214,7 +1226,9 @@ def welcome_dashboard(guild_id):
                             const desc = document.querySelector('textarea[name=\"' + prefix + '_description\"]').value;
                             const color = document.querySelector('input[name=\"' + prefix + '_color\"]').value;
                             const footer = document.querySelector('input[name=\"' + prefix + '_footer\"]').value;
-                            const html = '<div class=\"embed\" style=\"border-left:4px solid ' + color + ';\">' +
+                            const thumb = '<div class=\"embed-thumb\"><img src=\"' + substitute('{{avatar}}') + '\" /></div>';
+                            const html = '<div class=\"embed\" style=\"--embed-color:' + color + ';\">' +
+                                         thumb +
                                          '<div class=\"embed-title\">' + substitute(title) + '</div>' +
                                          '<div class=\"embed-desc\">' + substitute(desc) + '</div>' +
                                          (footer ? '<div class=\"embed-footer\">' + substitute(footer) + '</div>' : '') +
@@ -1281,15 +1295,33 @@ def welcome_dashboard(guild_id):
                         }}
                         function attachSuggest(field, containerId) {{
                             const el = document.querySelector('textarea[name=\"' + field + '\"]');
-                            el.addEventListener('input', function() {{
+                            let currentList = [], currentType = null, selected = 0;
+                            function updateList() {{
                                 const tok = caretToken(el);
-                                if (!tok || !tok.name) {{ document.getElementById(containerId).innerHTML=''; return; }}
+                                if (!tok || !tok.name) {{ document.getElementById(containerId).innerHTML=''; currentList=[]; return; }}
+                                currentType = tok.type;
                                 if (tok.type === 'channel') {{
-                                    const list = channelsData.filter(x => x.name.toLowerCase().startsWith(tok.name.toLowerCase()));
-                                    showSuggest(containerId, list, 'channel', function(name) {{ insertVar(field, '#' + name); }});
+                                    currentList = channelsData.filter(x => x.name.toLowerCase().startsWith(tok.name.toLowerCase()));
+                                    showSuggest(containerId, currentList, 'channel', function(name) {{ insertVar(field, '#' + name); }});
                                 }} else {{
-                                    const list = emojisData.filter(x => x.name.toLowerCase().startsWith(tok.name.toLowerCase()));
-                                    showSuggest(containerId, list, 'emoji', function(name) {{ insertVar(field, ':' + name + ':'); }});
+                                    currentList = emojisData.filter(x => x.name.toLowerCase().startsWith(tok.name.toLowerCase()));
+                                    showSuggest(containerId, currentList, 'emoji', function(name) {{ insertVar(field, ':' + name + ':'); }});
+                                }}
+                                selected = 0;
+                            }}
+                            el.addEventListener('input', function() {{ updateList(); }});
+                            el.addEventListener('keydown', function(ev) {{
+                                if (!currentList.length) return;
+                                if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {{
+                                    ev.preventDefault();
+                                    selected = Math.max(0, Math.min(currentList.length-1, selected + (ev.key==='ArrowDown'?1:-1)));
+                                }} else if (ev.key === 'Enter') {{
+                                    ev.preventDefault();
+                                    const name = currentList[selected].name;
+                                    if (currentType === 'channel') insertVar(field, '#' + name);
+                                    else insertVar(field, ':' + name + ':');
+                                    document.getElementById(containerId).innerHTML='';
+                                    currentList = [];
                                 }}
                             }});
                         }}
@@ -1870,6 +1902,7 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
 
