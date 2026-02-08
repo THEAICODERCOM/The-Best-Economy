@@ -1688,7 +1688,13 @@ def promotion_dashboard(guild_id):
             opts += f'<option value="{r["id"]}" {sel}>{r["name"]}</option>'
         return opts
     def val(key, default):
-        return int(cfg[key]) if cfg and cfg.get(key) is not None else default
+        if not cfg:
+            return default
+        try:
+            v = cfg[key]
+        except Exception:
+            return default
+        return int(v) if v is not None else default
     trial = val('tier_trial_role_id', '')
     mod = val('tier_mod_role_id', '')
     head_mod = val('tier_head_mod_role_id', '')
@@ -2432,5 +2438,3 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
-
-
