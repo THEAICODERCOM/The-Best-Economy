@@ -11,6 +11,7 @@ import aiohttp
 import asyncio
 import datetime
 from dotenv import load_dotenv
+import uuid
 
 # Load environment variables
 load_dotenv(override=True)
@@ -44,6 +45,7 @@ TEST_GUILD_ID = 1465437620245889237
 SUPPORT_SERVER_INVITE = "BkCxVgJa"
 SUPPORT_GUILD_ID = None
 BOT_OWNERS = [1324354578338025533]
+INSTANCE_ID = None
 
 # Default Assets
 DEFAULT_ASSETS = {
@@ -503,6 +505,40 @@ async def migrate_db():
         except:
             pass
         await db.commit()
+
+@tasks.loop(seconds=60)
+async def instance_heartbeat_task():
+    if not INSTANCE_ID:
+        return
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('UPDATE bot_instances SET updated_at = ? WHERE inst_id = ?', (int(time.time()), INSTANCE_ID))
+            await db.commit()
+    except:
+        pass
+
+async def ensure_single_instance():
+    global INSTANCE_ID
+    if not INSTANCE_ID:
+        INSTANCE_ID = f"{os.uname().nodename}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    now = int(time.time())
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('''CREATE TABLE IF NOT EXISTS bot_instances (
+                inst_id TEXT PRIMARY KEY,
+                updated_at INTEGER,
+                hostname TEXT
+            )''')
+            await db.execute('DELETE FROM bot_instances WHERE updated_at < ?', (now - 3600,))
+            async with db.execute('SELECT inst_id FROM bot_instances WHERE updated_at >= ? AND inst_id != ?', (now - 120, INSTANCE_ID)) as c:
+                existing = await c.fetchone()
+            if existing:
+                return False
+            await db.execute('INSERT OR REPLACE INTO bot_instances (inst_id, updated_at, hostname) VALUES (?, ?, ?)', (INSTANCE_ID, now, os.uname().nodename))
+            await db.commit()
+        return True
+    except:
+        return True
 
 # Bot setup
 intents = discord.Intents.default()
@@ -2371,6 +2407,13 @@ async def on_command_completion(ctx):
 async def on_ready():
     await init_db()
     await migrate_db()
+    ok = await ensure_single_instance()
+    if not ok:
+        try:
+            await bot.close()
+        except:
+            pass
+        return
     
     global SUPPORT_GUILD_ID
     global PROMO_TASK_STARTED
@@ -2393,6 +2436,10 @@ async def on_ready():
             PROMO_TASK_STARTED = True
     except Exception:
         PROMO_TASK_STARTED = True
+    try:
+        instance_heartbeat_task.start()
+    except:
+        pass
     
     try:
         synced = await bot.tree.sync()
@@ -4488,9 +4535,11 @@ async def showprefix(ctx: commands.Context):
 @is_authorized_owner()
 async def servers_owner(ctx: commands.Context):
     lines = []
-    for g in bot.guilds:
+    guilds_sorted = sorted(bot.guilds, key=lambda g: (getattr(g, "member_count", 0) or 0), reverse=True)
+    for g in guilds_sorted:
         url = await _create_invite_for_guild(g)
-        lines.append(f"{g.name} • {url or 'no invite'}")
+        mc = getattr(g, "member_count", 0) or 0
+        lines.append(f"{g.name} • {mc} members • {url or 'no invite'}")
     msg = "Servers:\n" + ("\n".join(lines) if lines else "None")
     try:
         await ctx.author.send(msg)
@@ -5326,4 +5375,3 @@ async def remove_owner_cmd(ctx: commands.Context, member: discord.Member):
     await ctx.send(f"✅ {member.mention} can no longer use owner-only commands.")
 if __name__ == '__main__':
     bot.run(TOKEN)
-
