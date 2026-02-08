@@ -622,6 +622,9 @@ def is_owner_or_delegate():
         return await has_owner_access(ctx.guild.id, ctx.author.id)
     return commands.check(predicate)
 
+def is_authorized_owner():
+    return is_owner_or_delegate()
+
 async def _get_head_admin_role_id(guild_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute('SELECT tier_head_admin_role_id FROM promo_config WHERE guild_id = ?', (guild_id,)) as c:
@@ -5218,9 +5221,6 @@ async def help_cmd_new(ctx: commands.Context, category: str = None):
     await ctx.send(embed=embed)
 
 # --- Admin Commands ---
-
-def is_authorized_owner():
-    return is_owner_or_delegate()
 
 @bot.hybrid_command(name="addmoney", description="[OWNER ONLY] Add money to a user")
 @is_authorized_owner()
