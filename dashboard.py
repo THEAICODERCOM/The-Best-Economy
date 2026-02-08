@@ -581,6 +581,7 @@ def servers():
                 </div>
                 <div class="sidebar-menu">
                     <a href="/servers" class="menu-item active"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/how-to-use" class="menu-item"><span class="menu-label">📘 How To Use</span></a>
                     <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
                     <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
                     <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
@@ -623,6 +624,96 @@ def servers():
     </html>
     """
 
+@app.route('/how-to-use')
+def how_to_use():
+    if 'access_token' not in session:
+        return redirect('/')
+    html = f"""
+    <html>
+        <head>
+            <title>Empire Nexus | How To Use</title>
+            {STYLE}
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
+            {auto_cleanup_script()}
+        </head>
+        <body style="display: block; overflow-y: auto;">
+            <div class="sidebar">
+                <div class="sidebar-header">
+                    <a href="/" class="logo">Empire Nexus</a>
+                </div>
+                <div class="sidebar-menu">
+                    <a href="/servers" class="menu-item"><span class="menu-label">🏠 Kingdoms</span></a>
+                    <a href="/how-to-use" class="menu-item active"><span class="menu-label">📘 How To Use</span></a>
+                    <a href="https://discord.com/oauth2/authorize?client_id={CLIENT_ID}&permissions={INVITE_PERMISSIONS}&integration_type=0&scope=bot+applications.commands" target="_blank" class="menu-item"><span class="menu-label">➕ Invite Bot</span></a>
+                    <a href="https://discord.gg/zsqWFX2gBV" target="_blank" class="menu-item"><span class="menu-label">🛠️ Support Server</span></a>
+                    <a href="/logout" class="menu-item" style="margin-top: auto;"><span class="menu-label">🚪 Logout</span></a>
+                </div>
+            </div>
+            <div class="main-content">
+                <div class="container" style="max-width: 1100px;">
+                    <h1 class="page-title">📘 How To Use Empire Nexus</h1>
+                    <p class="page-desc">Quick guides and examples for economy, moderation, promotion, and security.</p>
+                    
+                    <div class="card">
+                        <h2 class="card-title">Getting Started</h2>
+                        <div class="stat-grid">
+                            <div class="stat-item"><div class="stat-label">Invite</div><div class="stat-value">Use “Invite Bot” in the sidebar</div></div>
+                            <div class="stat-item"><div class="stat-label">Prefix</div><div class="stat-value">/showprefix • /setprefix</div></div>
+                            <div class="stat-item"><div class="stat-label">Help</div><div class="stat-value">/help_nexus • categorized help UI</div></div>
+                        </div>
+                        <div class="list-item"><div class="list-item-info"><div class="list-item-name">Economy Basics</div><div class="list-item-price">work, crime, rob, blackjack, shop, buy, inventory, profile</div></div><a href="/servers" class="btn">Open Servers</a></div>
+                    </div>
+
+                    <div class="card">
+                        <h2 class="card-title">Moderation & Promotion</h2>
+                        <div class="stat-grid">
+                            <div class="stat-item"><div class="stat-label">Staff Roles</div><div class="stat-value">/modsystem</div></div>
+                            <div class="stat-item"><div class="stat-label">Points</div><div class="stat-value">/mod profile • /mod lb</div></div>
+                            <div class="stat-item"><div class="stat-label">Promotion</div><div class="stat-value">Configure in Promotion page</div></div>
+                        </div>
+                        <p class="page-desc">Map roles and thresholds on the Promotion System page; enable deductions and set values.</p>
+                    </div>
+
+                    <div class="card">
+                        <h2 class="card-title">Abuse Reporting</h2>
+                        <p class="page-desc">Members can file a report; admins confirm or deny and points adjust automatically.</p>
+                        <div class="list-item">
+                            <div class="list-item-info">
+                                <div class="list-item-name">Report</div>
+                                <div class="list-item-price">/reportabuse accused:@User reason:\"details\" evidence:\"link (optional)\"</div>
+                            </div>
+                            <button class="btn" disabled>Command</button>
+                        </div>
+                        <div class="list-item">
+                            <div class="list-item-info">
+                                <div class="list-item-name">Resolve</div>
+                                <div class="list-item-price">/resolveabuse report_id:123 decision:confirm|deny</div>
+                            </div>
+                            <button class="btn" disabled>Admin</button>
+                        </div>
+                        <p class="page-desc">Deduction uses “Abuse Report Confirmed” from Promotion settings.</p>
+                    </div>
+
+                    <div class="card">
+                        <h2 class="card-title">Security</h2>
+                        <div class="stat-grid">
+                            <div class="stat-item"><div class="stat-label">Raid Mode</div><div class="stat-value">/raidmode on|off</div></div>
+                            <div class="stat-item"><div class="stat-label">Anti‑Phishing</div><div class="stat-value">/antiphish on|off</div></div>
+                            <div class="stat-item"><div class="stat-label">Logs</div><div class="stat-value">Set channels in Logging page</div></div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h2 class="card-title">Sync & Troubleshooting</h2>
+                        <div class="list-item"><div class="list-item-info"><div class="list-item-name">Force Sync</div><div class="list-item-price">/sync • /syncall</div></div><button class="btn" disabled>Admin</button></div>
+                        <div class="list-item"><div class="list-item-info"><div class="list-item-name">Diagnostics</div><div class="list-item-price">/diagnose — shows global/local command counts and current prefix</div></div><button class="btn" disabled>Admin</button></div>
+                    </div>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+    return html
 @app.route('/dashboard/<int:guild_id>')
 def dashboard(guild_id):
     if 'access_token' not in session: return redirect('/')
@@ -2511,6 +2602,7 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
 
