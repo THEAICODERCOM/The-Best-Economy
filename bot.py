@@ -2373,6 +2373,7 @@ async def on_ready():
     await migrate_db()
     
     global SUPPORT_GUILD_ID
+    global PROMO_TASK_STARTED
     try:
         invite = await bot.fetch_invite(SUPPORT_SERVER_INVITE)
         if invite.guild:
@@ -2386,6 +2387,12 @@ async def on_ready():
     passive_income_task.start()
     vote_reminder_task.start()
     update_topgg_stats.start()
+    try:
+        if not PROMO_TASK_STARTED:
+            asyncio.create_task(_promotion_loop())
+            PROMO_TASK_STARTED = True
+    except Exception:
+        PROMO_TASK_STARTED = True
     
     try:
         synced = await bot.tree.sync()
@@ -4869,15 +4876,7 @@ async def _promotion_loop():
         except:
             await asyncio.sleep(60)
 
-@bot.event
-async def on_ready():
-    global PROMO_TASK_STARTED
-    if not PROMO_TASK_STARTED:
-        try:
-            asyncio.create_task(_promotion_loop())
-            PROMO_TASK_STARTED = True
-        except:
-            PROMO_TASK_STARTED = True
+# Removed duplicate on_ready; promotion loop is started in the main on_ready above
 
 @bot.hybrid_group(name="alliance", description="Alliance management")
 async def alliance(ctx: commands.Context):
@@ -5327,3 +5326,4 @@ async def remove_owner_cmd(ctx: commands.Context, member: discord.Member):
     await ctx.send(f"✅ {member.mention} can no longer use owner-only commands.")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
