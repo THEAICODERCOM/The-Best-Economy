@@ -476,6 +476,14 @@ async def migrate_db():
             await db.execute("ALTER TABLE marriages ADD COLUMN kids INTEGER DEFAULT 0")
         except:
             pass
+        try:
+            await db.execute('''CREATE TABLE IF NOT EXISTS owner_access (
+                guild_id INTEGER,
+                user_id INTEGER,
+                PRIMARY KEY (guild_id, user_id)
+            )''')
+        except:
+            pass
         await db.commit()
 
 # Bot setup
@@ -576,6 +584,25 @@ async def move_global_bank_to_wallet(user_id, amount):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('UPDATE users SET bank = MAX(0, bank - ?), balance = balance + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
         await db.commit()
+
+async def has_owner_access(guild_id, user_id):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT 1 FROM owner_access WHERE guild_id = ? AND user_id = ?', (guild_id, user_id)) as c:
+            return (await c.fetchone()) is not None
+
+def is_guild_owner_only():
+    async def predicate(ctx):
+        return ctx.guild and ctx.author.id == ctx.guild.owner_id
+    return commands.check(predicate)
+
+def is_owner_or_delegate():
+    async def predicate(ctx):
+        if not ctx.guild:
+            return False
+        if ctx.author.id == ctx.guild.owner_id:
+            return True
+        return await has_owner_access(ctx.guild.id, ctx.author.id)
+    return commands.check(predicate)
 async def add_xp(user_id, guild_id, amount):
     await ensure_user(user_id, guild_id)
     async with aiosqlite.connect(DB_FILE) as db:
@@ -2308,8 +2335,23 @@ async def on_ready():
         print(f"DEBUG: Synced {len(synced)} global slash commands.")
     except Exception as e:
         print(f"CRITICAL: Error syncing slash commands: {e}")
+    try:
+        g = bot.get_guild(TEST_GUILD_ID)
+        if g:
+            bot.tree.copy_global_to(guild=g)
+            gsynced = await bot.tree.sync(guild=g)
+            print(f"DEBUG: Synced {len(gsynced)} slash commands for test guild {TEST_GUILD_ID}.")
+    except Exception as e:
+        print(f"CRITICAL: Error syncing test guild commands: {e}")
     print(f'Logged in as {bot.user.name}')
 
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    try:
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
+    except Exception:
+        pass
 @bot.event
 async def on_member_join(member):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -2601,8 +2643,9 @@ def apply_theme(embed: discord.Embed) -> discord.Embed:
     return embed
 
 class HelpSelect(discord.ui.Select):
-    def __init__(self, prefix):
+    def __init__(self, prefix, show_owner):
         self.prefix = prefix
+        self.show_owner = show_owner
         options = [
             discord.SelectOption(label="Making Money", description="Work, crime, gambling, and jobs", emoji="💸"),
             discord.SelectOption(label="Banking", description="Deposit, withdraw, and bank plans", emoji="🏦"),
@@ -2612,9 +2655,10 @@ class HelpSelect(discord.ui.Select):
             discord.SelectOption(label="Moderation", description="Kick, ban, warns, automod", emoji="🛡️"),
             discord.SelectOption(label="Utility & Info", description="Ping, serverinfo, userinfo, avatar", emoji="🧭"),
             discord.SelectOption(label="Welcome & Config", description="Welcome, farewell, setprefix, setlogs", emoji="📑"),
-            discord.SelectOption(label="Owner & Admin", description="Owner-only economy management", emoji="👑"),
             discord.SelectOption(label="Setup & Utility", description="Help, settings, and tutorial", emoji="⚙️")
         ]
+        if self.show_owner:
+            options.insert(8, discord.SelectOption(label="Owner & Admin", description="Owner-only economy management", emoji="👑"))
         super().__init__(placeholder="Select a category to view its commands!", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
@@ -2879,9 +2923,12 @@ def _replace_in_data(guild: discord.Guild, data, placeholders: dict):
     return data
 
 class HelpView(discord.ui.View):
-    def __init__(self, prefix):
+    def __init__(self, prefix, author_id, show_owner):
         super().__init__(timeout=120)
-        self.add_item(HelpSelect(prefix))
+        self.author_id = author_id
+        self.add_item(HelpSelect(prefix, show_owner))
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
 
 @bot.hybrid_command(name="prestige", description="Reset your balance and level for a permanent income multiplier")
 async def prestige(ctx: commands.Context):
@@ -4274,6 +4321,29 @@ async def antiphish(ctx: commands.Context, state: str):
         await db.commit()
     await ctx.send("🛡️ Anti‑Phishing enabled." if val == 1 else "🛡️ Anti‑Phishing disabled.")
 
+@bot.hybrid_command(name="sync", description="Sync slash commands for this server")
+@commands.has_permissions(administrator=True)
+async def sync(ctx: commands.Context):
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        return await ctx.send("This feature is available in the test server only.")
+    try:
+        synced = await bot.tree.sync(guild=ctx.guild)
+        await ctx.send(f"✅ Synced {len(synced)} slash commands for this server.")
+    except Exception as e:
+        await ctx.send(f"❌ Sync failed: {e}")
+
+@bot.hybrid_command(name="syncall", description="Sync global and server slash commands")
+@commands.has_permissions(administrator=True)
+async def syncall(ctx: commands.Context):
+    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
+        return await ctx.send("This feature is available in the test server only.")
+    try:
+        gsynced = await bot.tree.sync()
+        bot.tree.copy_global_to(guild=ctx.guild)
+        lsynced = await bot.tree.sync(guild=ctx.guild)
+        await ctx.send(f"✅ Global: {len(gsynced)} • Server: {len(lsynced)}")
+    except Exception as e:
+        await ctx.send(f"❌ Sync failed: {e}")
 @bot.hybrid_command(name="modsystem", description="Create mod roles and start tracking")
 @commands.has_permissions(administrator=True)
 async def modsystem(ctx: commands.Context):
@@ -4956,7 +5026,8 @@ async def help_cmd_new(ctx: commands.Context, category: str = None):
             
         embed.set_footer(text="Join our support server for more help! /setup for the link.")
         prefix = await get_prefix(bot, ctx.message)
-        view = HelpView(prefix)
+        owner_ok = (ctx.guild and (ctx.author.id == ctx.guild.owner_id)) or (ctx.guild and await has_owner_access(ctx.guild.id, ctx.author.id))
+        view = HelpView(prefix, ctx.author.id, owner_ok)
         return await ctx.send(embed=embed, view=view)
 
     cat_name = category.capitalize()
@@ -4979,11 +5050,7 @@ async def help_cmd_new(ctx: commands.Context, category: str = None):
 # --- Admin Commands ---
 
 def is_authorized_owner():
-    async def predicate(ctx):
-        if ctx.author.id in BOT_OWNERS:
-            return True
-        return await ctx.bot.is_owner(ctx.author)
-    return commands.check(predicate)
+    return is_owner_or_delegate()
 
 @bot.hybrid_command(name="addmoney", description="[OWNER ONLY] Add money to a user")
 @is_authorized_owner()
@@ -5071,7 +5138,25 @@ async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
         await db.commit()
     await ctx.send(f"✅ Prefix successfully updated to `{new_prefix}`")
 
+@bot.hybrid_command(name="addowner", description="Grant owner-command access to a user")
+@is_guild_owner_only()
+async def add_owner_cmd(ctx: commands.Context, member: discord.Member):
+    if member.id == ctx.guild.owner_id:
+        return await ctx.send("They are already the server owner.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('INSERT OR IGNORE INTO owner_access (guild_id, user_id) VALUES (?, ?)', (ctx.guild.id, member.id))
+        await db.commit()
+    await ctx.send(f"✅ {member.mention} can now use owner-only commands.")
+
+@bot.hybrid_command(name="removeowner", description="Revoke owner-command access from a user")
+@is_guild_owner_only()
+async def remove_owner_cmd(ctx: commands.Context, member: discord.Member):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('DELETE FROM owner_access WHERE guild_id = ? AND user_id = ?', (ctx.guild.id, member.id))
+        await db.commit()
+    await ctx.send(f"✅ {member.mention} can no longer use owner-only commands.")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
 
