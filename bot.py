@@ -4576,9 +4576,8 @@ async def antiphish(ctx: commands.Context, state: str):
 @commands.has_permissions(administrator=True)
 async def sync(ctx: commands.Context):
     try:
-        bot.tree.copy_global_to(guild=ctx.guild)
-        synced = await bot.tree.sync(guild=ctx.guild)
-        await ctx.send(f"✅ Synced {len(synced)} commands for this server.")
+        synced = await bot.tree.sync()
+        await ctx.send(f"✅ Synced {len(synced)} global commands.")
     except Exception as e:
         await ctx.send(f"❌ Sync failed: {e}")
 
@@ -4587,12 +4586,20 @@ async def sync(ctx: commands.Context):
 async def syncall(ctx: commands.Context):
     try:
         gsynced = await bot.tree.sync()
-        bot.tree.copy_global_to(guild=ctx.guild)
-        lsynced = await bot.tree.sync(guild=ctx.guild)
-        await ctx.send(f"✅ Global: {len(gsynced)} • Server: {len(lsynced)}")
+        await ctx.send(f"✅ Global: {len(gsynced)}")
     except Exception as e:
         await ctx.send(f"❌ Sync failed: {e}")
 
+@bot.hybrid_command(name="synccleanup", description="Remove guild-local commands to fix duplicates, then re-sync globals")
+@commands.has_permissions(administrator=True)
+async def synccleanup(ctx: commands.Context):
+    try:
+        bot.tree.clear_commands(guild=ctx.guild)
+        cleared = await bot.tree.sync(guild=ctx.guild)
+        gsynced = await bot.tree.sync()
+        await ctx.send(f"🧹 Cleared guild-local commands ({len(cleared)}). Re-synced {len(gsynced)} globals.")
+    except Exception as e:
+        await ctx.send(f"❌ Cleanup failed: {e}")
 @bot.hybrid_command(name="reportabuse", description="Report staff abuse to the moderators")
 async def report_abuse(ctx: commands.Context, accused: discord.Member, reason: str, evidence: str = None):
     now = int(time.time())
@@ -4646,14 +4653,8 @@ async def diagnose(ctx: commands.Context):
         global_count = len(await bot.tree.sync())
     except:
         global_count = len(bot.tree.get_commands())
-    try:
-        bot.tree.copy_global_to(guild=ctx.guild)
-        local = await bot.tree.sync(guild=ctx.guild)
-        local_count = len(local)
-    except:
-        local_count = 0
     prefix = await get_prefix(bot, ctx.message)
-    await ctx.send(f"🔎 Commands — Global: {global_count} • This guild: {local_count}\n🔧 Prefix: `{prefix}`")
+    await ctx.send(f"🔎 Commands — Global: {global_count}\n🔧 Prefix: `{prefix}`")
 
 @bot.hybrid_command(name="showprefix", description="Show current server prefix")
 async def showprefix(ctx: commands.Context):
@@ -4749,8 +4750,13 @@ async def modsystem(ctx: commands.Context):
                 created.append(r.name)
             except:
                 pass
-    msg = "✅ Created: " + ", ".join(created) if created else "ℹ️ Roles already exist."
-    await ctx.send(msg)
+    embed = discord.Embed(title="🛡️ Mod System", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+    if created:
+        embed.add_field(name="Created Roles", value=", ".join(created), inline=False)
+    else:
+        embed.add_field(name="Status", value="Roles already exist.", inline=False)
+    embed.add_field(name="Tiers", value="Head Admin • Admin • Head Mod • Mod • Trial Mod", inline=False)
+    await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="mods", description="List moderators tracked by the system")
 async def mods(ctx: commands.Context):
@@ -4764,9 +4770,12 @@ async def mods(ctx: commands.Context):
             if m.id not in seen:
                 members.append(m.mention)
                 seen.add(m.id)
+    embed = discord.Embed(title="🛡️ Moderators", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
     if not members:
-        return await ctx.send("No moderators found.")
-    await ctx.send("🛡️ Moderators: " + ", ".join(members))
+        embed.description = "No moderators found."
+    else:
+        embed.description = ", ".join(members)
+    await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="mod", description="View your mod profile or leaderboard")
 async def mod(ctx: commands.Context, subcommand: str = "profile"):
@@ -4777,20 +4786,30 @@ async def mod(ctx: commands.Context, subcommand: str = "profile"):
             async with db.execute('SELECT messages, warns, bans, kicks, timeouts, points FROM mod_stats WHERE user_id = ? AND guild_id = ?', (ctx.author.id, ctx.guild.id)) as c:
                 row = await c.fetchone()
         if not row:
-            return await ctx.send("No mod stats yet.")
-        await ctx.send(f"🧭 Mod Profile for {ctx.author.mention}\nMessages: {row[0]}\nWarns: {row[1]}\nBans: {row[2]}\nKicks: {row[3]}\nTimeouts: {row[4]}\nPoints: {row[5]}")
+            return await ctx.send(embed=discord.Embed(title="🧭 Mod Profile", description="No mod stats yet.", color=discord.Color.blurple()))
+        e = discord.Embed(title=f"🧭 Mod Profile — {ctx.author.display_name}", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        e.add_field(name="Messages", value=str(row[0]), inline=True)
+        e.add_field(name="Warns", value=str(row[1]), inline=True)
+        e.add_field(name="Bans", value=str(row[2]), inline=True)
+        e.add_field(name="Kicks", value=str(row[3]), inline=True)
+        e.add_field(name="Timeouts", value=str(row[4]), inline=True)
+        e.add_field(name="Points", value=str(row[5]), inline=True)
+        try: e.set_thumbnail(url=ctx.author.display_avatar.url)
+        except: pass
+        await ctx.send(embed=e)
     elif subcommand.lower() == "lb":
         async with aiosqlite.connect(DB_FILE) as db:
             async with db.execute('SELECT user_id, points FROM mod_stats WHERE guild_id = ? ORDER BY points DESC LIMIT 10', (ctx.guild.id,)) as c:
                 rows = await c.fetchall()
         if not rows:
-            return await ctx.send("No mod leaderboard yet.")
+            return await ctx.send(embed=discord.Embed(title="🛡️ Mod Leaderboard", description="No entries yet.", color=discord.Color.blurple()))
         lines = []
         for i, r in enumerate(rows, 1):
             u = ctx.guild.get_member(r[0])
             uname = u.display_name if u else f"User({r[0]})"
             lines.append(f"{i}. {uname} — {r[1]} pts")
-        await ctx.send("🛡️ Mod Leaderboard\n" + "\n".join(lines))
+        e = discord.Embed(title="🛡️ Mod Leaderboard", description="\n".join(lines), color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        await ctx.send(embed=e)
     else:
         await ctx.send("Use `profile` or `lb`.")
 
@@ -5671,6 +5690,3 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
-
-
-
