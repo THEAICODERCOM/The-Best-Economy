@@ -5041,6 +5041,13 @@ async def showprefix(ctx: commands.Context):
 @bot.hybrid_command(name="servers", aliases=["server"], description="Owner-only: DM the bot's servers and invite links")
 @is_authorized_owner()
 async def servers_owner(ctx: commands.Context):
+    deferred = False
+    try:
+        if ctx.interaction and not ctx.interaction.response.is_done():
+            await ctx.interaction.response.defer(ephemeral=True)
+            deferred = True
+    except:
+        pass
     try:
         if hasattr(bot, "is_closed") and bot.is_closed():
             return
@@ -5055,7 +5062,13 @@ async def servers_owner(ctx: commands.Context):
     msg = "Servers:\n" + ("\n".join(lines) if lines else "None")
     try:
         await ctx.author.send(msg)
-        await ctx.send("Sent you a DM with server list.")
+        try:
+            if deferred:
+                await ctx.followup.send("Sent you a DM with server list.", ephemeral=True)
+            else:
+                await ctx.send("Sent you a DM with server list.")
+        except:
+            pass
     except:
         # Fallback: send in channel (ephemeral if slash)
         try:
@@ -5064,10 +5077,8 @@ async def servers_owner(ctx: commands.Context):
             while len(s) > 0:
                 chunks.append(s[:1800])
                 s = s[1800:]
-            if ctx.interaction and not ctx.interaction.response.is_done():
-                # Send first chunk ephemeral, then followups
-                await ctx.interaction.response.send_message(chunks[0], ephemeral=True)
-                for part in chunks[1:]:
+            if ctx.interaction:
+                for part in chunks:
                     try:
                         await ctx.followup.send(part, ephemeral=True)
                     except:
@@ -6100,4 +6111,5 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
