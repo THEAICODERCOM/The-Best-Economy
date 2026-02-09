@@ -4998,7 +4998,7 @@ async def showprefix(ctx: commands.Context):
     p = await get_prefix(bot, ctx.message)
     await ctx.send(f"Current prefix: `{p}`")
 
-@bot.hybrid_command(name="servers", description="Owner-only: DM the bot's servers and invite links")
+@bot.hybrid_command(name="servers", aliases=["server"], description="Owner-only: DM the bot's servers and invite links")
 @is_authorized_owner()
 async def servers_owner(ctx: commands.Context):
     try:
@@ -5017,10 +5017,32 @@ async def servers_owner(ctx: commands.Context):
         await ctx.author.send(msg)
         await ctx.send("Sent you a DM with server list.")
     except:
+        # Fallback: send in channel (ephemeral if slash)
         try:
-            await ctx.send("Could not DM you. Please open DMs.")
+            chunks = []
+            s = msg
+            while len(s) > 0:
+                chunks.append(s[:1800])
+                s = s[1800:]
+            if ctx.interaction and not ctx.interaction.response.is_done():
+                # Send first chunk ephemeral, then followups
+                await ctx.interaction.response.send_message(chunks[0], ephemeral=True)
+                for part in chunks[1:]:
+                    try:
+                        await ctx.followup.send(part, ephemeral=True)
+                    except:
+                        pass
+            else:
+                for i, part in enumerate(chunks):
+                    try:
+                        await ctx.send(part)
+                    except:
+                        pass
         except:
-            pass
+            try:
+                await ctx.send("Could not DM or post here.")
+            except:
+                pass
 
 @bot.hybrid_command(name="instances", description="Owner-only: list known running instances")
 @is_authorized_owner()
@@ -6038,3 +6060,4 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
