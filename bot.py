@@ -723,10 +723,31 @@ else:
     TOKEN = TOKEN.strip()
 
 # --- Database Helpers ---
-async def ensure_rewards(user_id):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR IGNORE INTO user_rewards (user_id) VALUES (?)', (user_id,))
-        await db.commit()
+async def ensure_rewards(user_id, db=None):
+    async def _insert(conn):
+        tries = 5
+        delay = 0.05
+        for i in range(tries):
+            try:
+                await conn.execute('INSERT OR IGNORE INTO user_rewards (user_id) VALUES (?)', (user_id,))
+                return True
+            except Exception as e:
+                if "database is locked" in str(e).lower():
+                    await asyncio.sleep(delay * (i + 1))
+                    continue
+                raise
+        return False
+    if db is not None:
+        ok = await _insert(db)
+        return ok
+    async with aiosqlite.connect(DB_FILE) as db_local:
+        try:
+            await db_local.execute('PRAGMA journal_mode=WAL')
+            await db_local.execute('PRAGMA busy_timeout=5000')
+        except:
+            pass
+        await _insert(db_local)
+        await db_local.commit()
 
 async def get_user_multipliers(user_id):
     await ensure_rewards(user_id)
@@ -2606,6 +2627,11 @@ async def leaderboard_rewards_task():
     # Reset current leaderboard multipliers for all users in memory or just track who changed?
     # Simpler: Clear all 'lb_' multipliers and re-assign.
     async with aiosqlite.connect(DB_FILE) as db:
+        try:
+            await db.execute('PRAGMA journal_mode=WAL')
+            await db.execute('PRAGMA busy_timeout=5000')
+        except:
+            pass
         # Get all users with lb_ multipliers
         async with db.execute("SELECT user_id, multipliers_json, titles_json, medals_json FROM user_rewards") as cursor:
             rows = await cursor.fetchall()
@@ -2636,7 +2662,7 @@ async def leaderboard_rewards_task():
                 medal_emoji = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉"
                 title_name = titles_map[cat_id][i]
                 
-                await ensure_rewards(uid)
+                await ensure_rewards(uid, db=db)
                 async with db.execute("SELECT multipliers_json, titles_json, medals_json FROM user_rewards WHERE user_id = ?", (uid,)) as cursor:
                     r = await cursor.fetchone()
                     mults = json.loads(r[0])
@@ -6060,4 +6086,3 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
-
