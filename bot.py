@@ -5001,6 +5001,11 @@ async def showprefix(ctx: commands.Context):
 @bot.hybrid_command(name="servers", description="Owner-only: DM the bot's servers and invite links")
 @is_authorized_owner()
 async def servers_owner(ctx: commands.Context):
+    try:
+        if hasattr(bot, "is_closed") and bot.is_closed():
+            return
+    except:
+        pass
     lines = []
     guilds_sorted = sorted(bot.guilds, key=lambda g: (getattr(g, "member_count", 0) or 0), reverse=True)
     for g in guilds_sorted:
@@ -5012,11 +5017,19 @@ async def servers_owner(ctx: commands.Context):
         await ctx.author.send(msg)
         await ctx.send("Sent you a DM with server list.")
     except:
-        await ctx.send("Could not DM you. Please open DMs.")
+        try:
+            await ctx.send("Could not DM you. Please open DMs.")
+        except:
+            pass
 
 @bot.hybrid_command(name="instances", description="Owner-only: list known running instances")
 @is_authorized_owner()
 async def instances_owner(ctx: commands.Context):
+    try:
+        if hasattr(bot, "is_closed") and bot.is_closed():
+            return
+    except:
+        pass
     now = int(time.time())
     rows = []
     try:
@@ -5039,10 +5052,18 @@ async def instances_owner(ctx: commands.Context):
         await ctx.author.send(msg)
         await ctx.send("Sent you a DM with instance status.")
     except:
-        await ctx.send("Could not DM you. Please open DMs.")
+        try:
+            await ctx.send("Could not DM you. Please open DMs.")
+        except:
+            pass
 @bot.hybrid_command(name="analytics", description="Owner-only: DM server join counts")
 @is_authorized_owner()
 async def analytics(ctx: commands.Context):
+    try:
+        if hasattr(bot, "is_closed") and bot.is_closed():
+            return
+    except:
+        pass
     now = int(time.time())
     day = now - 86400
     week = now - 7*86400
@@ -5065,7 +5086,10 @@ async def analytics(ctx: commands.Context):
         await ctx.author.send(msg)
         await ctx.send("Sent you a DM with analytics.")
     except:
-        await ctx.send("Could not DM you. Please open DMs.")
+        try:
+            await ctx.send("Could not DM you. Please open DMs.")
+        except:
+            pass
 @bot.hybrid_command(name="modsystem", description="Create mod roles and start tracking")
 @owner_or_admin()
 async def modsystem(ctx: commands.Context):
@@ -6014,7 +6038,3 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
-
-
-
-
