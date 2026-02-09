@@ -716,6 +716,20 @@ intents.members = True
 intents.message_content = True 
 bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None)
 
+# Safety: avoid dispatching events when loop/client is closing
+_orig_dispatch = bot.dispatch
+def _safe_dispatch(event_name, *args, **kwargs):
+    try:
+        if bot.is_closed():
+            return
+        lp = getattr(bot, "loop", None)
+        if lp is None or lp.is_closed():
+            return
+    except:
+        return
+    return _orig_dispatch(event_name, *args, **kwargs)
+bot.dispatch = _safe_dispatch
+
 # Debug: Check if token is loaded
 if not TOKEN:
     print("CRITICAL: DISCORD_TOKEN not found in .env file!")
@@ -6086,3 +6100,4 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
