@@ -949,6 +949,8 @@ def is_authorized_owner():
 def owner_or_has(**required):
     async def predicate(ctx):
         if ctx.guild:
+            if ctx.author.id in BOT_OWNERS:
+                return True
             if ctx.author.id == ctx.guild.owner_id:
                 return True
             if await has_owner_access(ctx.guild.id, ctx.author.id):
@@ -1423,7 +1425,7 @@ def parse_duration(duration_str):
     return total_seconds
 
 def can_act_on(actor: discord.Member, target: discord.Member) -> bool:
-    if actor.guild.owner_id == actor.id:
+    if actor.id in BOT_OWNERS or actor.guild.owner_id == actor.id:
         return True
     if actor.id == target.id:
         return False
@@ -6012,6 +6014,7 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
 
 
