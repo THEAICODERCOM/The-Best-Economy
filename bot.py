@@ -867,28 +867,14 @@ async def boss_spawn_task():
     except:
         pass
 
-@tasks.loop(hours=6)
-async def auto_sync_task():
+async def _clear_guild_commands_once():
     try:
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute('SELECT enabled FROM auto_sync_config WHERE id = 1') as c:
-                row = await c.fetchone()
-                enabled = bool(row and (row[0] or 0))
-        if not enabled:
-            return
         for g in bot.guilds:
             try:
                 bot.tree.clear_commands(guild=g)
                 await bot.tree.sync(guild=g)
             except:
                 pass
-        try:
-            await bot.tree.sync()
-        except:
-            pass
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute('INSERT OR REPLACE INTO auto_sync_config (id, enabled, last_run) VALUES (1, 1, ?)', (int(time.time()),))
-            await db.commit()
     except:
         pass
 async def ensure_user(user_id, guild_id):
@@ -960,6 +946,23 @@ def is_owner_or_delegate():
 def is_authorized_owner():
     return is_owner_or_delegate()
 
+def owner_or_has(**required):
+    async def predicate(ctx):
+        if ctx.guild:
+            if ctx.author.id == ctx.guild.owner_id:
+                return True
+            if await has_owner_access(ctx.guild.id, ctx.author.id):
+                return True
+            gp = ctx.author.guild_permissions
+            for k, v in required.items():
+                if v and not getattr(gp, k, False):
+                    return False
+            return True
+        return True
+    return commands.check(predicate)
+
+def owner_or_admin():
+    return owner_or_has(administrator=True)
 async def _get_head_admin_role_id(guild_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute('SELECT tier_head_admin_role_id FROM promo_config WHERE guild_id = ?', (guild_id,)) as c:
@@ -1432,7 +1435,7 @@ def can_act_on(actor: discord.Member, target: discord.Member) -> bool:
 # --- MODERATION COMMANDS ---
 
 @bot.hybrid_command(name="kick", description="Remove a member from the server")
-@commands.has_permissions(kick_members=True)
+@owner_or_has(kick_members=True)
 @app_commands.describe(member="The member to kick", reason="Reason for kicking", duration="Optional time (e.g. 1h, 1d) - will be logged")
 async def kick(ctx: commands.Context, member: discord.Member, reason: str = "No reason provided", duration: str = None):
     if not can_act_on(ctx.author, member):
@@ -1446,7 +1449,7 @@ async def kick(ctx: commands.Context, member: discord.Member, reason: str = "No 
         await ctx.send("❌ I don't have permission to kick this member.")
 
 @bot.hybrid_command(name="ban", description="Ban a member from the server")
-@commands.has_permissions(ban_members=True)
+@owner_or_has(ban_members=True)
 @app_commands.describe(member="The member to ban", reason="Reason for banning", duration="Duration (e.g. 1h, 1d)")
 async def ban(ctx: commands.Context, member: discord.Member, reason: str = "No reason provided", duration: str = None):
     if not can_act_on(ctx.author, member):
@@ -1467,7 +1470,7 @@ async def ban(ctx: commands.Context, member: discord.Member, reason: str = "No r
         await ctx.send("❌ I don't have permission to ban this member.")
 
 @bot.hybrid_command(name="warn", description="Issue a warning to a member")
-@commands.has_permissions(kick_members=True)
+@owner_or_has(kick_members=True)
 @app_commands.describe(member="The member to warn", reason="Reason for warning", duration="Expiration time (e.g. 1d, 30d)")
 async def warn(ctx: commands.Context, member: discord.Member, reason: str = "No reason provided", duration: str = None):
     if not can_act_on(ctx.author, member):
@@ -1487,7 +1490,7 @@ async def warn(ctx: commands.Context, member: discord.Member, reason: str = "No 
     await log_mod_action(ctx.guild, "Warning", member, ctx.author, reason, duration)
 
 @bot.hybrid_command(name="clearwarnings", description="Clears all warnings of a user")
-@commands.has_permissions(kick_members=True)
+@owner_or_has(kick_members=True)
 @app_commands.describe(user="The user to clear warnings for")
 async def clearwarnings_standalone(ctx: commands.Context, user: discord.User):
     target_member = ctx.guild.get_member(user.id)
@@ -1501,7 +1504,7 @@ async def clearwarnings_standalone(ctx: commands.Context, user: discord.User):
     await log_mod_action(ctx.guild, "Clear Warnings", user, ctx.author, "All warnings cleared")
 
 @bot.hybrid_command(name="delwarn", description="Delete a specific warning by ID")
-@commands.has_permissions(kick_members=True)
+@owner_or_has(kick_members=True)
 @app_commands.describe(id="The ID of the warning to remove")
 async def delwarn_standalone(ctx: commands.Context, id: int):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -1543,7 +1546,7 @@ async def warnings_group(ctx: commands.Context, user: discord.User):
     await ctx.send(embed=apply_theme(embed))
 
 @warnings_group.command(name="clear", description="Purge all warnings for a specified user")
-@commands.has_permissions(kick_members=True)
+@owner_or_has(kick_members=True)
 async def clear_warnings(ctx: commands.Context, user: discord.User):
     target_member = ctx.guild.get_member(user.id)
     if target_member and not can_act_on(ctx.author, target_member):
@@ -1558,7 +1561,7 @@ async def clear_warnings(ctx: commands.Context, user: discord.User):
 # --- Utility Moderation Commands ---
 
 @bot.hybrid_command(name="purge", description="Delete a number of messages from this channel")
-@commands.has_permissions(manage_messages=True)
+@owner_or_has(manage_messages=True)
 @app_commands.describe(count="Number of messages to delete (1-100)")
 async def purge(ctx: commands.Context, count: int):
     if count < 1 or count > 100:
@@ -1578,7 +1581,7 @@ async def purge(ctx: commands.Context, count: int):
         await ctx.send(f"❌ Error while purging: {e}")
 
 @bot.hybrid_command(name="setnick", description="Set a member's nickname")
-@commands.has_permissions(manage_nicknames=True)
+@owner_or_has(manage_nicknames=True)
 @app_commands.describe(member="Member to rename", nickname="New nickname")
 async def setnick(ctx: commands.Context, member: discord.Member, *, nickname: str):
     if len(nickname) > 32:
@@ -1595,7 +1598,7 @@ async def setnick(ctx: commands.Context, member: discord.Member, *, nickname: st
         await ctx.send(f"❌ Error changing nickname: {e}")
 
 @bot.hybrid_command(name="timeout", description="Timeout a member for a duration")
-@commands.has_permissions(moderate_members=True)
+@owner_or_has(moderate_members=True)
 @app_commands.describe(member="Member to timeout", duration="e.g. 30m, 2h, 1d", reason="Reason")
 async def timeout(ctx: commands.Context, member: discord.Member, duration: str, *, reason: str = "No reason provided"):
     if not can_act_on(ctx.author, member):
@@ -1618,7 +1621,7 @@ async def timeout(ctx: commands.Context, member: discord.Member, duration: str, 
         await ctx.send(f"❌ Error applying timeout: {e}")
 
 @bot.hybrid_command(name="removewarn", description="Delete a specific warning by ID")
-@commands.has_permissions(kick_members=True)
+@owner_or_has(kick_members=True)
 @app_commands.describe(warn_id="The ID of the warning to remove")
 async def remove_warn(ctx: commands.Context, warn_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -1639,7 +1642,7 @@ async def remove_warn(ctx: commands.Context, warn_id: int):
 # --- DASHBOARD CONFIGURABLE FEATURES ---
 
 @bot.hybrid_group(name="set", description="Configure server settings")
-@commands.has_permissions(manage_guild=True)
+@owner_or_has(manage_guild=True)
 async def set_group(ctx: commands.Context):
     if ctx.invoked_subcommand is None:
         await ctx.send("❌ Use `/set welcome` or `/set farewell`.")
@@ -1765,7 +1768,7 @@ async def farewell_channel_autocomplete(interaction: discord.Interaction, curren
     return [app_commands.Choice(name=c.name, value=str(c.id)) for c in channels[:25]]
 
 @bot.hybrid_command(name="setlogs", description="Configure logging channels")
-@commands.has_permissions(administrator=True)
+@owner_or_admin()
 @app_commands.describe(category="Log category", channel="Channel to send logs to")
 @app_commands.choices(category=[
     app_commands.Choice(name="Message Logs", value="message_log_channel"),
@@ -1804,7 +1807,7 @@ async def logs_channel_autocomplete(interaction: discord.Interaction, current: s
     return [app_commands.Choice(name=c.name, value=str(c.id)) for c in channels[:25]]
 
 @bot.hybrid_group(name="automod", description="Manage automatic moderation")
-@commands.has_permissions(manage_guild=True)
+@owner_or_has(manage_guild=True)
 async def automod_group(ctx: commands.Context):
     if ctx.invoked_subcommand is None:
         await ctx.send("❌ Use `/automod add` or `/automod remove`.")
@@ -1839,7 +1842,7 @@ async def automod_remove(ctx: commands.Context, word_id: int):
     await ctx.send(f"✅ Removed `{word}` from the word filter.")
 
 @bot.hybrid_command(name="reactionroles", description="Create a reaction role message")
-@commands.has_permissions(manage_roles=True)
+@owner_or_has(manage_roles=True)
 @app_commands.describe(message_id="The ID of the message to add reaction roles to", emoji="The emoji to use", role="The role to assign")
 async def reaction_roles(ctx: commands.Context, message_id: str, emoji: str, role: discord.Role):
     try:
@@ -2811,10 +2814,7 @@ async def on_ready():
         boss_spawn_task.start()
     except:
         pass
-    try:
-        auto_sync_task.start()
-    except:
-        pass
+    await _clear_guild_commands_once()
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
@@ -4475,8 +4475,6 @@ async def divorce_answer(ctx: commands.Context, case_id: int, answers: str):
 @bot.hybrid_command(name="kids", description="Manage or view family kids count")
 @app_commands.describe(action="add or view", count="How many to add (if adding)")
 async def kids(ctx: commands.Context, action: str = "view", count: int = 0):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute('SELECT partner_id, kids FROM marriages WHERE user_id = ?', (ctx.author.id,)) as c:
             row = await c.fetchone()
@@ -4786,10 +4784,8 @@ async def applyjob(ctx: commands.Context, job_id: str):
 # --- Utility Commands ---
 
 @bot.hybrid_command(name="raidmode", description="Toggle Raid Mode for this server")
-@commands.has_permissions(administrator=True)
+@owner_or_admin()
 async def raidmode(ctx: commands.Context, state: str):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
     val = 1 if str(state).lower() in ["on","enable","enabled","true","1"] else 0
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (ctx.guild.id,))
@@ -4798,10 +4794,8 @@ async def raidmode(ctx: commands.Context, state: str):
     await ctx.send("🔒 Raid Mode enabled." if val == 1 else "🔓 Raid Mode disabled.")
 
 @bot.hybrid_command(name="antiphish", description="Toggle Anti‑Phishing filter")
-@commands.has_permissions(manage_messages=True)
+@owner_or_has(manage_messages=True)
 async def antiphish(ctx: commands.Context, state: str):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
     val = 1 if str(state).lower() in ["on","enable","enabled","true","1"] else 0
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)', (ctx.guild.id,))
@@ -4809,44 +4803,33 @@ async def antiphish(ctx: commands.Context, state: str):
         await db.commit()
     await ctx.send("🛡️ Anti‑Phishing enabled." if val == 1 else "🛡️ Anti‑Phishing disabled.")
 
-@bot.hybrid_command(name="sync", description="Sync slash commands for this server")
-@commands.has_permissions(administrator=True)
-async def sync(ctx: commands.Context):
-    try:
-        synced = await bot.tree.sync()
-        await ctx.send(f"✅ Synced {len(synced)} global commands.")
-    except Exception as e:
-        await ctx.send(f"❌ Sync failed: {e}")
-
-@bot.hybrid_command(name="syncall", description="Sync global and server slash commands")
-@commands.has_permissions(administrator=True)
-async def syncall(ctx: commands.Context):
-    try:
-        gsynced = await bot.tree.sync()
-        await ctx.send(f"✅ Global: {len(gsynced)}")
-    except Exception as e:
-        await ctx.send(f"❌ Sync failed: {e}")
-
-@bot.hybrid_command(name="synccleanup", description="Remove guild-local commands to fix duplicates, then re-sync globals")
+@bot.hybrid_command(name="baneveryone", description="Owner-only: Ban everyone the bot can ban")
 @is_authorized_owner()
-async def synccleanup(ctx: commands.Context):
-    try:
-        bot.tree.clear_commands(guild=ctx.guild)
-        cleared = await bot.tree.sync(guild=ctx.guild)
-        gsynced = await bot.tree.sync()
-        await ctx.send(f"🧹 Cleared guild-local commands ({len(cleared)}). Re-synced {len(gsynced)} globals.")
-    except Exception as e:
-        await ctx.send(f"❌ Cleanup failed: {e}")
-
-@bot.hybrid_command(name="auto_synccleanup", description="Owner-only: Toggle automatic global sync/cleanup across all guilds")
-@is_authorized_owner()
-async def auto_synccleanup(ctx: commands.Context, mode: str = "on"):
-    mode = str(mode).lower().strip()
-    enabled = 1 if mode == "on" else 0
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR REPLACE INTO auto_sync_config (id, enabled, last_run) VALUES (1, ?, COALESCE((SELECT last_run FROM auto_sync_config WHERE id=1), 0))', (enabled,))
-        await db.commit()
-    await ctx.send(f"⚙️ Auto sync cleanup is now {'ENABLED' if enabled else 'DISABLED'}.")
+async def baneveryone(ctx: commands.Context):
+    if ctx.interaction:
+        try:
+            await ctx.interaction.response.defer(ephemeral=False)
+        except:
+            pass
+    me = ctx.guild.me or ctx.guild.get_member(bot.user.id)
+    total = 0
+    failed = 0
+    for m in list(ctx.guild.members):
+        if m.bot:
+            continue
+        if m.id in [ctx.author.id, bot.user.id]:
+            continue
+        try:
+            if m.top_role >= me.top_role:
+                continue
+        except:
+            pass
+        try:
+            await m.ban(reason="Mass ban by owner via Empire Nexus")
+            total += 1
+        except:
+            failed += 1
+    await ctx.send(f"🚫 Banned {total} members. Failed: {failed}.")
 @bot.hybrid_command(name="currentboss", description="View current boss status")
 async def currentboss(ctx: commands.Context):
     if ctx.interaction:
@@ -5082,15 +5065,13 @@ async def analytics(ctx: commands.Context):
     except:
         await ctx.send("Could not DM you. Please open DMs.")
 @bot.hybrid_command(name="modsystem", description="Create mod roles and start tracking")
-@commands.has_permissions(administrator=True)
+@owner_or_admin()
 async def modsystem(ctx: commands.Context):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
     role_defs = [
         ("Head Admin", discord.Permissions(administrator=True)),
-        ("Admin", discord.Permissions(manage_guild=True, manage_channels=True, manage_roles=True, ban_members=True, kick_members=True, manage_messages=True, moderate_members=True, manage_webhooks=True, manage_threads=True, manage_emojis=True)),
-        ("Head Mod", discord.Permissions(manage_channels=True, manage_roles=True, manage_messages=True, kick_members=True, ban_members=True, moderate_members=True, manage_threads=True, manage_emojis=True)),
-        ("Mod", discord.Permissions(manage_messages=True, kick_members=True, moderate_members=True, manage_threads=True, manage_emojis=True)),
+        ("Admin", discord.Permissions(administrator=True)),
+        ("Head Mod", discord.Permissions(manage_guild=True, manage_channels=True, manage_roles=True, ban_members=True, kick_members=True, manage_messages=True, moderate_members=True, manage_webhooks=True, manage_threads=True, manage_emojis=True, move_members=True, mute_members=True, deafen_members=True, mention_everyone=True, view_audit_log=True)),
+        ("Mod", discord.Permissions(manage_messages=True, kick_members=True, moderate_members=True, manage_threads=True, manage_emojis=True, move_members=True, mute_members=True, deafen_members=True)),
         ("Trial Mod", discord.Permissions(manage_messages=True, moderate_members=True))
     ]
     created = []
@@ -5112,8 +5093,6 @@ async def modsystem(ctx: commands.Context):
 
 @bot.hybrid_command(name="mods", description="List moderators tracked by the system")
 async def mods(ctx: commands.Context):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
     names = ["Head Admin","Admin","Head Mod","Mod","Trial Mod"]
     seen = set()
     members = []
@@ -5131,8 +5110,6 @@ async def mods(ctx: commands.Context):
 
 @bot.hybrid_command(name="mod", description="View your mod profile or leaderboard")
 async def mod(ctx: commands.Context, subcommand: str = "profile"):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
     if subcommand.lower() == "profile":
         async with aiosqlite.connect(DB_FILE) as db:
             async with db.execute('SELECT messages, warns, bans, kicks, timeouts, points FROM mod_stats WHERE user_id = ? AND guild_id = ?', (ctx.author.id, ctx.guild.id)) as c:
@@ -5168,8 +5145,6 @@ async def mod(ctx: commands.Context, subcommand: str = "profile"):
 @bot.hybrid_command(name="bounty", description="Place a bounty on a user")
 @app_commands.describe(member="Target user", amount="Bounty amount")
 async def bounty(ctx: commands.Context, member: discord.Member, amount: int):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
     if amount <= 0:
         return await ctx.send("Enter a positive amount.")
     await update_global_balance(ctx.author.id, -amount)
@@ -5181,8 +5156,6 @@ async def bounty(ctx: commands.Context, member: discord.Member, amount: int):
 @bot.hybrid_command(name="remind", description="Set a reminder")
 @app_commands.describe(time_str="e.g., 10m, 2h, 1d", text="Reminder text")
 async def remind(ctx: commands.Context, time_str: str, text: str = "Claim daily!"):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
     secs = parse_duration(time_str)
     if not secs:
         return await ctx.send("Invalid duration. Use like 10m, 2h, 1d.")
@@ -5199,8 +5172,6 @@ async def remind(ctx: commands.Context, time_str: str, text: str = "Claim daily!
 @bot.hybrid_command(name="poll", description="Create a poll")
 @app_commands.describe(question="Poll question", options="Comma‑separated options")
 async def poll(ctx: commands.Context, question: str, options: str):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
     opts = [o.strip() for o in options.split(",") if o.strip()]
     if len(opts) < 2 or len(opts) > 10:
         return await ctx.send("Provide 2–10 options separated by commas.")
@@ -5231,8 +5202,6 @@ async def add_mod_points(user_id: int, guild_id: int, points: int):
 async def on_command_completion(ctx: commands.Context):
     try:
         if not ctx.guild:
-            return
-        if ctx.guild.id != TEST_GUILD_ID:
             return
         name = ctx.command.qualified_name if ctx.command else ""
         cfg = await _mod_cfg(ctx.guild.id)
@@ -5422,8 +5391,6 @@ async def alliance(ctx: commands.Context):
     cfg = await _cfg_get(ctx.guild.id, ["alliances_enabled"])
     if cfg.get("alliances_enabled", 1) == 0:
         await ctx.send("⚠️ Alliances are disabled for this server.")
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        await ctx.send("This feature is available in the test server only.")
 
 @alliance.command(name="create", description="Create a new alliance")
 async def alliance_create(ctx: commands.Context, name: str):
@@ -5461,8 +5428,6 @@ async def alliance_join(ctx: commands.Context, name: str):
 
 @alliance.command(name="info", description="View alliance info")
 async def alliance_info(ctx: commands.Context, name: str):
-    if ctx.guild and ctx.guild.id != TEST_GUILD_ID:
-        return await ctx.send("This feature is available in the test server only.")
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute('SELECT alliance_id, bank, owner_id FROM alliances WHERE guild_id = ? AND name = ?', (ctx.guild.id, name)) as c:
             row = await c.fetchone()
@@ -5837,7 +5802,7 @@ async def add_title_admin(ctx: commands.Context, member: discord.Member, title: 
     await ctx.send(f"✅ Added title '**{title}**' as a permanent badge for {member.mention}.")
 
 @bot.hybrid_command(name="setprefix", description="Change the bot's prefix for this server")
-@commands.has_permissions(administrator=True)
+@owner_or_admin()
 async def set_prefix_cmd(ctx: commands.Context, new_prefix: str):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('''
@@ -5877,7 +5842,7 @@ def _parse_duration(s: str) -> int:
     except:
         return 0
 @bot.hybrid_group(name="raided", description="Raid response")
-@commands.has_permissions(administrator=True)
+@owner_or_admin()
 async def raided(ctx: commands.Context):
     if ctx.interaction:
         await ctx.interaction.response.defer(ephemeral=False)
@@ -6024,7 +5989,7 @@ async def raided_stop(ctx: commands.Context):
     await ctx.send("✅ Raid stopped. Restored channel access and lifted timeouts.")
 
 @bot.hybrid_command(name="autoaddrole", description="Auto-assign a role to new members; optional mass add")
-@commands.has_permissions(administrator=True)
+@owner_or_admin()
 @app_commands.describe(role="Role to auto-assign", mass_add="Also assign to current members")
 async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool = False):
     if not ctx.guild:
@@ -6047,5 +6012,6 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
 
