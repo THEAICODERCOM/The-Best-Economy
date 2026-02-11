@@ -274,6 +274,41 @@ async def init_db():
             PRIMARY KEY (user_id, guild_id)
         )''')
         try:
+            cols = []
+            async with db.execute("PRAGMA table_info(users)") as c:
+                rows = await c.fetchall()
+                cols = [r[1] for r in rows] if rows else []
+            req = {
+                "xp": "INTEGER DEFAULT 0",
+                "level": "INTEGER DEFAULT 1",
+                "prestige": "INTEGER DEFAULT 0",
+                "last_work": "INTEGER DEFAULT 0",
+                "last_crime": "INTEGER DEFAULT 0",
+                "last_rob": "INTEGER DEFAULT 0",
+                "last_vote": "INTEGER DEFAULT 0",
+                "auto_deposit": "INTEGER DEFAULT 0",
+                "bank_plan": "TEXT DEFAULT 'standard'",
+                "daily_commands": "INTEGER DEFAULT 0",
+                "daily_reset": "INTEGER DEFAULT 0",
+                "daily_reward_claimed": "INTEGER DEFAULT 0",
+                "weekly_commands": "INTEGER DEFAULT 0",
+                "weekly_reset": "INTEGER DEFAULT 0",
+                "weekly_reward_claimed": "INTEGER DEFAULT 0",
+                "daily_quest_completed_json": "TEXT DEFAULT '{}'",
+                "weekly_quest_completed_json": "TEXT DEFAULT '{}'",
+                "daily_stats_json": "TEXT DEFAULT '{}'",
+                "weekly_stats_json": "TEXT DEFAULT '{}'",
+                "started": "INTEGER DEFAULT 0"
+            }
+            for name, decl in req.items():
+                if name not in cols:
+                    try:
+                        await db.execute(f"ALTER TABLE users ADD COLUMN {name} {decl}")
+                    except:
+                        pass
+        except:
+            pass
+        try:
             await db.execute('ALTER TABLE users ADD COLUMN last_vote INTEGER DEFAULT 0')
             await db.execute('ALTER TABLE users ADD COLUMN auto_deposit INTEGER DEFAULT 0')
         except:
@@ -705,13 +740,27 @@ async def get_prefix(bot, message):
     guild_id = message.guild.id
     if guild_id in PREFIX_CACHE:
         return PREFIX_CACHE[guild_id]
-    
+    tries = 4
+    delay = 0.05
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT prefix FROM guild_config WHERE guild_id = ?', (guild_id,)) as cursor:
-            row = await cursor.fetchone()
-            prefix = row[0] if row else '.'
-            PREFIX_CACHE[guild_id] = prefix
-            return prefix
+        try:
+            await db.execute('PRAGMA journal_mode=WAL')
+            await db.execute('PRAGMA busy_timeout=2000')
+        except:
+            pass
+        for i in range(tries):
+            try:
+                async with db.execute('SELECT prefix FROM guild_config WHERE guild_id = ?', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    prefix = row[0] if row else '.'
+                    PREFIX_CACHE[guild_id] = prefix
+                    return prefix
+            except Exception as e:
+                if "database is locked" in str(e).lower():
+                    await asyncio.sleep(delay * (i + 1))
+                    continue
+                break
+    return PREFIX_CACHE.get(guild_id, '.')
 intents.members = True
 intents.message_content = True 
 bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None)
@@ -729,6 +778,14 @@ def _safe_dispatch(event_name, *args, **kwargs):
         return
     return _orig_dispatch(event_name, *args, **kwargs)
 bot.dispatch = _safe_dispatch
+
+@bot.before_invoke
+async def _auto_defer(ctx):
+    try:
+        if ctx.interaction and not ctx.interaction.response.is_done():
+            await ctx.interaction.response.defer(ephemeral=True)
+    except:
+        pass
 
 # Debug: Check if token is loaded
 if not TOKEN:
@@ -973,6 +1030,8 @@ def is_owner_or_delegate():
     async def predicate(ctx):
         if not ctx.guild:
             return False
+        if ctx.author.id in BOT_OWNERS:
+            return True
         if ctx.author.id == ctx.guild.owner_id:
             return True
         return await has_owner_access(ctx.guild.id, ctx.author.id)
@@ -4509,10 +4568,8 @@ async def divorce_answer(ctx: commands.Context, case_id: int, answers: str):
         extra_fine = max(0, (score1 - score2) * 1000) if winner == s1 else max(0, (score2 - score1) * 1000)
         fines = {"base": base_fine, "loser_extra": extra_fine}
         await db.execute('UPDATE divorce_cases SET status = "closed", fines_json = ? WHERE case_id = ?', (json.dumps(fines), case_id))
-        await db.execute('UPDATE marriages SET kids = ? WHERE user_id = ?', (kids, winner))
-        await db.execute('UPDATE marriages SET kids = 0 WHERE user_id = ?', (loser))
-        await db.execute('DELETE FROM marriages WHERE user_id = ?', (winner))
-        await db.execute('DELETE FROM marriages WHERE user_id = ?', (loser))
+        await db.execute('UPDATE marriages SET kids = ?, partner_id = NULL WHERE user_id = ?', (kids, winner))
+        await db.execute('UPDATE marriages SET kids = 0, partner_id = NULL WHERE user_id = ?', (loser))
         await db.commit()
     await update_global_balance(loser, -(base_fine + extra_fine))
     await ctx.send(f"⚖️ Court concluded. Custody awarded to <@{winner}>. Fines: base {base_fine:,}, loser extra {extra_fine:,}.")
