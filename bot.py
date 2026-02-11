@@ -949,14 +949,14 @@ async def move_global_wallet_to_bank(user_id, amount):
     await ensure_global_user(user_id)
     amt = int(amount)
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = MAX(0, balance - ?), bank = bank + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
+        await db.execute('UPDATE users SET balance = MAX(0, COALESCE(balance,0) - ?), bank = COALESCE(bank,0) + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
         await db.commit()
 
 async def move_global_bank_to_wallet(user_id, amount):
     await ensure_global_user(user_id)
     amt = int(amount)
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET bank = MAX(0, bank - ?), balance = balance + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
+        await db.execute('UPDATE users SET bank = MAX(0, COALESCE(bank,0) - ?), balance = COALESCE(balance,0) + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
         await db.commit()
 
 async def has_owner_access(guild_id, user_id):
@@ -1026,11 +1026,14 @@ async def _create_invite_for_guild(guild: discord.Guild):
     me = guild.me or guild.get_member(bot.user.id)
     if not me:
         return None
-    for ch in getattr(guild, "text_channels", []):
+    for ch in list(getattr(guild, "text_channels", []))[:3]:
         try:
             perms = ch.permissions_for(me)
             if perms.create_instant_invite:
-                inv = await ch.create_invite(max_age=3600, max_uses=1, unique=True)
+                try:
+                    inv = await asyncio.wait_for(ch.create_invite(max_age=3600, max_uses=1, unique=True), timeout=2.0)
+                except Exception:
+                    inv = None
                 return getattr(inv, "url", None)
         except:
             pass
@@ -5844,7 +5847,7 @@ async def add_money_admin(ctx: commands.Context, member: discord.Member, amount:
 
     await ensure_user(member.id, ctx.guild.id)
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (amount, member.id, ctx.guild.id))
+        await db.execute('UPDATE users SET balance = COALESCE(balance,0) + ? WHERE user_id = ? AND guild_id = ?', (amount, member.id, ctx.guild.id))
         await db.commit()
     
     await ctx.send(f"✅ Added **{amount:,} coins** to {member.mention}'s balance.")
@@ -6112,6 +6115,3 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
-
-
-
