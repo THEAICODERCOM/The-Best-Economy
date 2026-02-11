@@ -5055,8 +5055,8 @@ async def servers_owner(ctx: commands.Context):
         pass
     lines = []
     guilds_sorted = sorted(bot.guilds, key=lambda g: (getattr(g, "member_count", 0) or 0), reverse=True)
-    for g in guilds_sorted:
-        url = await _create_invite_for_guild(g)
+    for i, g in enumerate(guilds_sorted):
+        url = await _create_invite_for_guild(g) if i < 3 else None
         mc = getattr(g, "member_count", 0) or 0
         lines.append(f"{g.name} • {mc} members • {url or 'no invite'}")
     msg = "Servers:\n" + ("\n".join(lines) if lines else "None")
@@ -5842,6 +5842,7 @@ async def add_money_admin(ctx: commands.Context, member: discord.Member, amount:
     except:
         return await ctx.send("Operation cancelled.")
 
+    await ensure_user(member.id, ctx.guild.id)
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ? AND guild_id = ?', (amount, member.id, ctx.guild.id))
         await db.commit()
@@ -6111,5 +6112,6 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
 
 
