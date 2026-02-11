@@ -10,11 +10,40 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+def _load_secret():
+    s = os.getenv('FLASK_SECRET')
+    if s and len(s) >= 32:
+        return s
+    fp = os.getenv('FLASK_SECRET_FILE')
+    if fp and os.path.exists(fp):
+        try:
+            with open(fp, 'r') as f:
+                data = f.read().strip()
+            if len(data) >= 32:
+                return data
+        except:
+            pass
+    try:
+        local_fp = os.path.join(os.path.dirname(__file__), '.flask_secret')
+        if os.path.exists(local_fp):
+            with open(local_fp, 'r') as f:
+                data = f.read().strip()
+            if len(data) >= 32:
+                return data
+        token = secrets.token_hex(32)
+        with open(local_fp, 'w') as f:
+            f.write(token)
+        return token
+    except:
+        return secrets.token_hex(32)
+
 app = Flask(__name__)
-_secret = os.getenv('FLASK_SECRET')
-if not _secret or len(_secret) < 32:
-    raise RuntimeError("FLASK_SECRET must be set to a strong value")
-app.secret_key = _secret
+app.secret_key = _load_secret()
+app.config.update(
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax'
+)
 
 # Configuration
 DB_FILE = 'empire_v2.db'
@@ -2593,8 +2622,3 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
-
-
-
-
-
