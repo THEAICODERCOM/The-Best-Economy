@@ -783,7 +783,7 @@ bot.dispatch = _safe_dispatch
 async def _auto_defer(ctx):
     try:
         if ctx.interaction and not ctx.interaction.response.is_done():
-            await ctx.interaction.response.defer(ephemeral=True)
+            await ctx.interaction.response.defer(ephemeral=False)
     except:
         pass
 
@@ -5175,9 +5175,9 @@ async def servers_owner(ctx: commands.Context):
     deferred = False
     try:
         if ctx.interaction and not ctx.interaction.response.is_done():
-            await ctx.interaction.response.defer(ephemeral=True)
+            await ctx.interaction.response.defer(ephemeral=False)
         if ctx.interaction:
-            await ctx.followup.send("Building servers list…", ephemeral=True)
+            await ctx.followup.send("Building servers list…")
             deferred = True
     except:
         pass
@@ -5208,7 +5208,7 @@ async def servers_owner(ctx: commands.Context):
         await ctx.author.send(msg)
         try:
             if deferred:
-                await ctx.followup.send("Sent you a DM with server list.", ephemeral=True)
+                await ctx.followup.send("Sent you a DM with server list.")
             else:
                 await ctx.send("Sent you a DM with server list.")
         except:
@@ -5224,7 +5224,7 @@ async def servers_owner(ctx: commands.Context):
             if ctx.interaction:
                 for part in chunks:
                     try:
-                        await ctx.followup.send(part, ephemeral=True)
+                        await ctx.followup.send(part)
                     except:
                         pass
             else:
@@ -6256,4 +6256,3 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
-
