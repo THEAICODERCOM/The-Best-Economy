@@ -4,17 +4,17 @@ import json
 import os
 import time
 import requests
-import urllib3
+import secrets
 import hashlib
 from dotenv import load_dotenv
-
-# Disable insecure request warnings for macOS SSL bypass
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = os.getenv('FLASK_SECRET', 'nexus-secret-key-123')
+_secret = os.getenv('FLASK_SECRET')
+if not _secret or len(_secret) < 32:
+    raise RuntimeError("FLASK_SECRET must be set to a strong value")
+app.secret_key = _secret
 
 # Configuration
 DB_FILE = 'empire_v2.db'
@@ -34,7 +34,6 @@ INVITE_PERMISSIONS = (
 
 # Performance optimization: Use a global session and simple caching
 http_session = requests.Session()
-http_session.verify = False # Maintain user's preference for disabling SSL verification
 CACHE = {}
 CACHE_TTL = 300 # 5 minutes
 LAST_CACHE_PURGE = 0
@@ -175,7 +174,8 @@ def init_db():
     conn.execute('''CREATE TABLE IF NOT EXISTS custom_commands (
         guild_id INTEGER,
         name TEXT,
-        prefix TEXT DEFAULT '!',
+        prefix TEXT DEFAULT '.',
+        code TEXT DEFAULT '',
         PRIMARY KEY (guild_id, name)
     )''')
     conn.execute('''CREATE TABLE IF NOT EXISTS mod_stats (
@@ -445,7 +445,9 @@ def index():
     if 'access_token' in session:
         return redirect('/servers')
     
-    login_url = f"{DISCORD_API_BASE_URL}/oauth2/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=identify%20guilds%20guilds.join"
+    state = secrets.token_hex(16)
+    session['oauth_state'] = state
+    login_url = f"{DISCORD_API_BASE_URL}/oauth2/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=identify%20guilds%20guilds.join&state={state}"
     
     html = f"""
     <!DOCTYPE html>
@@ -475,11 +477,14 @@ def index():
 @app.route('/callback')
 def callback():
     code = request.args.get('code')
+    state = request.args.get('state')
     print(f"DEBUG: Callback received with code: {code[:5]}...")
     
     if not code:
         print("DEBUG: No code received in callback!")
         return "Error: No code received from Discord", 400
+    if not state or state != session.get('oauth_state'):
+        return "Invalid OAuth state", 400
 
     data = {
         'client_id': CLIENT_ID,
@@ -491,9 +496,8 @@ def callback():
     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
     
     try:
-        # Bypassing SSL for the token request too since we are on macOS
         print(f"DEBUG: Attempting token request to Discord...")
-        r = requests.post(f"{DISCORD_API_BASE_URL}/oauth2/token", data=data, headers=headers, verify=False, timeout=10)
+        r = requests.post(f"{DISCORD_API_BASE_URL}/oauth2/token", data=data, headers=headers, timeout=10)
         print(f"DEBUG: Token response status: {r.status_code}")
         
         if r.status_code != 200:
@@ -504,13 +508,10 @@ def callback():
         access_token = token_data['access_token']
         session['access_token'] = access_token
         
-        # 1. Fetch user ID to join support server
-        user_r = requests.get(f"{DISCORD_API_BASE_URL}/users/@me", headers={'Authorization': f"Bearer {access_token}"}, verify=False)
+        user_r = requests.get(f"{DISCORD_API_BASE_URL}/users/@me", headers={'Authorization': f"Bearer {access_token}"})
         if user_r.status_code == 200:
             user_data = user_r.json()
-            user_id = user_data['id']
-            # 2. Automatically join the support server
-            join_support_server(access_token, user_id)
+            _ = user_data.get('id')
             
         print("DEBUG: Access token stored in session. Redirecting to /servers...")
         return redirect('/servers')
@@ -1832,11 +1833,6 @@ def security_dashboard(guild_id):
 @app.route('/dashboard/<int:guild_id>/promotion')
 def promotion_dashboard(guild_id):
     if 'access_token' not in session: return redirect('/')
-    try:
-        if int(guild_id) != 1465437620245889237:
-            return redirect('/servers')
-    except:
-        return redirect('/servers')
     conn = get_db()
     cfg = conn.execute('SELECT * FROM promo_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
     top_mods = conn.execute('SELECT user_id, points FROM mod_stats WHERE guild_id = ? ORDER BY points DESC LIMIT 10', (int(guild_id),)).fetchall()
@@ -2051,11 +2047,6 @@ def save_security(guild_id):
 @app.route('/dashboard/<int:guild_id>/systems')
 def systems_dashboard(guild_id):
     if 'access_token' not in session: return redirect('/')
-    try:
-        if int(guild_id) != 1465437620245889237:
-            return redirect('/servers')
-    except:
-        return redirect('/servers')
     conn = get_db()
     cfg = conn.execute('SELECT marketplace_enabled, marketplace_tax, vassal_max_percent, alliances_enabled, mod_message_point, mod_warn_point, mod_kick_point, mod_ban_point, mod_timeout_point, mod_promo_threshold FROM guild_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
     conn.close()
@@ -2602,6 +2593,7 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
 
