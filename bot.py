@@ -970,51 +970,106 @@ async def _clear_guild_commands_once():
     except:
         pass
 async def ensure_user(user_id, guild_id):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('INSERT OR IGNORE INTO users (user_id, guild_id) VALUES (?, ?)', (user_id, guild_id))
-        await db.commit()
+    tries = 4
+    delay = 0.05
+    for i in range(tries):
+        try:
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute('PRAGMA busy_timeout=2000')
+                await db.execute('INSERT OR IGNORE INTO users (user_id, guild_id) VALUES (?, ?)', (user_id, guild_id))
+                await db.commit()
+            return
+        except Exception as e:
+            if "database is locked" in str(e).lower():
+                await asyncio.sleep(delay * (i + 1))
+                continue
+            raise
 
 async def ensure_global_user(user_id):
     await ensure_user(user_id, 0)
 
 async def get_global_money(user_id):
     await ensure_global_user(user_id)
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute('SELECT user_id, guild_id, balance, bank, bank_plan, last_work, last_crime, last_rob FROM users WHERE user_id = ? AND guild_id = 0', (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                return row
-        async with db.execute('SELECT COALESCE(SUM(balance),0), COALESCE(SUM(bank),0) FROM users WHERE user_id = ?', (user_id,)) as cursor:
-            agg = await cursor.fetchone()
-        balance_sum = int((agg[0] or 0))
-        bank_sum = int((agg[1] or 0))
-        await db.execute('INSERT OR REPLACE INTO users (user_id, guild_id, balance, bank, bank_plan) VALUES (?, 0, ?, ?, ?)', (user_id, balance_sum, bank_sum, 'standard'))
-        await db.commit()
-    async with aiosqlite.connect(DB_FILE) as db2:
-        db2.row_factory = aiosqlite.Row
-        async with db2.execute('SELECT user_id, guild_id, balance, bank, bank_plan, last_work, last_crime, last_rob FROM users WHERE user_id = ? AND guild_id = 0', (user_id,)) as cursor2:
-            return await cursor2.fetchone()
+    tries = 4
+    delay = 0.05
+    for i in range(tries):
+        try:
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute('PRAGMA busy_timeout=2000')
+                db.row_factory = aiosqlite.Row
+                async with db.execute('SELECT user_id, guild_id, balance, bank, bank_plan, last_work, last_crime, last_rob FROM users WHERE user_id = ? AND guild_id = 0', (user_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        return row
+                async with db.execute('SELECT COALESCE(SUM(balance),0), COALESCE(SUM(bank),0) FROM users WHERE user_id = ?', (user_id,)) as cursor:
+                    agg = await cursor.fetchone()
+                balance_sum = int((agg[0] or 0))
+                bank_sum = int((agg[1] or 0))
+                await db.execute('INSERT OR REPLACE INTO users (user_id, guild_id, balance, bank, bank_plan) VALUES (?, 0, ?, ?, ?)', (user_id, balance_sum, bank_sum, 'standard'))
+                await db.commit()
+            async with aiosqlite.connect(DB_FILE) as db2:
+                await db2.execute('PRAGMA busy_timeout=2000')
+                db2.row_factory = aiosqlite.Row
+                async with db2.execute('SELECT user_id, guild_id, balance, bank, bank_plan, last_work, last_crime, last_rob FROM users WHERE user_id = ? AND guild_id = 0', (user_id,)) as cursor2:
+                    return await cursor2.fetchone()
+        except Exception as e:
+            if "database is locked" in str(e).lower():
+                await asyncio.sleep(delay * (i + 1))
+                continue
+            raise
 
 async def update_global_balance(user_id, delta):
     await ensure_global_user(user_id)
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = MAX(0, balance + ?) WHERE user_id = ? AND guild_id = 0', (int(delta), user_id))
-        await db.commit()
+    tries = 4
+    delay = 0.05
+    for i in range(tries):
+        try:
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute('PRAGMA busy_timeout=2000')
+                await db.execute('UPDATE users SET balance = MAX(0, balance + ?) WHERE user_id = ? AND guild_id = 0', (int(delta), user_id))
+                await db.commit()
+            return
+        except Exception as e:
+            if "database is locked" in str(e).lower():
+                await asyncio.sleep(delay * (i + 1))
+                continue
+            raise
 
 async def move_global_wallet_to_bank(user_id, amount):
     await ensure_global_user(user_id)
     amt = int(amount)
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET balance = MAX(0, COALESCE(balance,0) - ?), bank = COALESCE(bank,0) + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
-        await db.commit()
+    tries = 4
+    delay = 0.05
+    for i in range(tries):
+        try:
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute('PRAGMA busy_timeout=2000')
+                await db.execute('UPDATE users SET balance = MAX(0, COALESCE(balance,0) - ?), bank = COALESCE(bank,0) + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
+                await db.commit()
+            return
+        except Exception as e:
+            if "database is locked" in str(e).lower():
+                await asyncio.sleep(delay * (i + 1))
+                continue
+            raise
 
 async def move_global_bank_to_wallet(user_id, amount):
     await ensure_global_user(user_id)
     amt = int(amount)
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET bank = MAX(0, COALESCE(bank,0) - ?), balance = COALESCE(balance,0) + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
-        await db.commit()
+    tries = 4
+    delay = 0.05
+    for i in range(tries):
+        try:
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute('PRAGMA busy_timeout=2000')
+                await db.execute('UPDATE users SET bank = MAX(0, COALESCE(bank,0) - ?), balance = COALESCE(balance,0) + ? WHERE user_id = ? AND guild_id = 0', (amt, amt, user_id))
+                await db.commit()
+            return
+        except Exception as e:
+            if "database is locked" in str(e).lower():
+                await asyncio.sleep(delay * (i + 1))
+                continue
+            raise
 
 async def has_owner_access(guild_id, user_id):
     async with aiosqlite.connect(DB_FILE) as db:
@@ -1099,43 +1154,59 @@ async def _create_invite_for_guild(guild: discord.Guild):
     return None
 async def add_xp(user_id, guild_id, amount):
     await ensure_user(user_id, guild_id)
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('UPDATE users SET xp = xp + ? WHERE user_id = ? AND guild_id = ?', (amount, user_id, guild_id))
-        await db.commit()
-        
-        # Check for level up
-        async with db.execute('SELECT xp, level FROM users WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                current_xp, current_level = row
-                next_level_xp = current_level * 100
-                if current_xp >= next_level_xp:
-                    new_level = current_level + 1
-                    await db.execute('UPDATE users SET level = ?, xp = xp - ? WHERE user_id = ? AND guild_id = ?', 
-                                    (new_level, next_level_xp, user_id, guild_id))
-                    await db.commit()
-                    return True, new_level
+    tries = 4
+    delay = 0.05
+    for i in range(tries):
+        try:
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute('PRAGMA busy_timeout=2000')
+                await db.execute('UPDATE users SET xp = xp + ? WHERE user_id = ? AND guild_id = ?', (amount, user_id, guild_id))
+                await db.commit()
+                async with db.execute('SELECT xp, level FROM users WHERE user_id = ? AND guild_id = ?', (user_id, guild_id)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        current_xp, current_level = row
+                        next_level_xp = current_level * 100
+                        if current_xp >= next_level_xp:
+                            new_level = current_level + 1
+                            await db.execute('UPDATE users SET level = ?, xp = xp - ? WHERE user_id = ? AND guild_id = ?', (new_level, next_level_xp, user_id, guild_id))
+                            await db.commit()
+                            return True, new_level
+            break
+        except Exception as e:
+            if "database is locked" in str(e).lower():
+                await asyncio.sleep(delay * (i + 1))
+                continue
+            raise
     return False, None
 
 async def get_user_data(user_id, guild_id):
     await ensure_user(user_id, guild_id)
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = aiosqlite.Row
-        # Get last_vote from global_votes table (preferred), fallback to user-specific last_vote
-        # Use CASE to properly compare and select the maximum timestamp
-        async with db.execute('''
-            SELECT u.*, 
-                   CASE 
-                       WHEN COALESCE(gv.last_vote, 0) > COALESCE(u.last_vote, 0) 
-                       THEN gv.last_vote 
-                       ELSE COALESCE(u.last_vote, 0) 
-                   END as last_vote
-            FROM users u
-            LEFT JOIN global_votes gv ON u.user_id = gv.user_id
-            WHERE u.user_id = ? AND u.guild_id = ?
-        ''', (user_id, guild_id)) as cursor:
-            row = await cursor.fetchone()
-            return row
+    tries = 4
+    delay = 0.05
+    for i in range(tries):
+        try:
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute('PRAGMA busy_timeout=2000')
+                db.row_factory = aiosqlite.Row
+                async with db.execute('''
+                    SELECT u.*, 
+                           CASE 
+                               WHEN COALESCE(gv.last_vote, 0) > COALESCE(u.last_vote, 0) 
+                               THEN gv.last_vote 
+                               ELSE COALESCE(u.last_vote, 0) 
+                           END as last_vote
+                    FROM users u
+                    LEFT JOIN global_votes gv ON u.user_id = gv.user_id
+                    WHERE u.user_id = ? AND u.guild_id = ?
+                ''', (user_id, guild_id)) as cursor:
+                    row = await cursor.fetchone()
+                    return row
+        except Exception as e:
+            if "database is locked" in str(e).lower():
+                await asyncio.sleep(delay * (i + 1))
+                continue
+            raise
 
 # --- MODERATION HELPERS ---
 
@@ -5105,6 +5176,8 @@ async def servers_owner(ctx: commands.Context):
     try:
         if ctx.interaction and not ctx.interaction.response.is_done():
             await ctx.interaction.response.defer(ephemeral=True)
+        if ctx.interaction:
+            await ctx.followup.send("Building servers list…", ephemeral=True)
             deferred = True
     except:
         pass
@@ -5115,8 +5188,19 @@ async def servers_owner(ctx: commands.Context):
         pass
     lines = []
     guilds_sorted = sorted(bot.guilds, key=lambda g: (getattr(g, "member_count", 0) or 0), reverse=True)
+    top3 = guilds_sorted[:3]
+    async def _with_timeout(g):
+        try:
+            return await asyncio.wait_for(_create_invite_for_guild(g), timeout=1.5)
+        except:
+            return None
+    invites = []
+    try:
+        invites = await asyncio.gather(*(_with_timeout(g) for g in top3))
+    except:
+        invites = [None, None, None]
     for i, g in enumerate(guilds_sorted):
-        url = await _create_invite_for_guild(g) if i < 3 else None
+        url = invites[i] if i < len(invites) else None
         mc = getattr(g, "member_count", 0) or 0
         lines.append(f"{g.name} • {mc} members • {url or 'no invite'}")
     msg = "Servers:\n" + ("\n".join(lines) if lines else "None")
@@ -6172,3 +6256,4 @@ async def autoaddrole(ctx: commands.Context, role: discord.Role, mass_add: bool 
     await ctx.send(f"✅ Auto role set to {role.mention}.{' Assigned to ' + str(assigned) + ' members.' if mass_add else ''}")
 if __name__ == '__main__':
     bot.run(TOKEN)
+
