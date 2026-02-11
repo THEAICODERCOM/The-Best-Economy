@@ -1772,11 +1772,6 @@ def logging_dashboard(guild_id):
 @app.route('/dashboard/<int:guild_id>/security')
 def security_dashboard(guild_id):
     if 'access_token' not in session: return redirect('/')
-    try:
-        if int(guild_id) != 1465437620245889237:
-            return redirect('/servers')
-    except:
-        return redirect('/servers')
     conn = get_db()
     cfg = conn.execute('SELECT raid_mode, anti_phish_enabled FROM guild_config WHERE guild_id = ?', (int(guild_id),)).fetchone()
     conn.close()
@@ -2607,5 +2602,6 @@ def topgg_webhook():
 if __name__ == '__main__':
     # Bind to 0.0.0.0 so it's accessible externally on your remote server
     app.run(host='0.0.0.0', port=5001)
+
 
 
